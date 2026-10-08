@@ -52,7 +52,8 @@ If a design question is unresolved, stop and ask (see protocol). Final answer: w
   other: `You are a focused subagent with one responsibility, stated in your assignment. Stay within it. Final answer: findings or results with evidence, and anything unresolved.`
 };
 
-export const PROTOCOL = `Coordination protocol (print each on its own line, exactly this format, when needed):
+export const PROTOCOL = `If the project root contains AGENTS.md, read it first and follow its conventions and ownership rules.
+Coordination protocol (print each on its own line, exactly this format, when needed):
 HARBOR_REQUEST_HELP: {"reason":"...","proposedRole":"planner|implementer|reviewer|other","instructions":"<single responsibility>","blocked":true|false}
 HARBOR_PEER: {"to":"<sibling agent title or id>","text":"<short message>"}
 You can talk normally with the user and siblings. You must NEVER spawn agents yourself, including through native CLI subagent/Task tools or plugins; use HARBOR_REQUEST_HELP instead.`;
