@@ -16,6 +16,8 @@ Sibling agents communicate directly to coordinate dependencies, shared files, an
 
 ## Design documents
 
+Harbor is intended to install and launch like a regular Windows PC app, with a Start menu entry, taskbar pinning, standard window controls, and normal uninstall support. Its visual identity uses an anchor; see the [app icon](design/harbor-icon.png).
+
 - [Product direction](docs/product-direction.md): goals, scope, and core concepts.
 - [Interface design](docs/interface-design.md): project navigation, conversations, and settings.
 - [Background routing](docs/background-routing.md): CLI coordination, subscription usage, effort, and fallback policies.

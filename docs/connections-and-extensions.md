@@ -91,6 +91,14 @@ Do not claim that Harbor changed a native plugin's enabled state when it only ex
 - Unsupported or unknown extension capabilities remain visible and accurately described.
 - Configuration is optional for ordinary work and available for advanced control.
 
+## Focused adapter rollout
+
+Start implementation with one or two dedicated CLI adapters and verify their complete work lifecycle before broadening support: discovery and sign-in checks, launch, streamed output, permissions, cancellation, session resume or checkpoint handoff, workspace isolation, and recovery after failures. The first release still targets multiple CLIs; initial validation can proceed one adapter at a time. The initial pair is Claude Code and Codex. Confirm each required capability against the supported version rather than assuming it exists.
+
+Test cancellation and recovery against surviving processes and unfinished changes, not only successful sessions. Confirm the managed-agent and workspace-ownership constraints for each supported version. Report unsupported capabilities explicitly.
+
+Additional CLIs may use limited terminal integrations while their richer behavior is unverified. Label their limitations and exclude them from assignments that require unsupported permissions, recovery, isolation, or agent controls. A detected executable does not establish full compatibility.
+
 ## Open design questions
 
 - Which adapters can reliably report sign-in status without launching interactive sessions?

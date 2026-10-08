@@ -14,6 +14,8 @@ Automatic routing is the main product capability, but it should not become the m
 
 ## Product priorities
 
+Harbor should install and behave like any other Windows PC app. Provide a normal installer, a Start menu entry, a pinnable taskbar icon, an optional desktop shortcut, and uninstall support through Windows Settings. Launch Harbor directly into its own desktop window, with standard minimize, maximize, restore, resize, and close behavior. Ordinary use should not require opening a terminal or starting a local server manually. Restore the user's projects and workspace on relaunch. Packaging and installation remain implementation requirements at this design stage.
+
 1. Organize everything by project.
 2. Provide a familiar coding assistant conversation interface, drawing on the general interaction patterns of Codex and Claude apps.
 3. Coordinate multiple AI CLIs from the first version.
@@ -101,14 +103,55 @@ Global defaults apply unless a project overrides them. Optional conversation ove
 
 ## Design scope
 
+Functional priorities also include a direct single-worker path for clear small tasks, durable recovery without duplicate actions, verification tied to the exact version tested, coordinated handling of changed instructions, routing that preserves useful session continuity, and user-controlled queues with capacity reserved for interactive responses. These extend the existing coordinator and focused-subagent model; they do not require every task to pass through every agent role.
+
+Also provide task-scoped rollback that preserves unrelated edits and a focused implementation rollout that proves the full lifecycle of one or two dedicated adapters before expanding compatibility.
+
+The interface supports these behaviors through clear task status, conversation-scoped agent groups, a primary result-review action, side-by-side workspace panels, clear composer recipients, and usable navigation in narrow windows. See [Interface design](interface-design.md) for the six interaction requirements.
+
 The initial design covers a local desktop app, project navigation, conversations, CLI connections, background routing, multi-CLI coordination, allowance-aware effort, and optional API fallback.
 
 Automatic connection discovery and native skills and plugins are part of the initial design. Shared web workspaces, deployment, and GitHub publishing are later stages. These documents do not authorize or describe completed implementation.
 
-## Open design questions
+## Design decisions
 
-- Which CLIs should receive dedicated adapters first?
-- Should project conversations be grouped into active and archived lists, or remain in one history?
-- Which activities warrant a visible plan in the conversation?
-- How should users compare subscription allowance when providers expose different units?
-- What default API spending policy should be offered during onboarding?
+### First dedicated adapters
+
+Claude Code and Codex receive the first dedicated adapters. They are the two CLIs the product already targets for native skills and plugins, so one pair serves both the multi-CLI goal and extension support. Every other CLI starts on the baseline terminal adapter with its limitations labeled. Each adapter must still pass the lifecycle verification in [Connections and extensions](connections-and-extensions.md); a capability that fails verification for a given version is reported unsupported rather than assumed.
+
+### Active and archived conversations
+
+A project keeps one history, and each conversation is either active or archived.
+
+- The sidebar shows active conversations only, with running and input-needed ones first.
+- Archiving is manual, with a suggestion after a long period of inactivity. Nothing is archived automatically.
+- A conversation with running work, pending approvals, or queued tasks cannot be archived.
+- Archived conversations stay searchable in the project history view, keep their agents, reports, and linked sessions, and can be restored.
+- Archiving never deletes files or history.
+
+### When a plan appears in the conversation
+
+Show a concise plan only when it helps the user decide or follow along:
+
+- The work needs two or more assignments or has dependencies between them.
+- It touches a scope, cost, or risk the user should confirm (large changes, destructive actions, API spending).
+- The user asks for a plan.
+
+Questions and clear single-worker tasks get no plan, only a short acknowledgement. A plan is one collapsed line with expandable steps. It stays out of the way of the result, and provider and budget details remain in execution details.
+
+### Comparing allowance across providers
+
+Harbor does not convert providers' units into one number. Each provider shows its own readings in native units, with window, reset time, freshness, and a reported, estimated, or unknown label. For a quick glance each provider also gets a plain-language level: plenty, limited, low, exhausted, or unknown. A level is derived per provider from its own signals and never compared across providers.
+
+Cross-provider comparison happens in routing, which asks whether each provider can support a given task under its own limits. The Usage area shows levels first and the native readings on expansion.
+
+### Default API spending policy
+
+API use is off by default and no key is needed to start. There is no onboarding step for it. API fallback is configured under Settings when the user adds a key.
+
+- Once a key is added, the default mode is **ask before use**. Each approval states the reason and the estimated cost range, if known.
+- **Allowed within limits** is available only after the user sets a per-task and a per-period limit. Harbor suggests no dollar amounts; the user chooses them.
+- A limit is enforced as a hard stop. Estimates that can't be bounded fall back to asking.
+- Spending is shown in the Usage area, and the user can disable fallback at any time.
+
+For the routing setting, see [Background routing](background-routing.md#api-fallback).

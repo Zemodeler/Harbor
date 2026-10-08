@@ -9,6 +9,7 @@ function createWindow(): void {
   win = new BrowserWindow({
     width: 1280, height: 820, minWidth: 420, minHeight: 480,
     title: 'Harbor',
+    icon: app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico'),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: false
@@ -19,6 +20,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
   const service = createHarborService({
     dataDir: join(app.getPath('appData'), 'Harbor'),
     pickFolder: async () => {

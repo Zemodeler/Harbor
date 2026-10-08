@@ -46,6 +46,12 @@ This restriction applies to implementation work, not to conversation. All subage
 
 A planner does not implement its plan. An implementer does not become a reviewer or integrator halfway through its assignment. Narrow execution checks may accompany implementation when explicitly included in its scope; independent verification remains a separate role.
 
+## Small-task fast path
+
+A clear question or small, fully specified edit goes directly from the main agent to one suitable worker. Planning, independent review, and integration are added only when complexity, uncertainty, or the consequences of an error justify them. Required verification still applies; narrow execution checks can be included in the implementer's assignment.
+
+Reuse an appropriate worker for related follow-ups when its responsibility, project context, and workspace remain compatible. Record each follow-up as an assignment revision or a new bounded assignment. Reuse does not permit role changes or scope expansion. The main agent remains a coordinator and delegates substantive work even on this fast path.
+
 ## Assignment contract
 
 Every assignment records:
@@ -82,6 +88,12 @@ An in-scope instruction can proceed immediately. Instructions that affect anothe
 
 Changing an assignment increments its revision. Reports identify the revision they fulfilled, so a result from an older specification cannot be mistaken for completion of the updated request.
 
+### Instructions changed during execution
+
+Record a new instruction before dispatching dependent work. A clarification that preserves the current specification and shared contracts can continue immediately. A change to acceptance criteria, a shared interface, ownership, or required inputs pauses the affected execution and dependent assignments at a safe boundary; unrelated in-scope work can continue.
+
+The main agent coordinates the hold and delegates substantive replanning when needed. Publish the revised assignment and any changed contracts, identify outputs that need reassessment, and obtain acknowledgement from affected workers before resuming dependent work. Notification alone is not acknowledgement. If an adapter cannot interrupt safely, hold dependent work until the current execution has stopped and its output has been reconciled. Preserve the original instruction and revision history.
+
 ## Reports
 
 Direct sibling messages complement reports to the main agent. Agents may agree on execution order or exchange outputs within their existing assignments. They cannot use peer messages to create agents, grant themselves a new role, or silently change the specification.
@@ -92,11 +104,31 @@ A report includes the assignment and revision, status, work completed, outputs o
 
 The main agent uses these reports to update progress and communicate outcomes. It does not present an unverified completion report as independently checked. Necessary verification is delegated to a reviewer or tester.
 
+### Verification applies to a specific version
+
+Each review or testing report records the assignment revision, exact workspace snapshot or commit tested, relevant dependency versions, checks performed, and their results. A mutable branch name alone is insufficient; uncommitted changes require a snapshot or content fingerprint of the tested inputs.
+
+Later edits mark affected checks as needing another run. Unrelated checks may remain valid when their recorded inputs are unchanged. Integration requires verification of the resulting combined version where necessary. The main agent must not report current changes as verified using evidence from an older version; a reviewer or tester assesses uncertain impact and reruns the necessary checks.
+
 ## Assignment lifecycle
 
 Assignments move through queued, running, blocked, paused, ready for verification, complete, failed, or cancelled states as appropriate. A report alone does not complete dependent work if required checks or integration are outstanding.
 
 When a CLI fails or exhausts allowance, the main agent can reassign the same bounded responsibility using the assignment record and latest report. Preserve history and avoid duplicate execution. Stopping an agent must end or confirm the status of its underlying activity before another agent takes its writable workspace.
+
+## Durable recovery
+
+Persist assignment revisions and states, dependency and ownership records, delivered instructions and acknowledgements, reports, pending user decisions, linked CLI sessions, and references to workspace snapshots. Checkpoint at meaningful milestones and before handoffs or recoverable suspension. Save enough information to distinguish completed work from unfinished work without relying on a model's conversation memory.
+
+After an app crash, restart, or CLI failure, reconcile the saved record with live processes and workspace contents before resuming or reassigning work. Confirm that an earlier writer has stopped before releasing its ownership. Preserve existing changes and reports; resume unfinished authorized work from its latest valid checkpoint using native session resume when supported or a structured handoff otherwise.
+
+Track action identifiers and outcomes for operations that could have external effects. If an operation's outcome is unknown, inspect it before retrying and request input when it cannot be established safely. Never replay completed actions merely because a response was lost. Explicitly paused or cancelled work remains stopped, and pending approvals remain pending after recovery.
+
+## Task-scoped rollback
+
+Record each task's baseline and resulting edits, including added, removed, and uncommitted files, using snapshots or patches. Ownership and integration records identify which task produced each change. A rollback reverses one task's recorded changes while preserving pre-existing user edits and unrelated task changes; it must not reset the whole workspace to an earlier commit.
+
+Before rollback, stop affected writers and assess later changes and dependent tasks. Where edits overlap, a designated integrator prepares a selective reversal and reports unresolved conflicts. Show a reviewable rollback preview before applying a reversal that could discard work. Preserve a recovery snapshot and invalidate affected verification evidence afterward. External actions such as deployments or sent messages require their own recovery process and must not be presented as undone by a file rollback.
 
 ## Example: add project switching
 
@@ -127,6 +159,11 @@ All feature work is performed by subagents. CLI, model, and effort selection are
 - CLI, model, and effort are selected automatically for each assignment.
 - Siblings communicate directly within the project and coordinate shared files without competing writes.
 - Material peer agreements and blockers are visible to the main agent without requiring it to relay every message.
+- Clear small requests reach one suitable worker without mandatory planning or extra agent stages.
+- Recovery reconciles running processes and saved changes before resuming unfinished work, without replaying completed actions.
+- Verification evidence identifies the exact version checked and is reassessed when affected inputs change.
+- Changed instructions hold affected dependent work until revised assignments and contracts are acknowledged.
+- A task's changes can be selectively reversed without discarding unrelated work; conflicts and dependent work are assessed before rollback.
 
 ## Current stage
 
