@@ -1,0 +1,30 @@
+appId: com.harbor.desktop
+productName: Harbor
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asar: true
+extraResources:
+  - from: build/icon.ico
+    to: icon.ico
+win:
+  icon: build/icon.ico
+  executableName: Harbor
+  target:
+    - target: nsis
+      arch: [x64]
+  signAndEditExecutable: true
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createStartMenuShortcut: true
+  createDesktopShortcut: false
+  shortcutName: Harbor
+  uninstallDisplayName: Harbor
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  deleteAppDataOnUninstall: false
