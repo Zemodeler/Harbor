@@ -36,7 +36,7 @@ describe('claude adapter', () => {
 describe('codex adapter', () => {
   it('builds exec args with stdin prompt and effort', () => {
     const a = codexArgs({ ...base, model: 'default', effort: 'high', permission: 'read-only' });
-    expect(a).toEqual(['exec', '--json', '--skip-git-repo-check', '-s', 'read-only', '-c', 'model_reasoning_effort=high', '-']);
+    expect(a).toEqual(['exec', '--json', '--skip-git-repo-check', '-c', 'sandbox_mode="read-only"', '-c', 'model_reasoning_effort=high', '-']);
   });
   it('resume puts session id after exec', () => {
     expect(codexArgs({ ...base, resumeId: 't1' }).slice(0, 3)).toEqual(['exec', 'resume', 't1']);

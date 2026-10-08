@@ -4,14 +4,14 @@ import { streamLines } from './stream';
 
 /**
  * Codex headless adapter (`codex exec --json`, JSONL events on stdout).
- * NOT VERIFIED against a real install in this environment (codex was not installed when written):
- * flags and event shapes come from the public CLI docs. Run `npm run smoke -- codex` to verify.
+ * Verified against codex-cli 0.160.0: run, session id capture and event shapes. `exec resume` rejects `-s`,
+ * so the sandbox is set with `-c sandbox_mode=...` for both modes.
  * Prompt is read from stdin via the `-` argument.
  */
 export function codexArgs(o: RunOptions): string[] {
   const a = ['exec'];
   if (o.resumeId) a.push('resume', o.resumeId);
-  a.push('--json', '--skip-git-repo-check', '-s', o.permission === 'edit' ? 'workspace-write' : 'read-only');
+  a.push('--json', '--skip-git-repo-check', '-c', `sandbox_mode="${o.permission === 'edit' ? 'workspace-write' : 'read-only'}"`);
   if (o.model && o.model !== 'default') a.push('-m', o.model);
   a.push('-c', `model_reasoning_effort=${o.effort}`);
   a.push('-');

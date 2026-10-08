@@ -61,3 +61,8 @@ Behavior the core already provides that the UI should surface or respect:
 
 - UI implementation is on `gpt/ui`. The core scaffold arrived directly in the shared checkout while UI work was underway. Core-owned files were read but not edited. Root package changes add only UI and installer scripts; existing main scripts are preserved.
 - Installer tooling is isolated in `build/package.json`; install it with `npm install --prefix build`. `npm run dist` builds the app then runs unsigned NSIS packaging without publishing.
+
+## Found by the real Codex smoke run (codex-cli 0.160.0)
+- P0: Codex `workspace-write` sandbox cannot write the worktree's git metadata (`<repo>/.git/worktrees/<name>`), so implementers cannot commit themselves (the checkpoint commit by Harbor rescues it). Pass that dir via `-c sandbox_workspace_write.writable_roots=[...]` (needs a writable-dirs field on RunOptions).
+- P1: Reviewer did not receive the implementer's original specification; reviewer then spawned a "recover spec" agent. Include the spec verbatim in the reviewer assignment.
+- P1: Peer messages addressed by agent id ("no unique sibling matches <uuid>") are not delivered; accept ids as well as titles.

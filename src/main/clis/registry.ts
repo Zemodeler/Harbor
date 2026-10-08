@@ -36,6 +36,12 @@ function bundledClaudeDirs(): string[] {
   } catch { return []; }
 }
 
+/** Codex desktop bundles codex.exe under %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\. */
+function bundledCodexDirs(): string[] {
+  const root = join(process.env['LOCALAPPDATA'] ?? '', 'OpenAI', 'Codex', 'bin');
+  try { return readdirSync(root).map((h) => join(root, h)).filter((d) => existsSync(d)); } catch { return []; }
+}
+
 const text = (r: { stdout: string; stderr: string }) => `${r.stdout}\n${r.stderr}`.toLowerCase();
 
 export const CLI_DEFINITIONS: CliDefinition[] = [
@@ -56,7 +62,7 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
   },
   {
     id: 'codex', name: 'Codex', exeNames: ['codex'], envVar: 'HARBOR_CODEX_PATH',
-    extraDirs: () => [join(appData(), 'npm'), join(home(), '.local', 'bin')],
+    extraDirs: () => [join(appData(), 'npm'), join(home(), '.local', 'bin'), ...bundledCodexDirs()],
     versionArgs: ['--version'],
     statusArgs: ['login', 'status'],
     parseStatus: (r) => {
