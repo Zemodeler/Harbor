@@ -25,6 +25,6 @@ export function Sidebar({ state, settings, add, close }: { state: HarborState; s
       {!state.loading && !state.projects.length ? <p className={s.muted}>Your projects will appear here.</p> : null}
       {query && !state.projects.some(p => p.name.toLowerCase().includes(query.toLowerCase())) ? <p className={s.muted}>No matching projects.</p> : null}
     </div>
-    <footer className={s.sidebarFooter}><button onClick={add}>+ Add project</button><button onClick={() => { settings(); close(); }}>Settings</button><small>Local workspace{document.documentElement.dataset.demo ? ' · Demo' : ''}</small></footer>
+    <footer className={s.sidebarFooter}><button onClick={add}>+ Add project</button><button onClick={settings}>Settings</button><small>Local workspace{document.documentElement.dataset.demo ? ' · Demo' : ''}</small></footer>
   </nav>;
 }

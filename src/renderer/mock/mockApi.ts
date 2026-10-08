@@ -70,6 +70,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       try {
         await pause(); if (run.cancelled) return;
         agent.state = 'working'; updateAgent(agent);
+        if (run.cancelled) return;
         const message: Message = { id: id(), conversationId, role: 'assistant', agentId: c.agentId, text: '', time: Date.now(), details: { cli: agent.cli, model: agent.model, effort: agent.effort, reason: 'Demo routing: reuse a ready connection with project context.' } };
         data.messages.push(message); emit({ type: 'message', message });
         const response = c.agentId.startsWith('main-')

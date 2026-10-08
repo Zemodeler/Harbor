@@ -22,7 +22,7 @@ export function Settings({ state }: { state: HarborState }) {
       </> : tab === 'Routing' ? <>
         <h3>Routing defaults</h3><p>Choose how Harbor assigns work to your enabled connections.</p>
         <label className={s.field}>Routing<select disabled={pending} value={state.settings.routing} onChange={e => void action(() => state.updateSettings({ routing: e.target.value as 'auto' | 'manual' }))}><option value="auto">Automatic</option><option value="manual">Manual</option></select></label>
-        {state.settings.routing === 'manual' ? <p className={s.muted}>The current API exposes the mode only. Per-conversation CLI selection needs engine support.</p> : null}
+        {state.settings.routing === 'manual' ? <p className={s.muted}>Use the connection toggles to limit eligible tools. Selecting a tool per conversation is not available yet.</p> : null}
         <label className={s.field}>Optional free resets<select disabled={pending} value={state.settings.allowFreeReset} onChange={e => void action(() => state.updateSettings({ allowFreeReset: e.target.value as 'ask' | 'never' }))}><option value="ask">Ask every time</option><option value="never">Never use</option></select></label>
         <p className={s.muted}>A discretionary reset always requires your explicit approval.</p>
       </> : <>
