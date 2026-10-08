@@ -326,15 +326,20 @@ export class Orchestrator {
     // Workspace: edit roles get an isolated worktree; read-only roles read the project (or the change under review).
     let cwd = project.path;
     let worktreeNote: string | undefined;
+    let depsLinked = false;
     const upstream = a.dependsOn.map((id) => store.getAgent(id)).filter((x): x is AgentRecord => !!x);
     if (EDIT_ROLES.includes(a.role)) {
       if (!a.worktree && (await this.d.git.isRepoWithCommits(project.path))) {
         try {
           const wt = await this.d.git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), a.title, a.id);
           this.setState(a, 'working', { worktree: wt.path, branch: wt.branch, baseCommit: wt.baseCommit });
+          depsLinked = await this.d.git.linkDependencies(project.path, wt.path);
         } catch (e) { return this.failAgent(a, `Could not create a git worktree: ${String((e as Error).message)}`); }
       }
-      if (a.worktree) { cwd = a.worktree; worktreeNote = `You work in an isolated git worktree on branch ${a.branch}. Commit your work to this branch. Do not touch other directories.`; }
+      if (a.worktree) {
+        cwd = a.worktree;
+        worktreeNote = `You work in an isolated git worktree on branch ${a.branch}. Commit your work to this branch. Do not touch other directories.${depsLinked ? ' node_modules is linked from the main checkout: do not run npm install and never delete node_modules.' : ''}`;
+      }
       else worktreeNote = 'This project is not a git repository with commits, so you edit the project directory directly while holding exclusive ownership. Keep changes minimal and scoped.';
     } else {
       const reviewed = upstream.find((u) => u.worktree);
