@@ -1,0 +1,16 @@
+import type { HarborApi } from './api';
+
+/** Request/response methods exposed over IPC (everything on HarborApi except onEvent). */
+export type InvokeMethod = Exclude<keyof HarborApi, 'onEvent'>;
+
+export const INVOKE_METHODS: InvokeMethod[] = [
+  'listClis', 'refreshClis', 'openLogin',
+  'listProjects', 'addProject', 'removeProject',
+  'listConversations', 'newConversation',
+  'listMessages', 'send',
+  'listAgents', 'openAgentConversation', 'stopAgent',
+  'getUsage', 'getSettings', 'setSettings', 'answerPermission'
+];
+
+export const channel = (m: InvokeMethod): string => `harbor:${m}`;
+export const EVENT_CHANNEL = 'harbor:event';
