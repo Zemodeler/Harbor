@@ -79,7 +79,7 @@ export function mainPrompt(projectName: string, agents: AgentRecord[], t: MainTr
   if (t.kind === 'user') parts.push(`New message from the user:\n${t.text}`);
   else if (t.kind === 'reports') {
     parts.push('Subagent reports received (not independently verified unless a reviewer/tester says so):\n' +
-      t.items.map(({ agent: a }) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}, rev=${a.revision})\n${clip(a.report ?? a.error ?? '(no report)', 6000)}`).join('\n\n'));
+      t.items.map(({ agent: a }) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}, rev=${a.revision})\n${clip(a.report ?? a.error ?? '(no report)', 24000)}`).join('\n\n'));
     parts.push('Decide the next step: assign follow-up work (e.g. implementers from a planner spec, reviewers for finished changes), or if all work is finished, write a concise summary for the user that keeps sources and evidence and says what was and was not verified.');
   } else {
     parts.push(`Help request from "${t.from.title}" (id=${t.from.id}, blocked=${t.blocked}):\nreason: ${t.reason}\nproposed role: ${t.proposedRole}\nrequested work: ${t.instructions}\nDecide: assign a sibling (set helpFor to ${t.from.id}), or answer in "reply" if no new agent is warranted.`);

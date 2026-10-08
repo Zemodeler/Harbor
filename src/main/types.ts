@@ -40,6 +40,8 @@ export interface UsageEvent {
   id: Id; time: number; cli: CliId; model: string; projectId: Id; agentId: Id; conversationId?: Id;
   inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs: number; ok: boolean;
   rateLimited?: boolean;
+  /** Account limits the CLI reported during this run (Claude: `rate_limit_event`). Persisted so they survive restarts. */
+  limits?: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }>;
 }
 
 export interface CoordinationEntry {

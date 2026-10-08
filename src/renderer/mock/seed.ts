@@ -19,9 +19,9 @@ export function seed(empty = false) {
   ];
   const agents: Agent[] = projects.map(p => ({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' }));
   if (!empty) agents.push(
-    { id: 'implement', projectId: 'store', parentId: 'main-store', role: 'implementer', title: 'Implement account page', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium', summary: 'Sample preview: profile and address form prepared. Empty address state still needs review.' },
-    { id: 'plan', projectId: 'store', parentId: 'main-store', role: 'planner', title: 'Plan account page', state: 'done', cli: 'codex', model: 'default', effort: 'high', summary: 'Sample specification: profile, address list, and accessible validation.' },
-    { id: 'verify', projectId: 'store', parentId: 'main-store', role: 'reviewer', title: 'Verify account flow', state: 'done', cli: 'codex', model: 'default', effort: 'medium', summary: 'Sample review: profile and address flows reviewed; final empty state pending.' }
+    { id: 'implement', projectId: 'store', parentId: 'main-store', conversationId: 'account', role: 'implementer', title: 'Implement account page', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium', summary: 'Sample preview: profile and address form prepared. Empty address state still needs review.' },
+    { id: 'plan', projectId: 'store', parentId: 'main-store', conversationId: 'account', role: 'planner', title: 'Plan account page', state: 'done', cli: 'codex', model: 'default', effort: 'high', summary: 'Sample specification: profile, address list, and accessible validation.' },
+    { id: 'verify', projectId: 'store', parentId: 'main-store', conversationId: 'account', role: 'reviewer', title: 'Verify account flow', state: 'done', cli: 'codex', model: 'default', effort: 'medium', summary: 'Sample review: profile and address flows reviewed; final empty state pending.' }
   );
   const messages: Message[] = empty ? [] : [
     { id: 'user-intro', conversationId: 'account', role: 'user', time: now - 60000, text: 'Build an account page where customers can update their profile and manage their addresses. Keep it consistent with the storefront.' },

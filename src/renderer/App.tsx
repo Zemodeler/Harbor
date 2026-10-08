@@ -26,9 +26,13 @@ export default function App() {
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
   }, [state.newConversation, dialog, state.permissions.length]);
-  function openProject() { setPath(''); setMenu(false); setDialog('add'); }
   async function add(native: boolean) {
     setPending(true); const added = await state.addProject(native ? undefined : path); setPending(false); if (added) { setDialog(undefined); setView('conversation'); }
+  }
+  // Go straight to the native folder picker; failures show in the error banner.
+  async function openProject() {
+    setMenu(false); setDialog(undefined);
+    if (await state.addProject(undefined)) setView('conversation');
   }
   const permission = state.permissions[0];
   return <div className={s.app}>

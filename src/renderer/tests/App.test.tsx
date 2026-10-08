@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
@@ -13,9 +13,7 @@ describe('Harbor main flows', () => {
   it('opens a project on first run and creates a conversation', async () => {
     window.harbor = createMockApi({ empty: true, delay: 0 }); render(<App/>);
     await userEvent.click(await screen.findByRole('button', { name: 'Open a project' }));
-    await userEvent.type(screen.getByLabelText('Project folder'), 'C:\\Projects\\Example');
-    await userEvent.click(screen.getByRole('button', { name: 'Open project' }));
-    await userEvent.click(await screen.findByRole('button', { name: 'New conversation' }));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'New conversation' }))[0]);
     expect(await screen.findByLabelText('Message Harbor')).toBeInTheDocument();
   });
   it('streams, updates usage, and denies a reset without consuming it', async () => {
@@ -43,12 +41,22 @@ describe('Harbor main flows', () => {
     await userEvent.selectOptions(screen.getByLabelText('Optional free resets'), 'never');
     await waitFor(async () => expect((await window.harbor.getSettings()).allowFreeReset).toBe('never'));
   });
+  it('keeps subagents out of the sidebar and shows them in the main chat', async () => {
+    await ready();
+    const nav = within(screen.getByRole('navigation', { name: 'Projects and conversations' }));
+    expect(nav.queryByText(/Implement account page/)).not.toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Subagents' })).getByRole('button', { name: /Implement account page implementer/ })).toBeInTheDocument();
+    // Same main agent, different chat: its subagents must not leak in.
+    await userEvent.click(nav.getByRole('button', { name: 'Polish the checkout' }));
+    await screen.findByRole('heading', { name: 'Polish the checkout' });
+    expect(screen.queryByRole('region', { name: 'Subagents' })).not.toBeInTheDocument();
+  });
   it('keeps drafts separate and supports project switching and new-chat shortcuts', async () => {
     await ready(); await userEvent.type(screen.getByLabelText('Message Harbor'), 'Storefront draft');
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     await userEvent.type(screen.getByLabelText('Find a project'), 'Internal');
     await userEvent.click(screen.getByRole('button', { name: /Internal tools C:/ }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'New conversation' })).toBeEnabled());
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'New conversation' })[0]).toBeEnabled());
     fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
     expect(await screen.findByLabelText('Message Harbor')).toHaveValue('');
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
@@ -65,3 +73,14 @@ describe('Harbor main flows', () => {
   it('renders a heading followed by prose without a blank line', () => { render(<Markdown text={'### Ready for a first look\nA preview is ready.'}/>); expect(screen.getByRole('heading', { name: 'Ready for a first look' })).toBeInTheDocument(); expect(screen.getByText('A preview is ready.')).toBeInTheDocument(); });
 });
 
+
+describe('Delete conversation', () => {
+  it('removes the conversation from the sidebar after confirming', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await ready();
+    await userEvent.click(screen.getByRole('button', { name: /New conversation/ }));
+    const before = (await screen.findAllByRole('button', { name: /^Delete conversation/ })).length;
+    await userEvent.click(screen.getAllByRole('button', { name: /^Delete conversation/ })[0]);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Delete conversation/ }).length).toBe(before - 1));
+  });
+});

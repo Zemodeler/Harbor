@@ -35,7 +35,8 @@ describe('usage ledger', () => {
     for (let i = 0; i < 3; i++) run('claude');
     expect(ledger.level('claude')).toBe('low');
     t.now += WINDOW_MS + 1; // old events fall out of the window
-    expect(ledger.usedPct('claude')).toBe(0);
+    expect(ledger.windows(['claude'])[0].usedPct).toBe(0); // the 5h window rolled over; the weekly one still remembers the runs
+    expect(ledger.level('claude')).toBe('plenty');
   });
 
   it('rate limit forces exhausted until cooldown passes, and labels it honestly', () => {

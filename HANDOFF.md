@@ -11,12 +11,12 @@
 
 | Area | State | Evidence |
 | --- | --- | --- |
-| Scaffold, `npm run dev/build/test/typecheck/smoke` | works | build + 71 tests + typecheck pass; Electron main process boots and stays up (12 s run, no JS errors) |
+| Scaffold, `npm run dev/build/test/typecheck/smoke` | works | build + 83 tests + typecheck pass; Electron main process boots and stays up (12 s run, no JS errors) |
 | Contract `src/shared/api.ts` + `window.harbor` via typed IPC | works | identical to spec plus one optional field (`CliStatus.authState`, see `src/shared/CHANGELOG.md`); IPC wiring unit-tested for every method, **never exercised from a real renderer** |
 | CLI discovery (claude, codex, gemini) | works | PATH + `%APPDATA%\npm` + `~\.local\bin` + Claude desktop's bundled `claude.exe`; override with `HARBOR_CLAUDE_PATH` etc. Run against the real bundled `claude.exe` 2.1.293 (version + `auth status --json` → signed out). Codex via `codex login status` is parsed from docs (unverified). Gemini has no status command → `unknown` + note |
 | `openLogin` | implemented | opens a visible `cmd /k <cli> login` window (Windows only). **Not clicked/run by me** |
 | Claude adapter | flags verified | all flags accepted by real `claude.exe` 2.1.293 (stdin prompt, stream-json, `--effort`, `--permission-mode`, `--disallowedTools Task Agent`, `--append-system-prompt-file`); stream-json parse verified against the real "Not logged in" result. **No successful model run was possible (no signed-in CLI here)** |
-| Codex adapter | written, **unverified** | `codex exec --json -s <sandbox> -c model_reasoning_effort=... -`; event parsing from public docs. Codex is not installed on this machine |
+| Codex adapter | smoke-tested once (codex-cli 0.160.0) | `codex exec --json -s <sandbox> -c model_reasoning_effort=... -`; bundled Codex is discovered. Findings from that run (sandbox cannot write worktree git metadata, reviewer misses the spec, peer messages by id) are P0/P1 items in `BACKLOG.md`. Real 5h/weekly limits are read from Codex's local logs (`codexLimits.ts`) |
 | `.cmd` shims (npm-installed CLIs) | verified | real `.cmd` with a space in its path: args, stdin, metacharacters, injection guard |
 | Storage | works | JSON file `%APPDATA%\Harbor\state.json`, atomic write, corrupt-file quarantine. (SQLite deliberately skipped: native build on Windows) |
 | Main agent → planner → implementer → reviewer flow | works with fake CLIs | `tests/orchestrator.test.ts`: plan JSON, planner report becomes implementer spec verbatim, worktrees on `harbor/<slug>`, checkpoint commits, main checkout untouched, dependency failure blocks dependents, circular deps broken, cap of 8 tasks per plan, runaway guard of 12 automatic main turns |
@@ -39,8 +39,8 @@
 ## Could not verify (needs a signed-in machine)
 
 1. Any real model run end to end (no CLI here is signed in; `claude.exe` bundled with the Claude desktop app reports logged out).
-2. The Codex adapter and Codex sign-in check (not installed).
-3. `npm run dev` with the real UI and clicks through IPC (the UI branch was not buildable when I last built it).
+2. A full Codex flow after the sandbox/git-metadata fix (see `BACKLOG.md`).
+3. `npm run dev` with the real UI and clicks through IPC (the UI now builds; clicks through a real Electron window are not covered by tests).
 4. `openLogin` window, the folder dialog, and a full self-host run of Harbor on this repo.
 5. Whether Claude's `acceptEdits` + `Bash(git|npm|npx|node *)` allow-list is enough for implementers to finish real tasks.
 
@@ -51,7 +51,7 @@ git worktree add ../RoutingManager-core claude/core     # if you want my worktre
 cd C:\Users\andrei\Documents\RoutingManager-core
 npm install
 node node_modules/electron/install.js      # only if node_modules/electron/dist is missing (install scripts are not auto-run)
-npm test                                   # 71 tests, no network, no real CLIs
+npm test                                   # 83 tests, no network, no real CLIs
 npm run typecheck
 npm run build
 npm run dev                                # Electron app; state in %APPDATA%\Harbor

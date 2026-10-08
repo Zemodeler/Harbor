@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { app, BrowserWindow, dialog } from 'electron';
 import { registerIpc } from './ipc';
+import { readCodexLimits } from './codexLimits';
 import { createHarborService } from './service';
 
 let win: BrowserWindow | undefined;
@@ -23,6 +24,9 @@ app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
   const service = createHarborService({
     dataDir: join(app.getPath('appData'), 'Harbor'),
+    // Codex logs its real 5h/weekly limits locally. Claude's come from the rate_limit_event in its own stream
+    // during Harbor runs (see usage.ts), so they appear after the first Claude run and are estimates before that.
+    ledger: { reported: (cli) => (cli === 'codex' ? readCodexLimits() : []) },
     pickFolder: async () => {
       const r = await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Open project folder' });
       return r.canceled ? undefined : r.filePaths[0];
