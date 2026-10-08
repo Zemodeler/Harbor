@@ -1,36 +1,165 @@
-import { EventEmitter } from 'node:events';
-import type { HarborApi, HarborEvent, Settings } from '../shared/api';
+import { spawn } from 'node:child_process';
+import { existsSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import type { CliId, HarborApi, HarborEvent, Id, Project } from '../shared/api';
+import { ClaudeAdapter } from './adapters/claude';
+import { CodexAdapter } from './adapters/codex';
+import type { CliAdapter } from './adapters/types';
+import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
+import { CLI_DEFINITIONS } from './clis/registry';
+import { EventBus } from './events';
+import { Git } from './git';
+import { Orchestrator, toAgent } from './orchestrator';
+import { newId, Store } from './store';
+import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
 export type HarborService = Omit<HarborApi, 'onEvent'> & {
   onEvent(cb: (e: HarborEvent) => void): () => void;
+  /** Main-process extras (not part of the renderer contract). */
+  readonly orchestrator: Orchestrator;
+  readonly store: Store;
+  whenIdle(timeoutMs?: number): Promise<void>;
+  shutdown(): void;
 };
 
-/** Event bus shared by the service and the IPC layer. */
-export class EventBus {
-  private em = new EventEmitter();
-  emit(e: HarborEvent): void { this.em.emit('event', e); }
-  on(cb: (e: HarborEvent) => void): () => void {
-    this.em.on('event', cb);
-    return () => { this.em.off('event', cb); };
-  }
+export interface ServiceOptions {
+  /** Where state.json and worktrees live. Undefined => in-memory store (tests). */
+  dataDir?: string;
+  /** Folder picker for addProject(); injected so this module never imports electron. */
+  pickFolder?: () => Promise<string | undefined>;
+  /** Replace discovery (tests). */
+  discover?: () => Promise<ResolvedCli[]>;
+  /** Replace adapter construction (tests). */
+  adapterFor?: (cli: CliId, resolved: ResolvedCli | undefined) => CliAdapter | undefined;
+  ledger?: LedgerOptions;
+  git?: Git;
+  maxActivePerProject?: number;
+  /** Override where worktrees are created (tests). */
+  worktreesRoot?: string;
 }
 
-export const DEFAULT_SETTINGS: Settings = { routing: 'auto', cliOverrides: {}, allowFreeReset: 'ask' };
+/** CLIs whose headless flow has been verified against a real install in this repo's history. */
+const VERIFIED = new Set<CliId>(['claude']);
 
-/** Scaffold service: returns empty data. Replaced step by step by the real implementation. */
-export function createStubService(bus = new EventBus()): HarborService {
-  let settings = DEFAULT_SETTINGS;
-  const nope = async (): Promise<never> => { throw new Error('not implemented'); };
+export function createHarborService(opts: ServiceOptions = {}): HarborService {
+  const store = new Store(opts.dataDir);
+  const bus = new EventBus();
+  const ledger = new UsageLedger(store, opts.ledger);
+  const git = opts.git ?? new Git();
+  const worktreesRoot = opts.worktreesRoot ?? join(opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test'), 'worktrees');
+  let clis: ResolvedCli[] = [];
+
+  const defaultAdapter = (id: CliId, r?: ResolvedCli): CliAdapter | undefined => {
+    if (!r?.installed || !r.path) return undefined;
+    if (id === 'claude') return new ClaudeAdapter(r.path);
+    if (id === 'codex') return new CodexAdapter(r.path);
+    return undefined; // gemini and others: detected, but no headless adapter yet
+  };
+  const adapterFor = (id: CliId) => (opts.adapterFor ?? defaultAdapter)(id, clis.find((c) => c.id === id));
+
+  // ---- permissions: every request is an event; nothing is granted without an explicit answer.
+  const pending = new Map<Id, (allow: boolean) => void>();
+  const ask = (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id) =>
+    new Promise<boolean>((resolve) => {
+      const requestId = newId();
+      pending.set(requestId, resolve);
+      bus.emit({ type: 'permission', requestId, kind, prompt, agentId });
+    });
+
+  const freeReset = new FreeResetCoordinator({
+    ledger, store,
+    backlog: () => store.allAgentRecords().filter((a) => a.role !== 'main' && a.state === 'queued').length,
+    ask: (p) => ask('freeReset', p),
+    allow: () => store.getSettings().allowFreeReset
+  });
+
+  const orchestrator = new Orchestrator({
+    store, bus, ledger, git, worktreesRoot, ask, freeReset,
+    getClis: () => clis,
+    adapterFor,
+    enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
+    verified: (c) => VERIFIED.has(c),
+    maxActivePerProject: opts.maxActivePerProject
+  });
+
+  const refresh = async (): Promise<ResolvedCli[]> => {
+    clis = await (opts.discover ?? discoverClis)();
+    for (const c of clis) bus.emit({ type: 'cli', cli: toStatus(c) });
+    return clis;
+  };
+  const ready = refresh().then(() => orchestrator.recover(), () => orchestrator.recover());
+
+  const needProject = (id: Id): Project => {
+    const p = store.getProject(id);
+    if (!p) throw new Error(`Unknown project ${id}`);
+    return p;
+  };
+
   return {
-    listClis: async () => [], refreshClis: async () => [], openLogin: async () => {},
-    listProjects: async () => [], addProject: async () => null, removeProject: async () => {},
-    listConversations: async () => [], newConversation: nope,
-    listMessages: async () => [], send: async () => {},
-    listAgents: async () => [], openAgentConversation: nope, stopAgent: async () => {},
-    getUsage: async () => [],
-    getSettings: async () => settings,
-    setSettings: async (s) => (settings = { ...settings, ...s }),
-    answerPermission: async () => {},
+    orchestrator, store,
+    whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
+    shutdown: () => store.flush(),
+
+    async listClis() { await ready; return clis.map(toStatus); },
+    async refreshClis() { return (await refresh()).map(toStatus); },
+    async openLogin(cliId) {
+      const def = CLI_DEFINITIONS.find((d) => d.id === cliId);
+      const r = clis.find((c) => c.id === cliId);
+      if (!def || !r?.path) throw new Error(`${cliId} is not installed`);
+      if (process.platform !== 'win32') throw new Error('Opening a login terminal is only implemented on Windows');
+      // Visible terminal; Harbor never reads or stores credentials.
+      spawn('cmd.exe', ['/d', '/c', loginCommand(def, r.path)], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+    },
+
+    async listProjects() { return store.listProjects(); },
+    async addProject(path) {
+      const chosen = path ?? (await opts.pickFolder?.());
+      if (!chosen) return null;
+      if (!existsSync(chosen) || !statSync(chosen).isDirectory()) throw new Error(`Not a folder: ${chosen}`);
+      const existing = store.findProjectByPath(chosen);
+      const project = store.upsertProject(existing
+        ? { ...existing, lastOpened: Date.now() }
+        : { id: newId(), name: basename(chosen) || chosen, path: chosen, lastOpened: Date.now() });
+      orchestrator.ensureProject(project);
+      return project;
+    },
+    async removeProject(id) {
+      for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
+      store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.
+    },
+
+    async listConversations(projectId) {
+      const main = store.mainAgent(needProject(projectId).id);
+      return store.listConversations(projectId).filter((c) => c.agentId === main?.id);
+    },
+    async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
+    async listMessages(conversationId) { return store.listMessages(conversationId); },
+    async send(conversationId, text) {
+      await ready;
+      if (!text.trim()) return;
+      await orchestrator.userMessage(conversationId, text);
+    },
+
+    async listAgents(projectId) { return store.listAgentRecords(projectId).map(toAgent); },
+    async openAgentConversation(agentId) {
+      const a = store.getAgent(agentId);
+      if (!a) throw new Error('Unknown agent');
+      if (a.role === 'main') return store.listConversations(a.projectId).find((c) => c.agentId === a.id) ?? orchestrator.newConversation(a.projectId);
+      const c = store.findConversationByAgent(agentId);
+      if (c) return c;
+      return store.addConversation({ id: newId(), projectId: a.projectId, title: `${a.role}: ${a.title}`, updated: Date.now(), agentId });
+    },
+    async stopAgent(agentId) { orchestrator.stop(agentId); },
+
+    async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
+    async getSettings() { return store.getSettings(); },
+    async setSettings(s) { return store.setSettings(s); },
+    async answerPermission(requestId, allow) {
+      const r = pending.get(requestId);
+      if (!r) return;
+      pending.delete(requestId);
+      r(allow);
+    },
     onEvent: (cb) => bus.on(cb)
   };
 }
