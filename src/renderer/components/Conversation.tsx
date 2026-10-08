@@ -11,7 +11,12 @@ export function Conversation({ state, openProject }: { state: HarborState; openP
   const c = state.conversation;
   const agent = state.agents.find(a => a.id === c?.agentId);
   const project = state.projects.find(p => p.id === state.projectId);
-  const busy = !!c && (state.sending.has(c.id) || state.agents.some(a => (a.id === c.agentId || a.parentId === c.agentId) && ['working', 'queued'].includes(a.state)));
+  // Subagents only appear here, in the chat with the main agent.
+  const crew = agent?.role === 'main' ? state.agents.filter(a => a.parentId === agent.id && a.conversationId === c?.id) : [];
+  const live = (a: { state: string }) => ['working', 'queued'].includes(a.state);
+  // The main agent is shared by every conversation of a project and Harbor queues its turns, so its own state must not
+  // lock the composer of other conversations; only this conversation's subagents (or the agent itself, if it is not main) count.
+  const busy = !!c && (state.sending.has(c.id) || state.agents.some(a => live(a) && (agent?.role === 'main' ? a.parentId === c.agentId && a.conversationId === c.id : a.id === c.agentId)));
   const draft = c ? drafts[c.id] || '' : '';
   useEffect(() => { follow.current = true; }, [c?.id]);
   useEffect(() => { if (follow.current && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [state.messages, c?.id]);
@@ -21,6 +26,7 @@ export function Conversation({ state, openProject }: { state: HarborState; openP
     setDrafts(d => ({ ...d, [id]: '' }));
     void state.send(text).then(ok => { if (!ok) setDrafts(d => ({ ...d, [id]: d[id] || text })); });
   }
+  const byline = (id?: string) => { const a = state.agents.find(x => x.id === id); return a && a.role !== 'main' ? <button className={s.agentName} title="Open this agent" onClick={() => void state.openAgent(a.id)}>{a.title}</button> : a?.title || 'Harbor'; };
   if (!project) return <div className={s.empty}><Brand/><h1>A home for your projects.</h1><p>Open a project, start a conversation, and let Harbor coordinate the work.</p><button className={s.primary} onClick={openProject}>Open a project</button></div>;
   if (!c) return <div className={s.empty}><h1>{project.name}</h1><p>{state.projectLoading ? 'Loading conversations…' : 'Start a conversation to begin working in this project.'}</p><button className={s.primary} disabled={state.projectLoading} onClick={() => void state.newConversation()}>New conversation</button></div>;
   return <>
@@ -29,11 +35,15 @@ export function Conversation({ state, openProject }: { state: HarborState; openP
         {state.messagesLoading ? <p role="status">Loading conversation…</p> : !state.messages.length ? <div className={s.emptyConversation}><Brand/><h2>What shall we work on?</h2><p>Describe the next step for {project.name}.</p></div> : <>
           <p className={s.date}>{new Date(state.messages[0].time).toLocaleDateString(undefined, { day: 'numeric', month: 'long' })}</p>
           {state.messages.map(m => <article className={`${s.message} ${m.role === 'user' ? s.user : s.assistant}`} key={m.id}>
-            <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? state.agents.find(a => a.id === m.agentId)?.title || 'Harbor' : m.role === 'tool' ? 'Tool activity' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
+            <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? byline(m.agentId) : m.role === 'tool' ? 'Tool activity' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
             {m.role === 'tool' ? <details><summary>Tool activity</summary><Markdown text={m.text}/></details> : <Markdown text={m.text || 'Working…'}/>}
             {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort</p><p>{m.details.reason}</p></details> : null}
           </article>)}
         </>}
+        {crew.length ? <section className={s.crew} aria-label="Subagents"><h3>{crew.length === 1 ? '1 subagent' : `${crew.length} subagents`}</h3><div className={s.crewList}>{crew.map(a => <div className={s.crewCard} key={a.id}>
+          <button className={s.crewOpen} onClick={() => void state.openAgent(a.id)}><span className={s.dot} data-state={a.state}/><span>{a.title}<small>{a.role} · {a.state} · {a.cli} / {a.model}</small></span></button>
+          {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop</button> : null}
+        </div>)}</div></section> : null}
         {busy ? <p role="status" className={s.muted}>An agent is working on this conversation…</p> : null}
       </div>
     </div>

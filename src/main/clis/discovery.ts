@@ -35,7 +35,7 @@ export function findExecutable(def: CliDefinition, d: Pick<DiscoveryDeps, 'env' 
 export async function resolveCli(def: CliDefinition, deps: DiscoveryDeps = defaultDeps()): Promise<ResolvedCli> {
   const base = { id: def.id, name: def.name, models: def.models };
   const path = findExecutable(def, deps);
-  if (!path) return { ...base, installed: false, signedIn: false, authState: 'unknown', note: 'Not installed' };
+  if (!path) return { ...base, installed: false, signedIn: false, authState: 'unknown', note: `Not installed. Looked on PATH and in: ${def.extraDirs().slice(0, 6).join('; ') || '(no known folders)'}` };
 
   const v = await deps.run(path, def.versionArgs, { timeoutMs: 15000 });
   if (v.error || v.code !== 0) {

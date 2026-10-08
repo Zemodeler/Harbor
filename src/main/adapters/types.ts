@@ -20,6 +20,7 @@ export type Chunk =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; text: string }
   | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { kind: 'limits'; limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }> }
   | { kind: 'done'; ok: boolean; text?: string; error?: string; rateLimited?: boolean };
 
 export interface CliAdapter {

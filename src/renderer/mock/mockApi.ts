@@ -36,6 +36,12 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       data.agents.push({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' });
       return copy(p);
     },
+    async setProjectImage(projectId, image) {
+      const p = data.projects.find(x => x.id === projectId);
+      if (!p) throw new Error('Unknown project');
+      if (image) p.image = image; else delete p.image;
+      return copy(p);
+    },
     async removeProject(projectId) {
       data.agents.filter(a => a.projectId === projectId).forEach(a => { const run = runs.get(a.id); if (run) run.cancelled = true; });
       const convIds = new Set(data.conversations.filter(c => c.projectId === projectId).map(c => c.id));
@@ -44,6 +50,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       data.agents = data.agents.filter(a => a.projectId !== projectId);
       data.messages = data.messages.filter(m => !convIds.has(m.conversationId));
     },
+    async deleteConversation(id) { await pause(); data.conversations = data.conversations.filter(c => c.id !== id); },
     async listConversations(projectId) { await pause(); return copy(data.conversations.filter(c => c.projectId === projectId)); },
     async newConversation(projectId) {
       if (!data.projects.some(p => p.id === projectId)) throw new Error('Open a project first.');
@@ -61,7 +68,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       data.messages.push(user); emit({ type: 'message', message: user });
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
       if (agent.role === 'main') {
-        const worker: Agent = { id: id(), projectId: c.projectId, parentId: agent.id, role: 'implementer', title: text.slice(0, 38), state: 'queued', cli: 'codex', model: 'default', effort: 'medium', summary: 'A focused sample assignment; no files will be changed.' };
+        const worker: Agent = { id: id(), projectId: c.projectId, parentId: agent.id, conversationId: c.id, role: 'implementer', title: text.slice(0, 38), state: 'queued', cli: 'codex', model: 'default', effort: 'medium', summary: 'A focused sample assignment; no files will be changed.' };
         data.agents.push(worker); updateAgent(worker);
         agent = worker;
       }

@@ -1,4 +1,5 @@
 import type { CliId, Id, UsageWindow } from '../shared/api';
+import type { ReportedLimit } from './codexLimits';
 import { newId, type Store } from './store';
 import type { UsageEvent } from './types';
 
@@ -8,6 +9,8 @@ export const WINDOW_MS = 5 * 60 * 60 * 1000;
 /** After a CLI reports a rate limit its reset time is unknown; treat it as exhausted for this long. */
 export const COOLDOWN_MS = 30 * 60 * 1000;
 export const DEFAULT_RUNS_PER_WINDOW = 40;
+export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_RUNS_PER_WEEK = 300;
 
 export interface LedgerOptions {
   now?: () => number;
@@ -16,6 +19,10 @@ export interface LedgerOptions {
   runsPerWindow?: Partial<Record<CliId, number>> & { default?: number };
   /** Supported source of a discretionary reset entitlement. No CLI exposes one today, so the default is none. */
   entitlement?: (cli: CliId) => boolean;
+  /** Limits the provider itself reported (read from its own logs). Win over Harbor's estimate when present. */
+  reported?: (cli: CliId) => ReportedLimit[];
+  weekMs?: number;
+  runsPerWeek?: number;
 }
 
 /**
@@ -38,9 +45,21 @@ export class UsageLedger {
     return ev;
   }
 
-  private inWindow(cli: CliId): UsageEvent[] {
-    const from = this.now() - this.windowMs;
+  private inWindow(cli: CliId, ms = this.windowMs): UsageEvent[] {
+    const from = this.now() - ms;
     return this.store.listUsage().filter((u) => u.cli === cli && u.time >= from);
+  }
+
+  private reportedFor(cli: CliId, period: ReportedLimit['period']): ReportedLimit | undefined {
+    const live = this.opts.reported?.(cli).find((l) => l.period === period && l.resetsAt > this.now());
+    if (live) return live;
+    // Limits the CLI printed during Harbor's own runs: newest observation wins; rolled-over windows are stale.
+    let best: ReportedLimit | undefined;
+    for (const u of this.store.listUsage()) {
+      if (u.cli !== cli) continue;
+      for (const l of u.limits ?? []) if (l.period === period && l.resetsAt > this.now() && (!best || l.asOf >= best.asOf)) best = l;
+    }
+    return best;
   }
 
   private budget(cli: CliId): number {
@@ -56,9 +75,23 @@ export class UsageLedger {
     return last && until > this.now() ? until : undefined;
   }
 
-  usedPct(cli: CliId): number {
+  private sessionPct(cli: CliId): number {
+    const r = this.reportedFor(cli, 'session');
+    if (r) return Math.min(100, Math.round(r.usedPct));
     if (this.cooldownUntil(cli)) return 100;
     return Math.min(100, Math.round((this.inWindow(cli).length / this.budget(cli)) * 100));
+  }
+
+  private weeklyPct(cli: CliId): number {
+    const r = this.reportedFor(cli, 'weekly');
+    if (r) return Math.min(100, Math.round(r.usedPct));
+    const budget = this.opts.runsPerWeek ?? DEFAULT_RUNS_PER_WEEK;
+    return Math.min(100, Math.round((this.inWindow(cli, this.opts.weekMs ?? WEEK_MS).length / budget) * 100));
+  }
+
+  /** Routing sees the tighter of the two windows: an exhausted week blocks a CLI even when the 5h window is empty. */
+  usedPct(cli: CliId): number {
+    return Math.max(this.sessionPct(cli), this.weeklyPct(cli));
   }
 
   level(cli: CliId): UsageLevel {
@@ -67,17 +100,23 @@ export class UsageLedger {
   }
 
   windows(clis: CliId[]): UsageWindow[] {
-    return clis.map((cli) => {
-      const events = this.inWindow(cli);
+    const weekMs = this.opts.weekMs ?? WEEK_MS;
+    const oldestOf = (events: UsageEvent[]) => events.reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
+    const clock = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    return clis.flatMap((cli): UsageWindow[] => {
+      const free = this.opts.entitlement?.(cli) ? true : undefined;
       const cooldown = this.cooldownUntil(cli);
-      const oldest = events.reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
-      return {
-        cli,
-        label: cooldown ? 'Rate limited (reported by the CLI)' : '5h window · estimated from Harbor runs only',
-        usedPct: this.usedPct(cli),
-        resetsAt: cooldown ?? (oldest !== undefined ? oldest + this.windowMs : undefined),
-        freeResetAvailable: this.opts.entitlement?.(cli) ? true : undefined
-      };
+      const rs = this.reportedFor(cli, 'session'), rw = this.reportedFor(cli, 'weekly');
+      const oldest = oldestOf(this.inWindow(cli)), oldestWeek = oldestOf(this.inWindow(cli, weekMs));
+      const session: UsageWindow = rs
+        ? { cli, period: 'session', source: 'reported', label: `5h window · reported by ${cli} as of ${clock(rs.asOf)}`, usedPct: this.sessionPct(cli), resetsAt: rs.resetsAt, freeResetAvailable: free }
+        : { cli, period: 'session', source: cooldown ? 'reported' : 'estimated', label: cooldown ? 'Rate limited (reported by the CLI)' : '5h window · estimated from Harbor runs only',
+            usedPct: this.sessionPct(cli), resetsAt: cooldown ?? (oldest !== undefined ? oldest + this.windowMs : undefined), freeResetAvailable: free };
+      const weekly: UsageWindow = rw
+        ? { cli, period: 'weekly', source: 'reported', label: `Weekly window · reported by ${cli} as of ${clock(rw.asOf)}`, usedPct: this.weeklyPct(cli), resetsAt: rw.resetsAt }
+        : { cli, period: 'weekly', source: 'estimated', label: 'Weekly window · estimated from Harbor runs only (rolling 7 days)',
+            usedPct: this.weeklyPct(cli), resetsAt: oldestWeek !== undefined ? oldestWeek + weekMs : undefined };
+      return [session, weekly];
     });
   }
 

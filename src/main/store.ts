@@ -85,6 +85,12 @@ export class Store {
   }
   getConversation(id: Id): Conversation | undefined { return this.state.conversations.find((c) => c.id === id); }
   findConversationByAgent(agentId: Id): Conversation | undefined { return this.state.conversations.find((c) => c.agentId === agentId); }
+  /** Removes the conversation and its messages only; agents, worktrees and files are untouched. */
+  removeConversation(id: Id): void {
+    this.state.conversations = this.state.conversations.filter((c) => c.id !== id);
+    this.state.messages = this.state.messages.filter((m) => m.conversationId !== id);
+    this.dirty();
+  }
   addConversation(c: Conversation): Conversation { this.state.conversations.push(c); this.dirty(); return c; }
   touchConversation(id: Id, patch: Partial<Pick<Conversation, 'title'>> = {}): void {
     const c = this.getConversation(id);

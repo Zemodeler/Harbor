@@ -34,6 +34,8 @@ export interface ServiceOptions {
   ledger?: LedgerOptions;
   git?: Git;
   maxActivePerProject?: number;
+  /** Delays for automatic re-checks after a previously seen CLI goes missing (tests shorten these). */
+  recheckDelaysMs?: number[];
   /** Override where worktrees are created (tests). */
   worktreesRoot?: string;
 }
@@ -82,12 +84,25 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     maxActivePerProject: opts.maxActivePerProject
   });
 
-  const refresh = async (): Promise<ResolvedCli[]> => {
+  // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude
+  // desktop app does this), so re-check a few times instead of leaving it "Not installed" until a manual refresh.
+  const seenInstalled = new Set<CliId>();
+  const recheckDelays = opts.recheckDelaysMs ?? [3_000, 10_000, 30_000, 60_000, 120_000];
+  let recheckTimer: ReturnType<typeof setTimeout> | undefined;
+  // The very first check has no "seen" history, so a swap in progress at launch would otherwise stick: during the
+  // startup chain any missing CLI is re-checked, including ones that are genuinely absent (they just stay missing).
+  const refresh = async (attempt = 0, startup = false): Promise<ResolvedCli[]> => {
+    if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
     clis = await (opts.discover ?? discoverClis)();
-    for (const c of clis) bus.emit({ type: 'cli', cli: toStatus(c) });
+    for (const c of clis) { if (c.installed) seenInstalled.add(c.id); bus.emit({ type: 'cli', cli: toStatus(c) }); }
+    const lost = clis.some((c) => !c.installed && (startup || seenInstalled.has(c.id)));
+    if (lost && attempt < recheckDelays.length) {
+      recheckTimer = setTimeout(() => { void refresh(attempt + 1, startup).catch(() => {}); }, recheckDelays[attempt]);
+      recheckTimer.unref?.();
+    }
     return clis;
   };
-  const ready = refresh().then(() => orchestrator.recover(), () => orchestrator.recover());
+  const ready = refresh(0, true).then(() => orchestrator.recover(), () => orchestrator.recover());
 
   const needProject = (id: Id): Project => {
     const p = store.getProject(id);
@@ -98,7 +113,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   return {
     orchestrator, store,
     whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
-    shutdown: () => store.flush(),
+    shutdown: () => { if (recheckTimer) clearTimeout(recheckTimer); store.flush(); },
 
     async listClis() { await ready; return clis.map(toStatus); },
     async refreshClis() { return (await refresh()).map(toStatus); },
@@ -123,6 +138,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       orchestrator.ensureProject(project);
       return project;
     },
+    async setProjectImage(id, image) {
+      const p = needProject(id);
+      // Stored inline in state.json, so keep it small: the renderer downscales before sending.
+      if (image !== null && (!/^data:image\/(png|jpeg|webp|gif);base64,/.test(image) || image.length > 300_000)) throw new Error('Choose a PNG, JPEG, WebP or GIF image (it is resized to a small icon).');
+      const { image: _old, ...rest } = p;
+      return store.upsertProject(image === null ? rest : { ...rest, image });
+    },
     async removeProject(id) {
       for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
       store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.
@@ -134,6 +156,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     },
     async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
     async listMessages(conversationId) { return store.listMessages(conversationId); },
+    async deleteConversation(id) {
+      const c = store.getConversation(id);
+      if (!c) return;
+      if (store.getAgent(c.agentId)?.state === 'working') throw new Error('Stop the running agents before deleting this conversation.');
+      store.removeConversation(id);
+    },
     async send(conversationId, text) {
       await ready;
       if (!text.trim()) return;

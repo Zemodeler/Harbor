@@ -553,7 +553,9 @@ export class Orchestrator {
       this.setState(agent, agent.state, { cli: decision.cli, model: decision.model, effort: decision.effort, attempts: attempt });
       if (attempt > 0) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
 
-      let text = '', ok = false, error: string | undefined, rateLimited = false, usage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
+      // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
+      let text = '', final = '', ok = false, error: string | undefined, rateLimited = false, usage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
+      let limits: Extract<Chunk, { kind: 'limits' }>['limits'] | undefined;
       let streamId: Id | undefined;
       const details = { cli: decision.cli, model: decision.model, effort: decision.effort, reason: decision.reason };
       const t0 = Date.now();
@@ -574,17 +576,18 @@ export class Orchestrator {
             }
           } else if (c.kind === 'tool') { if (o.stream) { streamId = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
           else if (c.kind === 'usage') usage = { ...usage, ...c };
-          else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; if (c.text && !text) text = c.text; }
+          else if (c.kind === 'limits') limits = c.limits;
+          else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; if (c.text) final = c.text; }
         }
       } catch (e) { ok = false; error = String((e as Error).message ?? e); }
 
       const stopped = o.signal.aborted;
-      ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited, ...usage });
+      ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited, limits, ...usage });
       this.emit({ type: 'usage', windows: ledger.windows(this.d.getClis().map((c) => c.id)) });
       if (rateLimited) void this.d.freeReset?.maybePropose(decision.cli).catch(() => {});
       if (ok) {
         if (!o.stream) { /* main replies are posted by the caller with details */ }
-        return { ok: true, text, decision };
+        return { ok: true, text: final || text, decision };
       }
       if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped' };
       lastError = `${decision.cli} failed${rateLimited ? ' (rate limit)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
@@ -598,7 +601,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();

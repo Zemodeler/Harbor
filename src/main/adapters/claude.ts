@@ -40,6 +40,15 @@ export function parseClaudeLine(line: string): Chunk[] {
       if (c.type === 'text' && c.text) out.push({ kind: 'text', text: c.text });
       else if (c.type === 'tool_use') out.push({ kind: 'tool', text: `${c.name} ${summarizeInput(c.input)}`.trim() });
     }
+  } else if (j.type === 'rate_limit_event') {
+    // The account's real 5h / 7-day utilization (0..1) as the subscription sees it, not just Harbor's runs.
+    const uw = j.rate_limit_info?.unifiedWindows, asOf = Date.now();
+    const limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }> = [];
+    for (const [key, period] of [['five_hour', 'session'], ['seven_day', 'weekly']] as const) {
+      const w = uw?.[key];
+      if (w && typeof w.utilization === 'number' && typeof w.resetsAt === 'number') limits.push({ period, usedPct: w.utilization * 100, resetsAt: w.resetsAt * 1000, asOf });
+    }
+    if (limits.length) out.push({ kind: 'limits', limits });
   } else if (j.type === 'result') {
     if (j.session_id) out.push({ kind: 'session', id: j.session_id });
     out.push({ kind: 'usage', inputTokens: j.usage?.input_tokens, outputTokens: j.usage?.output_tokens, costUsd: j.total_cost_usd });

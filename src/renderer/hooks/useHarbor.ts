@@ -90,6 +90,19 @@ export function useHarbor() {
       setConversations(cs => [c, ...cs]); await selectConversation(c);
     });
   }
+  async function deleteConversation(c: Conversation) {
+    await run(async () => {
+      await api.deleteConversation(c.id);
+      cachedMessages.current.forEach((m, k) => { if (m.conversationId === c.id) cachedMessages.current.delete(k); });
+      remembered.current.delete(c.projectId);
+      if (current.current.projectId !== c.projectId) return;
+      const rest = await api.listConversations(c.projectId);
+      setConversations(rest);
+      if (current.current.conversationId !== c.id) return;
+      if (rest[0]) await selectConversation(rest[0]);
+      else { setConversation(undefined); setMessages([]); current.current.conversationId = ''; }
+    });
+  }
   async function openAgent(agentId: string) {
     const id = projectId;
     await run(async () => {
@@ -107,6 +120,9 @@ export function useHarbor() {
       added = true;
     });
     return added;
+  }
+  async function setProjectImage(id: string, image: string | null) {
+    await run(async () => { await api.setProjectImage(id, image); setProjects(await api.listProjects()); });
   }
   async function send(text: string) {
     const c = conversation;
@@ -126,7 +142,7 @@ export function useHarbor() {
   async function updateSettings(s: Partial<Settings>) { await run(async () => setSettings(await api.setSettings(s))); }
   return { api, projects, clis, conversations, agents, messages, usage, settings, projectId, conversation,
     permissions, loading, messagesLoading, projectLoading, error, sending, run, reload, selectProject, selectConversation,
-    newConversation, openAgent, addProject, send, answerPermission, updateSettings,
+    newConversation, deleteConversation, openAgent, addProject, setProjectImage, send, answerPermission, updateSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

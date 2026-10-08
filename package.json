@@ -13,6 +13,7 @@
     "test": "vitest run",
     "smoke": "tsx scripts/smoke.ts",
     "dist": "node build/dist.mjs",
+    "dist:watch": "node scripts/dist-watch.mjs",
     "dev:renderer": "npm --prefix src/renderer run dev:renderer",
     "test:renderer": "npm --prefix src/renderer test"
   },
