@@ -38,6 +38,20 @@ Small requests should not pay the overhead of unnecessary planning or multi-CLI 
 
 Avoid hard-coded claims that one provider is always best for a category. Role preferences should be configurable and informed by supported capabilities and, eventually, observed outcomes.
 
+## Continuity before unnecessary switching
+
+Prefer the current eligible CLI and native session when they retain useful context and can complete the assignment within policy. Include context transfer, session setup, lost extension state, and rework in the estimated cost of switching. A small allowance or effort advantage alone should not cause repeated handoffs.
+
+Switch when required capabilities, connection failure, insufficient usable allowance, explicit user preferences, or a material expected benefit justify it. Record the reason and checkpoint before transferring work. Avoid switching back on every usage refresh; reconsider when a material input changes. Continuity never overrides hard limits or required capabilities.
+
+## Work queue and interactive capacity
+
+Maintain an application-wide schedule across project queues. Users can prioritize tasks, request "do this next," pause, resume, or cancel queued work. Dependencies still apply: a higher priority cannot start an assignment before its required inputs are ready. Queue ordering changes do not silently interrupt active writers; interruptions use the normal checkpoint and stop process.
+
+Show why a task is waiting, such as a dependency, workspace ownership, concurrency, or allowance. Use explicit user priority first, then dependency readiness and waiting time to prevent indefinite starvation. Cancelling a prerequisite marks its dependents blocked and explains the missing input; it does not declare them complete or silently cancel unrelated tasks.
+
+Reserve configurable execution capacity and usable allowance for responding to the user and handling steering while background work runs. This interactive headroom is distinct from a general subscription reserve. At low concurrency, checkpoint or pause suitable background work when necessary rather than making the user wait behind the entire backlog. When allowance cannot be measured, use conservative concurrency and allocation policies rather than claiming an exact reserve. Explain when provider limits prevent an immediate response.
+
 ## Subscription usage
 
 Each allowance reading should preserve its provider's units, window, timestamp, and source. Providers may expose separate limits for different models or overlapping time windows.
@@ -118,6 +132,8 @@ Limit retries, repeated review cycles, and coordination overhead. Stop and ask f
 | Multi-CLI policy | Allow automatic coordination or constrain the eligible roles and providers. |
 | Concurrency limit | Bound simultaneous sessions and workspace activity. |
 | Active subagent limit | Bound active sibling agents per project; queue excess assignments. |
+| Queue priority | Order authorized work across projects while preserving dependencies and preventing starvation. |
+| Interactive headroom | Preserve execution capacity and usable allowance for user responses and steering. |
 | Retry limits | Bound repeated execution and recovery attempts. |
 | API fallback | Disabled, ask before use, or allowed within explicit limits. |
 | API spending limits | Bound fallback spending per task and over a configured period. |
@@ -132,6 +148,8 @@ Preset values and numeric defaults remain open design decisions.
 Prefer CLI execution when a suitable CLI is available and can perform the work within policy. API tokens are an optional alternative when explicitly configured.
 
 Do not silently start paid API execution unless the user has enabled that behavior and set applicable limits. If fallback requires approval, ask in the conversation and explain the reason and estimated cost range when available.
+
+Fallback is disabled until the user adds an API key. After that it defaults to asking before use. Allowing it without asking requires explicit per-task and per-period limits chosen by the user, and those limits are hard stops.
 
 ## Adapter capabilities
 
@@ -172,3 +190,6 @@ Background operation does not mean hiding who receives project context, conceali
 - Shared account usage and pending consumption are tracked across all projects.
 - Optional free resets require explicit permission and are proposed only when useful after effective use of current allowance.
 - Sibling communication, shared file ownership, and acknowledged handoffs support efficient parallel work.
+- Routing preserves useful session continuity and records material reasons for provider handoffs.
+- Users can control queued work across projects without bypassing dependencies or losing active changes.
+- Background scheduling preserves interactive capacity for user messages and steering where resources permit.
