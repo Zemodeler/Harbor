@@ -328,3 +328,20 @@ describe('file conflicts', () => {
     expect(h.svc.store.listCoordination(h.project.id).some((c) => c.kind === 'decision' && /allowed parallel/.test(c.text))).toBe(true);
   });
 });
+
+describe('plan hygiene', () => {
+  it('breaks circular dependencies instead of waiting forever', async () => {
+    const claude: FakeScript = (prompt, o) => {
+      if (isMain(o)) return prompt.includes('New message') ? plan('go', [
+        { ref: 'a', title: 'A', role: 'other', instructions: 'a', complexity: 'low', dependsOn: ['b'] },
+        { ref: 'b', title: 'B', role: 'other', instructions: 'b', complexity: 'low', dependsOn: ['a'] }
+      ]) : plan('done');
+      return say('ok');
+    };
+    const h = await harness({ claude }, { ids: ['claude'], git: false });
+    await h.svc.send(h.conv.id, 'go');
+    await h.svc.whenIdle();
+    expect((await h.texts()).some((t) => t.startsWith('Ignored a circular dependency'))).toBe(true);
+    expect(h.svc.store.listAgentRecords(h.project.id).filter((a) => a.role === 'other').every((a) => a.state === 'done')).toBe(true);
+  });
+});

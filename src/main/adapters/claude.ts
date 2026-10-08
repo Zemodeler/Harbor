@@ -1,6 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
-import { streamLines } from './stream';
+import { streamLines, type StreamedLine, type StreamResult } from './stream';
 
 /**
  * Claude Code headless adapter. Flags verified against `claude --help` (2.1.293):
@@ -8,7 +12,7 @@ import { streamLines } from './stream';
  * --permission-mode, --allowedTools, --disallowedTools, --append-system-prompt.
  * The prompt goes through stdin so it never touches the command line.
  */
-export function claudeArgs(o: RunOptions): string[] {
+export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
   if (o.model && o.model !== 'default') a.push('--model', o.model);
   a.push('--effort', o.effort);
@@ -20,7 +24,8 @@ export function claudeArgs(o: RunOptions): string[] {
   }
   // Subagents must not spawn agents (docs/project-agents.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');
-  if (o.systemPrompt) a.push('--append-system-prompt', o.systemPrompt);
+  // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
+  if (systemPromptFile) a.push('--append-system-prompt-file', systemPromptFile);
   return a;
 }
 
@@ -57,11 +62,21 @@ export class ClaudeAdapter implements CliAdapter {
 
   async *run(prompt: string, o: RunOptions): AsyncGenerator<Chunk> {
     let done = false;
-    const gen = streamLines(this.exe, claudeArgs(o), { cwd: o.cwd, input: prompt, signal: o.signal });
-    let res = await gen.next();
-    while (!res.done) {
-      if (res.value.stream === 'stdout') for (const c of parseClaudeLine(res.value.line)) { if (c.kind === 'done') done = true; yield c; }
+    let spFile: string | undefined;
+    if (o.systemPrompt) {
+      spFile = join(tmpdir(), `harbor-sp-${randomUUID()}.txt`);
+      writeFileSync(spFile, o.systemPrompt);
+    }
+    let res: IteratorResult<StreamedLine, StreamResult>;
+    const gen = streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: prompt, signal: o.signal });
+    try {
       res = await gen.next();
+      while (!res.done) {
+        if (res.value.stream === 'stdout') for (const c of parseClaudeLine(res.value.line)) { if (c.kind === 'done') done = true; yield c; }
+        res = await gen.next();
+      }
+    } finally {
+      if (spFile) try { unlinkSync(spFile); } catch { /* already gone */ }
     }
     if (!done) {
       const r = res.value;
