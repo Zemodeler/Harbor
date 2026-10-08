@@ -1,7 +1,7 @@
 import { join } from 'node:path';
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, dialog } from 'electron';
 import { registerIpc } from './ipc';
-import { createStubService } from './service';
+import { createHarborService } from './service';
 
 let win: BrowserWindow | undefined;
 
@@ -19,7 +19,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  registerIpc(createStubService(), () => win?.webContents);
+  const service = createHarborService({
+    dataDir: join(app.getPath('appData'), 'Harbor'),
+    pickFolder: async () => {
+      const r = await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Open project folder' });
+      return r.canceled ? undefined : r.filePaths[0];
+    }
+  });
+  registerIpc(service, () => win?.webContents);
+  app.on('before-quit', () => service.shutdown());
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

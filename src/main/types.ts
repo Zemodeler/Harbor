@@ -1,4 +1,5 @@
 import type { Agent, CliId, Conversation, Message, Project, Settings } from '../shared/api';
+import type { Complexity } from './router';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
 export interface AgentRecord extends Agent {
@@ -11,6 +12,7 @@ export interface AgentRecord extends Agent {
   /** Task ids this agent waits on. */
   dependsOn: Id[];
   revision: number;
+  complexity?: Complexity;
   /** Conversation the agent reports to (the one the user asked in). */
   parentConversationId: Id;
   branch?: string;
@@ -19,6 +21,12 @@ export interface AgentRecord extends Agent {
   report?: string;
   /** Why work stopped, for failed/stopped states. */
   error?: string;
+  /** Task whose report is this agent's specification (passed verbatim). */
+  specFromId?: Id;
+  /** Agent that asked for this sibling via request_help. */
+  helpFor?: Id;
+  /** User allowed this agent to overlap file claims held by a sibling. */
+  sharedOk?: boolean;
   /** Number of CLI fallbacks used. */
   attempts: number;
   created: number;
