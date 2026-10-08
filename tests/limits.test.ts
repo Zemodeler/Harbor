@@ -75,6 +75,16 @@ describe('claude reported limits', () => {
   });
 });
 
+describe('unmeasurable CLIs', () => {
+  it('shows no window for a CLI Harbor cannot run or read (no fake 0%)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'harbor-measurable-'));
+    try {
+      const ledger = new UsageLedger(new Store(dir), { now: () => NOW, measurable: (c) => c !== 'gemini' });
+      expect(ledger.windows(['claude', 'gemini']).map((w) => w.cli)).toEqual(['claude', 'claude']);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe('deleteConversation', () => {
   it('removes the conversation and its messages only', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'harbor-del-')), proj = mkdtempSync(join(tmpdir(), 'harbor-proj-'));
