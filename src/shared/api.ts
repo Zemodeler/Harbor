@@ -1,6 +1,6 @@
 export type Id = string;
 export type CliId = 'claude' | 'codex' | 'gemini' | string;
-export interface CliStatus { id: CliId; name: string; installed: boolean; version?: string; signedIn: boolean; models: string[]; note?: string }
+export interface CliStatus { id: CliId; name: string; installed: boolean; version?: string; signedIn: boolean; models: string[]; note?: string; authState?: 'signedIn'|'signedOut'|'unknown' }
 export interface Project { id: Id; name: string; path: string; lastOpened: number }
 export interface Conversation { id: Id; projectId: Id; title: string; updated: number; agentId: Id }   // agentId = main agent, or a subagent for direct chats
 export type AgentRole = 'main' | 'planner' | 'implementer' | 'reviewer' | 'other';
