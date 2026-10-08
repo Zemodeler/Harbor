@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { runProcess, type Runner } from './proc';
 
@@ -69,7 +69,29 @@ export class Git {
   async removeWorktree(repo: string, worktreesRoot: string, path: string, branch?: string): Promise<void> {
     const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
     if (!norm(path).startsWith(norm(worktreesRoot) + '/')) throw new Error('Refusing to remove a path outside Harbor worktrees.');
+    this.unlinkDependencies(path); // never let git recurse through the node_modules junction into the real folder
     await this.git(repo, ['worktree', 'remove', '--force', path]);
     if (branch?.startsWith('harbor/')) await this.git(repo, ['branch', '-D', branch]);
+  }
+
+  /**
+   * Give a worktree the main checkout's installed dependencies via a junction, so agents can run tests
+   * without reinstalling. Only when node_modules is git-ignored (otherwise a checkpoint commit could
+   * sweep it in). Returns true when linked.
+   */
+  async linkDependencies(repo: string, worktree: string): Promise<boolean> {
+    const src = join(repo, 'node_modules'), dst = join(worktree, 'node_modules');
+    if (!existsSync(src) || existsSync(dst)) return false;
+    const ignored = await this.git(worktree, ['check-ignore', '-q', 'node_modules/']);
+    if (ignored.code !== 0) return false;
+    try { symlinkSync(src, dst, 'junction'); return true; } catch { return false; }
+  }
+
+  private unlinkDependencies(worktree: string): void {
+    const dst = join(worktree, 'node_modules');
+    try {
+      if (!lstatSync(dst).isSymbolicLink()) return;
+      try { rmdirSync(dst); } catch { unlinkSync(dst); } // removes the link only, not its target
+    } catch { /* not present */ }
   }
 }

@@ -5,7 +5,8 @@ export interface RunResult { code: number | null; stdout: string; stderr: string
 /** Injectable process runner so discovery/adapters can be tested without real CLIs. */
 export type Runner = (exe: string, args: string[], opts?: { cwd?: string; timeoutMs?: number; input?: string; env?: NodeJS.ProcessEnv }) => Promise<RunResult>;
 
-const SAFE_ARG = /^[\w.\-:/\\@=+,%~ ]+$/;
+// Inside double quotes cmd.exe treats & | < > ^ ( ) * literally; only %VAR% expansion, quotes and line breaks are unsafe.
+const SAFE_ARG = /^[^"%\r\n\0]+$/;
 
 export function isShellScript(exe: string): boolean {
   return process.platform === 'win32' && /\.(cmd|bat)$/i.test(exe);
@@ -21,7 +22,7 @@ export function quoteWinArg(a: string): string {
 export function spawnCli(exe: string, args: string[], opts: SpawnOptions = {}): ChildProcess {
   if (isShellScript(exe)) {
     const line = [exe, ...args].map(quoteWinArg).join(' ');
-    return spawn(`"${line}"`, { ...opts, shell: true, windowsHide: true });
+    return spawn(line, { ...opts, shell: true, windowsHide: true }); // node wraps this in cmd.exe /d /s /c "..."
   }
   return spawn(exe, args, { ...opts, windowsHide: true });
 }
