@@ -1,4 +1,7 @@
-// Placeholder renderer from the core scaffold. The UI engineer replaces this directory.
+import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { installMockApi } from './mock/mockApi';
+import App from './App';
 
-createRoot(document.getElementById('root')!).render(<p>Harbor scaffold: window.harbor is {typeof window.harbor}</p>);
+installMockApi();
+createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
