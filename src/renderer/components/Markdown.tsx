@@ -20,7 +20,8 @@ export function Markdown({ text }: { text: string }) {
       const newline = block.indexOf('\n');
       return <Code key={i} language={newline >= 0 ? block.slice(0, newline) : ''} text={newline >= 0 ? block.slice(newline + 1).replace(/\n$/, '') : block}/>;
     }
-    return <Fragment key={i}>{block.split(/\n\n+/).filter(Boolean).map((paragraph, j) => {
+    return <Fragment key={i}>{block.replace(/^(#{1,6} .+)$/gm, '\n\n$1\n\n').split(/\n\n+/).filter(p => p.trim()).map((paragraph, j) => {
+      paragraph = paragraph.trim();
       const heading = paragraph.match(/^(#{1,6}) (.*)$/);
       if (heading) return <h3 key={j}>{inline(heading[2])}</h3>;
       if (/^[-*] /m.test(paragraph)) return <ul key={j}>{paragraph.split('\n').map((line, k) => <li key={k}>{inline(line.replace(/^[-*] /, ''))}</li>)}</ul>;

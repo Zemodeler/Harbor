@@ -99,11 +99,14 @@ export function useHarbor() {
     });
   }
   async function addProject(path?: string) {
+    let added = false;
     await run(async () => {
       const p = await api.addProject(path);
       if (!p) return;
       setProjects(await api.listProjects()); await selectProject(p.id);
+      added = true;
     });
+    return added;
   }
   async function send(text: string) {
     const c = conversation;
@@ -111,7 +114,8 @@ export function useHarbor() {
     setSending(s => new Set(s).add(c.id));
     let success = false;
     await run(async () => { await api.send(c.id, text); success = true;
-      if (current.current.projectId === c.projectId) setConversations(await api.listConversations(c.projectId));
+      const cs = await api.listConversations(c.projectId);
+      if (current.current.projectId === c.projectId) setConversations(cs);
     });
     setSending(s => { const next = new Set(s); next.delete(c.id); return next; });
     return success;

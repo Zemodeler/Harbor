@@ -62,5 +62,6 @@ describe('Harbor main flows', () => {
     await waitFor(() => expect(screen.getByLabelText('Message Harbor')).toHaveValue('Keep this prompt'));
   });
   it('renders untrusted HTML as text', () => { const { container } = render(<Markdown text={'<img src=x onerror=alert(1)>\n\n```html\n<script>alert(1)</script>\n```'}/>); expect(container.querySelector('img')).toBeNull(); expect(container.querySelector('script')).toBeNull(); });
+  it('renders a heading followed by prose without a blank line', () => { render(<Markdown text={'### Ready for a first look\nA preview is ready.'}/>); expect(screen.getByRole('heading', { name: 'Ready for a first look' })).toBeInTheDocument(); expect(screen.getByText('A preview is ready.')).toBeInTheDocument(); });
 });
 
