@@ -1,4 +1,6 @@
 import type { Agent, CliId, Conversation, Message, Project, Settings } from '../shared/api';
+import type { Need } from './clis/capabilities';
+import type { HelperResult } from './prompts';
 import type { Complexity } from './router';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
@@ -13,6 +15,10 @@ export interface AgentRecord extends Agent {
   dependsOn: Id[];
   revision: number;
   complexity?: Complexity;
+  /** What the lead said this work needs; the router matches it against the capability catalog. */
+  needs?: Need[];
+  /** Never edits files (research, review), whatever the role. */
+  readOnly?: boolean;
   /** Conversation the agent reports to (the one the user asked in). */
   parentConversationId: Id;
   branch?: string;
@@ -30,8 +36,17 @@ export interface AgentRecord extends Agent {
   /** Number of CLI fallbacks used. */
   attempts: number;
   created: number;
+  /** The helper's HARBOR_RESULT line (self-reported). */
+  result?: HelperResult;
+  /** Branch head after Harbor's checkpoint commit. */
+  headCommit?: string;
+  /** Checks Harbor itself ran on `testedCommit` (evidence, unlike result.checks). */
+  checks?: CheckRun[];
+  testedCommit?: string;
 }
 type Id = string;
+
+export interface CheckRun { cmd: string; ok: boolean; exitCode: number | null; timedOut?: boolean; durationMs: number; /** Tail of the combined output. */ output: string }
 
 export interface SessionLink { agentId: Id; cli: CliId; sessionId: string; updated: number }
 
@@ -41,7 +56,7 @@ export interface UsageEvent {
   inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs: number; ok: boolean;
   rateLimited?: boolean;
   /** Account limits the CLI reported during this run (Claude: `rate_limit_event`). Persisted so they survive restarts. */
-  limits?: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }>;
+  limits?: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }>;
 }
 
 export interface CoordinationEntry {

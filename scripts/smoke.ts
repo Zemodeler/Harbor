@@ -3,7 +3,7 @@
  *
  *   npm run smoke                 # adapter check on the first ready CLI
  *   npm run smoke -- codex        # pick a CLI
- *   npm run smoke -- claude --full  # also run the full main-agent -> subagent flow in a temp git repo
+ *   npm run smoke -- claude --full  # also run the concierge -> lead flow in a temp git repo
  *
  * Override executables with HARBOR_CLAUDE_PATH / HARBOR_CODEX_PATH.
  */
@@ -62,22 +62,29 @@ if (!/HARBOR_SMOKE_OK/.test(r2.text)) bad(`resume did not recall earlier turn (g
 ok('resume continued the same session');
 
 if (full) {
-  console.log('\nFull flow: main agent -> subagent in a temp git repo');
+  console.log('\nFull flow: concierge -> lead in a temp git repo');
   const repo = mkdtempSync(join(tmpdir(), 'harbor-smoke-repo-'));
   const g = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
   g('init', '-q', '-b', 'main'); g('config', 'user.email', 's@s'); g('config', 'user.name', 'smoke');
   writeFileSync(join(repo, 'README.md'), '# smoke\n'); g('add', '.'); g('commit', '-q', '-m', 'init');
   const svc = createHarborService({ worktreesRoot: join(tmpdir(), `harbor-smoke-wt-${Date.now()}`) });
-  svc.onEvent((e) => { if (e.type === 'message' && e.message.role !== 'tool') console.log(`  [${e.message.role}] ${e.message.text.slice(0, 160).replace(/\s+/g, ' ')}`); });
+  svc.onEvent((e) => {
+    if (e.type !== 'message' || e.message.role === 'tool') return;
+    const d = e.message.details ? ` ${e.message.details.cli}/${e.message.details.model}` : '';
+    console.log(`  [${e.message.role}${d}] ${e.message.text.slice(0, 160).replace(/\s+/g, ' ')}`);
+  });
   const project = (await svc.addProject(repo))!;
   const [conv] = await svc.listConversations(project.id);
+  await svc.send(conv!.id, 'Thanks, you are great.');
+  await svc.whenIdle(5 * 60 * 1000);
+  ok('simple message handled');
   await svc.send(conv!.id, 'Create a file hello.txt containing the single line "hello from harbor" (this is a tiny, fully specified change).');
   await svc.whenIdle(10 * 60 * 1000);
   const agents = await svc.listAgents(project.id);
-  console.log('  agents:', agents.filter((a) => a.role !== 'main').map((a) => `${a.role}:${a.state}:${a.cli}`).join(', '));
-  const impl = agents.find((a) => a.role === 'implementer');
-  if (!impl || impl.state !== 'done') bad('implementer did not finish');
-  ok(`implementer done on branch in ${impl!.worktree}`);
+  console.log('  helpers:', agents.filter((a) => a.role !== 'main').map((a) => `${a.role}:${a.state}:${a.cli}`).join(', ') || '(none: the lead did it directly)');
+  const touched = g('status', '--porcelain').stdout + agents.filter((a) => a.worktree).map((a) => a.worktree).join(' ');
+  if (!/hello\.txt/.test(touched) && !agents.some((a) => a.worktree)) bad('hello.txt was not created');
+  ok('the requested change was made');
   svc.shutdown();
 }
 console.log('\nSmoke passed.');

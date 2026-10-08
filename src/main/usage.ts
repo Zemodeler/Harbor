@@ -52,14 +52,15 @@ export class UsageLedger {
     return this.store.listUsage().filter((u) => u.cli === cli && u.time >= from);
   }
 
-  private reportedFor(cli: CliId, period: ReportedLimit['period']): ReportedLimit | undefined {
-    const live = this.opts.reported?.(cli).find((l) => l.period === period && l.resetsAt > this.now());
+  /** `scope` undefined = the account-wide window; otherwise the per-model limit with that scope. */
+  private reportedFor(cli: CliId, period: ReportedLimit['period'], scope?: string): ReportedLimit | undefined {
+    const live = this.opts.reported?.(cli).find((l) => l.period === period && l.scope === scope && l.resetsAt > this.now());
     if (live) return live;
     // Limits the CLI printed during Harbor's own runs: newest observation wins; rolled-over windows are stale.
     let best: ReportedLimit | undefined;
     for (const u of this.store.listUsage()) {
       if (u.cli !== cli) continue;
-      for (const l of u.limits ?? []) if (l.period === period && l.resetsAt > this.now() && (!best || l.asOf >= best.asOf)) best = l;
+      for (const l of u.limits ?? []) if (l.period === period && l.scope === scope && l.resetsAt > this.now() && (!best || l.asOf >= best.asOf)) best = l;
     }
     return best;
   }
@@ -70,17 +71,18 @@ export class UsageLedger {
   }
 
   /** Time until which the CLI is treated as rate limited, if its last rate limit is recent. */
-  cooldownUntil(cli: CliId): number | undefined {
+  cooldownUntil(cli: CliId, model?: string): number | undefined {
     let last = 0;
-    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited) last = Math.max(last, u.time);
+    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited && (model === undefined || u.model === model)) last = Math.max(last, u.time);
     const until = last + COOLDOWN_MS;
     return last && until > this.now() ? until : undefined;
   }
 
-  private sessionPct(cli: CliId): number {
+  /** `cooldown`: whether a recent rate limit on any model counts as the whole CLI being out (display) or not (routing, which cools models individually). */
+  private sessionPct(cli: CliId, cooldown = true): number {
     const r = this.reportedFor(cli, 'session');
     if (r) return Math.min(100, Math.round(r.usedPct));
-    if (this.cooldownUntil(cli)) return 100;
+    if (cooldown && this.cooldownUntil(cli)) return 100;
     return Math.min(100, Math.round((this.inWindow(cli).length / this.budget(cli)) * 100));
   }
 
@@ -89,6 +91,62 @@ export class UsageLedger {
     if (r) return Math.min(100, Math.round(r.usedPct));
     const budget = this.opts.runsPerWeek ?? DEFAULT_RUNS_PER_WEEK;
     return Math.min(100, Math.round((this.inWindow(cli, this.opts.weekMs ?? WEEK_MS).length / budget) * 100));
+  }
+
+  /** Model-family limits currently reported for a CLI (e.g. 'opus', 'fable'). */
+  private liveScopes(cli: CliId): string[] {
+    const out = new Set<string>();
+    const add = (l: ReportedLimit) => { if (l.scope && l.resetsAt > this.now()) out.add(l.scope); };
+    this.opts.reported?.(cli).forEach(add);
+    for (const u of this.store.listUsage()) if (u.cli === cli) u.limits?.forEach(add);
+    return [...out];
+  }
+
+  private scopeMatches(scope: string, model: string): boolean {
+    const m = model.toLowerCase();
+    return m !== 'default' && (m.includes(scope) || scope.includes(m));
+  }
+
+  private windowState(cli: CliId, period: ReportedLimit['period'], scope?: string): { pct: number; resetsAt?: number; ms: number } | undefined {
+    const ms = period === 'session' ? this.windowMs : (this.opts.weekMs ?? WEEK_MS);
+    const r = this.reportedFor(cli, period, scope);
+    if (r) return { pct: Math.min(100, Math.round(r.usedPct)), resetsAt: r.resetsAt, ms };
+    if (scope !== undefined) return undefined; // per-model limits are only known when the CLI reports them
+    if (period === 'session') {
+      const oldest = this.inWindow(cli).reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
+      return { pct: this.sessionPct(cli, false), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms };
+    }
+    const oldest = this.inWindow(cli, ms).reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
+    return { pct: this.weeklyPct(cli), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms };
+  }
+
+  /**
+   * How tight the allowance is for one model: the worst of the account windows and any per-model limit that
+   * applies to it. Uses pace as well as percent: used% divided by the elapsed share of the window projects where
+   * usage lands at reset. Ahead of pace (would run out before reset) tightens a notch; well under pace relaxes one.
+   * Pace is ignored in the first 10% of a window (too noisy to extrapolate).
+   */
+  pressure(cli: CliId, model?: string): { level: UsageLevel; pct: number; projectedPct?: number; resetsAt?: number } {
+    const scopes = model ? this.liveScopes(cli).filter((s) => this.scopeMatches(s, model)) : [];
+    const wins = [undefined, ...scopes].flatMap((sc) => (['session', 'weekly'] as const).map((p) => this.windowState(cli, p, sc)));
+    const order: UsageLevel[] = ['plenty', 'limited', 'low', 'exhausted'];
+    let worst: { level: UsageLevel; pct: number; projectedPct?: number; resetsAt?: number } = { level: 'plenty', pct: 0 };
+    // A rate limit hit while running this model holds it out for a while; its siblings on the same CLI are judged on their own windows.
+    const until = model ? this.cooldownUntil(cli, model) : this.cooldownUntil(cli);
+    if (until) return { level: 'exhausted', pct: 100, resetsAt: until };
+    for (const w of wins) {
+      if (!w) continue;
+      let level: UsageLevel = w.pct >= 100 ? 'exhausted' : w.pct >= 80 ? 'low' : w.pct >= 50 ? 'limited' : 'plenty';
+      let projectedPct: number | undefined;
+      const elapsed = w.resetsAt === undefined ? 0 : Math.min(1, 1 - (w.resetsAt - this.now()) / w.ms);
+      if (level !== 'exhausted' && elapsed >= 0.1) {
+        projectedPct = Math.round(w.pct / elapsed);
+        if (projectedPct >= 100 && level !== 'low') level = order[order.indexOf(level) + 1];
+        else if (projectedPct < 70 && level === 'limited') level = 'plenty';
+      }
+      if (order.indexOf(level) > order.indexOf(worst.level) || (level === worst.level && w.pct > worst.pct)) worst = { level, pct: w.pct, projectedPct, resetsAt: w.resetsAt };
+    }
+    return worst;
   }
 
   /** Routing sees the tighter of the two windows: an exhausted week blocks a CLI even when the 5h window is empty. */
@@ -118,7 +176,11 @@ export class UsageLedger {
         ? { cli, period: 'weekly', source: 'reported', label: `Weekly window · reported by ${cli} as of ${clock(rw.asOf)}`, usedPct: this.weeklyPct(cli), resetsAt: rw.resetsAt }
         : { cli, period: 'weekly', source: 'estimated', label: 'Weekly window · estimated from Harbor runs only (rolling 7 days)',
             usedPct: this.weeklyPct(cli), resetsAt: oldestWeek !== undefined ? oldestWeek + weekMs : undefined };
-      return [session, weekly];
+      const scoped = this.liveScopes(cli).flatMap((scope): UsageWindow[] => (['session', 'weekly'] as const).flatMap((period) => {
+        const r = this.reportedFor(cli, period, scope);
+        return r ? [{ cli, period, source: 'reported' as const, model: scope, label: `${scope} only · ${period === 'session' ? '5h' : 'weekly'} · reported by ${cli} as of ${clock(r.asOf)}`, usedPct: Math.min(100, Math.round(r.usedPct)), resetsAt: r.resetsAt }] : [];
+      }));
+      return [session, weekly, ...scoped];
     });
   }
 

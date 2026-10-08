@@ -1,12 +1,15 @@
-import type { Agent, AgentRole, AgentState, CliId, Conversation, HarborEvent, Id, Message, Project } from '../shared/api';
+import type { Agent, AgentRole, AgentState, CliId, Conversation, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
+import type { CatalogEntry, Need, Tier } from './clis/capabilities';
+import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
 import type { ResolvedCli } from './clis/discovery';
 import type { Git } from './git';
 import { breakCycles } from './graph';
+import { Journal, journalDigest, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
-  MAIN_SYSTEM, clip, mainPrompt, parseMainOutput, parseProtocol, stripProtocol, subagentPrompt, systemFor,
-  type HelpRequest, type MainTrigger, type PlannedTask
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
+  type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
 import { route, type Complexity, type RouteDecision } from './router';
 import { newId, type Store } from './store';
@@ -23,35 +26,79 @@ export interface OrchestratorDeps {
   adapterFor: (cli: CliId) => CliAdapter | undefined;
   enabled: (cli: CliId) => boolean;
   verified?: (cli: CliId) => boolean;
+  /** Capability catalog (editable data); defaults to the built-in one. */
+  catalog?: CatalogEntry[];
   worktreesRoot: string;
   /** Raise a permission event and resolve with the user's answer. */
   ask: (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id) => Promise<boolean>;
   freeReset?: FreeResetCoordinator;
   maxActivePerProject?: number;
-  /** Cap on automatic main-agent turns after one user message (guards against runaway loops). */
+  /** Cap on automatic lead turns after one user message (guards against runaway loops). */
   maxAutoTurns?: number;
+  /** Where Harbor records what went wrong in its own runs; in memory when omitted. */
+  journal?: Journal;
+  /** Checks Harbor runs after an edit helper (default: `.harbor/checks.json` of the project, run in a shell). */
+  loadChecks?: (projectPath: string) => string[];
+  runCheck?: CheckRunner;
 }
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
+const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
 const TERMINAL: AgentState[] = ['done', 'failed', 'stopped'];
 const DEFAULT_TITLE = 'New conversation';
 
-interface RoutedRun { ok: boolean; text: string; error?: string; stopped?: boolean; decision?: RouteDecision }
+interface RoutedRun {
+  ok: boolean;
+  text: string;
+  /** Every text chunk of the run, not only the final answer: protocol lines can be anywhere. */
+  allText?: string;
+  error?: string;
+  stopped?: boolean;
+  decision?: RouteDecision;
+}
+
+interface RoutedOptions {
+  prompt: string;
+  system: string;
+  /** Prepended when the native session cannot be resumed (first turn, or the CLI changed). */
+  contextIfNoResume?: string;
+  role: AgentRole;
+  complexity: Complexity;
+  tier?: Tier;
+  needs?: Need[];
+  effort?: Effort;
+  permission: 'read-only' | 'edit';
+  cwd: string;
+  signal: AbortSignal;
+  resume: boolean;
+  conversationId: Id;
+  stream: boolean;
+  /** Key of the native session to resume and record; defaults to the agent id. */
+  sessionKey?: Id;
+}
 
 export class Orchestrator {
   private locks: LockTable;
   private controllers = new Map<Id, AbortController>();
   private running = new Set<Id>();
   private mainChain = new Map<Id, Promise<void>>();
-  private mailbox = new Map<Id, string[]>();
   private followups = new Map<Id, string[]>();
   private reported = new Set<Id>();
   // Keyed by conversation: the main agent is shared by a project's conversations, but its context must not be.
   private notes = new Map<Id, string[]>();
   private autoTurns = new Map<Id, number>();
-  private mainConv = new Map<Id, Id>();
+  /** Running lead turns by conversation, so Stop can reach them and conversations never block each other. */
+  private leads = new Map<Id, { ctl: AbortController; projectId: Id }>();
+  private leadActive = new Map<Id, number>();
+  /** What the concierge last decided per conversation: the lead keeps its tier for report and help turns. */
+  private plans = new Map<Id, Escalation>();
+  /** Conversations where the lead asked a question: the next user message answers it and skips the concierge. */
+  private leadAsked = new Set<Id>();
   private conflictAsked = new Set<Id>();
-  private idle = new Set<() => void>();
+  /** Open questions to the user. In memory only: after a restart the question text is still in the chat to answer by typing. */
+  private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
+  private sessionGeneration = new Map<Id, number>();
+  private stoppedSessions = new Set<Id>();
 
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
@@ -62,6 +109,26 @@ export class Orchestrator {
   // ------------------------------------------------------------ plumbing
 
   private emit(e: HarborEvent): void { this.d.bus.emit(e); }
+
+  private sessionState(id: Id, state: SessionActivity['state'], detail?: string): void {
+    const c = this.d.store.getConversation(id);
+    if (!c) return;
+    const started = state === 'working' && c.activity?.state !== 'working' ? Date.now() : c.activity?.started;
+    this.d.store.patchConversation(id, { activity: { ...c.activity, state, started, updated: Date.now(), detail } });
+    this.emit({ type: 'conversation', conversation: { ...c } });
+  }
+
+  stopConversation(id: Id): void {
+    const c = this.d.store.getConversation(id);
+    if (!c) throw new Error('This conversation is no longer available.');
+    this.stoppedSessions.add(id);
+    this.sessionGeneration.set(id, (this.sessionGeneration.get(id) ?? 0) + 1);
+    this.leads.get(id)?.ctl.abort();
+    for (const a of this.d.store.listAgentRecords(c.projectId)) {
+      if (a.role !== 'main' && (a.parentConversationId === id || a.id === c.agentId)) this.stop(a.id);
+    }
+    this.sessionState(id, 'stopped', 'Stopped by you. Conversation history and files are preserved.');
+  }
 
   private post(conversationId: Id, role: Message['role'], text: string, extra: Partial<Message> = {}): Message {
     const m = this.d.store.addMessage({ id: newId(), conversationId, role, text, time: Date.now(), ...extra });
@@ -89,7 +156,7 @@ export class Orchestrator {
     this.notes.set(conversationId, n.slice(-10));
   }
 
-  /** Resolves when no agent work or main turn is in flight (used by tests and the smoke script). */
+  /** Resolves when no agent work or lead turn is in flight (used by tests and the smoke script). */
   async whenIdle(timeoutMs = 60000): Promise<void> {
     const start = Date.now();
     for (;;) {
@@ -109,8 +176,8 @@ export class Orchestrator {
     let main = store.mainAgent(project.id);
     if (!main) {
       main = store.upsertAgent({
-        id: newId(), projectId: project.id, role: 'main', title: 'Main agent', state: 'waiting',
-        cli: 'auto', model: 'auto', effort: 'low', task: 'Coordinate project work', dependsOn: [], revision: 1,
+        id: newId(), projectId: project.id, role: 'main', title: 'Lead agent', state: 'waiting',
+        cli: 'auto', model: 'auto', effort: 'low', task: 'Work on the user\'s requests', dependsOn: [], revision: 1,
         parentConversationId: '', attempts: 0, created: Date.now()
       });
     }
@@ -126,6 +193,9 @@ export class Orchestrator {
 
   /** Reconcile persisted state after a restart: nothing is running, so working agents are stopped (never replayed). */
   recover(): void {
+    for (const p of this.d.store.listProjects()) for (const c of this.d.store.listConversations(p.id)) {
+      if (c.activity && ['working', 'queued'].includes(c.activity.state)) this.sessionState(c.id, 'stopped', 'Harbor restarted. Send a message to continue.');
+    }
     for (const a of this.d.store.allAgentRecords()) {
       if (a.state === 'working') {
         this.setState(a, 'stopped', { error: 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.' });
@@ -143,8 +213,10 @@ export class Orchestrator {
     if (!conv) throw new Error('Unknown conversation');
     const agent = this.d.store.getAgent(conv.agentId);
     if (!agent) throw new Error('Conversation has no agent');
+    if (conv.archived) throw new Error('Restore this conversation before sending a message.');
     this.post(conversationId, 'user', text, { agentId: agent.id });
-    if (conv.title === DEFAULT_TITLE) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
+    for (const [id, q] of this.questions) if (q.conversationId === conversationId) this.questions.delete(id);
+    if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
       this.enqueueMain(agent.projectId, { kind: 'user', text }, conversationId);
@@ -157,12 +229,13 @@ export class Orchestrator {
     const a = this.d.store.getAgent(agentId);
     if (!a) return;
     if (a.role === 'main') {
-      // Stop only the conversation whose main turn is running; other conversations keep their agents.
-      const conv = this.mainConv.get(a.projectId);
+      // Stop the conversations whose lead is running; with none running, stop every helper of the project.
+      const active = [...this.leads].filter(([, l]) => l.projectId === a.projectId);
+      const convs = new Set(active.map(([c]) => c));
       for (const s of this.d.store.listAgentRecords(a.projectId)) {
-        if (s.role !== 'main' && (!conv || s.parentConversationId === conv)) this.stop(s.id);
+        if (s.role !== 'main' && (!convs.size || convs.has(s.parentConversationId))) this.stop(s.id);
       }
-      this.controllers.get(a.id)?.abort();
+      for (const [, l] of active) l.ctl.abort();
       return;
     }
     this.controllers.get(a.id)?.abort();
@@ -173,57 +246,127 @@ export class Orchestrator {
     }
   }
 
-  // ------------------------------------------------------------ main agent
+  // ------------------------------------------------------------ concierge and lead
 
-  private enqueueMain(projectId: Id, trigger: MainTrigger, conversationId: Id): void {
-    const prev = this.mainChain.get(projectId) ?? Promise.resolve();
+  private enqueueMain(projectId: Id, trigger: LeadTrigger, conversationId: Id): void {
+    if (trigger.kind !== 'user' && this.stoppedSessions.has(conversationId)) return;
+    if (trigger.kind === 'user') this.stoppedSessions.delete(conversationId);
+    // One chain per conversation: a long turn in one conversation must not block another.
+    const prev = this.mainChain.get(conversationId) ?? Promise.resolve();
+    const generation = this.sessionGeneration.get(conversationId) ?? 0;
+    if (!this.leads.has(conversationId)) this.sessionState(conversationId, 'queued', 'Waiting to start.');
     this.mainBusy++;
-    const next = prev.then(() => this.mainTurn(projectId, trigger, conversationId)).catch((e) => {
-      this.post(conversationId, 'system', `Main agent error: ${String(e?.message ?? e)}`);
-    }).finally(() => { this.mainBusy--; if (this.mainChain.get(projectId) === next) this.mainChain.delete(projectId); });
-    this.mainChain.set(projectId, next);
+    const next = prev.then(() => generation === (this.sessionGeneration.get(conversationId) ?? 0) ? this.mainTurn(projectId, trigger, conversationId) : undefined).catch((e) => {
+      this.post(conversationId, 'system', `Lead agent error: ${String(e?.message ?? e)}`);
+      this.sessionState(conversationId, 'failed', String(e?.message ?? e));
+    }).finally(() => { this.mainBusy--; if (this.mainChain.get(conversationId) === next) this.mainChain.delete(conversationId); });
+    this.mainChain.set(conversationId, next);
   }
 
-  private async mainTurn(projectId: Id, trigger: MainTrigger, conversationId: Id): Promise<void> {
+  /** Every user prompt: a cheap concierge first, then (only when it escalates) a lead chosen for the work. */
+  private async mainTurn(projectId: Id, trigger: LeadTrigger, conversationId: Id): Promise<void> {
     const project = this.project(projectId);
     const main = this.ensureProject(project).main;
+    const ctl = new AbortController();
+    this.leads.set(conversationId, { ctl, projectId });
+    this.leadActive.set(projectId, (this.leadActive.get(projectId) ?? 0) + 1);
+    this.setState(main, 'working');
+    this.sessionState(conversationId, 'working', 'Harbor is working on this conversation.');
+    try {
+      if (!this.d.store.getConversation(conversationId)?.reviewBase) {
+        const base = await this.d.git.head(project.path);
+        if (base) this.d.store.patchConversation(conversationId, { reviewBase: base });
+      }
+      let plan: Escalation = this.plans.get(conversationId) ?? { complexity: 'medium', needs: [], ack: '' };
+      if (trigger.kind === 'user') {
+        const deep = /^\/deep\b\s*/i.exec(trigger.text);
+        if (deep) {
+          // "/deep" skips the front desk and gives the lead a strong model.
+          plan = { complexity: 'high', needs: ['planning', 'code'], ack: '' };
+          trigger = { kind: 'user', text: trigger.text.slice(deep[0].length) || trigger.text };
+        } else if (!this.leadAsked.has(conversationId)) {
+          const c = await this.concierge(project, main, conversationId, trigger.text, ctl.signal);
+          if (c === 'handled') return;
+          plan = c;
+        } // else: this message answers the lead's own question, so there is nothing to triage
+        this.plans.set(conversationId, plan);
+      }
+      this.leadAsked.delete(conversationId);
+      await this.leadTurn(project, main, trigger, conversationId, plan, ctl.signal);
+    } finally {
+      this.leads.delete(conversationId);
+      if (ctl.signal.aborted) this.sessionState(conversationId, 'stopped', 'Stopped by you.');
+      else if (this.d.store.getConversation(conversationId)?.activity?.state === 'working') this.sessionState(conversationId, 'done', 'The lead has finished its turn.');
+      const n = (this.leadActive.get(projectId) ?? 1) - 1;
+      if (n <= 0) { this.leadActive.delete(projectId); this.setState(main, 'waiting'); } else this.leadActive.set(projectId, n);
+    }
+  }
+
+  private registerFor(projectId: Id, conversationId: Id): AgentRecord[] {
+    return this.d.store.listAgentRecords(projectId).filter((x) => x.role !== 'main' && x.parentConversationId === conversationId);
+  }
+
+  private chatHistory(conversationId: Id, excludeLatest: boolean): Message[] {
+    const msgs = this.d.store.listMessages(conversationId).filter((m) => m.role === 'user' || m.role === 'assistant');
+    return (excludeLatest ? msgs.slice(0, -1) : msgs).slice(-10);
+  }
+
+  /** Cheap model: answers simple messages itself, otherwise says what the work needs. Never uses tools. */
+  private async concierge(project: Project, main: AgentRecord, conversationId: Id, text: string, signal: AbortSignal): Promise<'handled' | Escalation> {
+    const out = await this.runRouted(main, {
+      prompt: conciergePrompt(project.name, this.registerFor(project.id, conversationId), this.chatHistory(conversationId, true).slice(-8), text), system: CONCIERGE_SYSTEM,
+      role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'], permission: 'read-only', cwd: project.path,
+      signal, resume: false, conversationId, stream: false, sessionKey: `concierge:${conversationId}`
+    });
+    if (!out.ok) {
+      this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
+      this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `Harbor could not run: ${out.error}`, { agentId: main.id });
+      return 'handled';
+    }
+    const details = out.decision && { cli: out.decision.cli, model: out.decision.model, effort: out.decision.effort, reason: out.decision.reason };
+    const d = parseConcierge(out.text);
+    // The front desk cannot read files: an answer to a message that clearly needs the workspace is a guess, so the lead takes it.
+    // Medium (not high): the guard knows work is needed, not how hard it is, and must not buy Opus for a trivial edit.
+    if (d.kind === 'answer' && needsWorkspace(text)) return { complexity: 'medium', needs: ['code'], ack: '' };
+    if (d.kind === 'answer') { this.post(conversationId, 'assistant', d.text, { agentId: main.id, details }); return 'handled'; }
+    if (d.escalation.ack) this.post(conversationId, 'assistant', d.escalation.ack, { agentId: main.id, details });
+    return d.escalation;
+  }
+
+  /** The working agent: reads, edits, runs commands, and delegates through HARBOR_DELEGATE lines when that pays off. */
+  private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal): Promise<void> {
     const notes = this.notes.get(conversationId) ?? [];
     this.notes.delete(conversationId);
-    const agents = this.d.store.listAgentRecords(projectId).filter((x) => x.role === 'main' || x.parentConversationId === conversationId);
-    this.mainConv.set(projectId, conversationId);
-    let prompt = mainPrompt(project.name, agents, trigger, notes);
-    const ctl = new AbortController();
-    this.controllers.set(main.id, ctl);
-    this.setState(main, 'working');
-    try {
-      let out = await this.runRouted(main, { prompt, system: MAIN_SYSTEM, role: 'main', complexity: 'low', permission: 'read-only', cwd: project.path, signal: ctl.signal, resume: false, conversationId, stream: false });
-      if (!out.ok) {
-        this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The main agent could not run: ${out.error}`, { agentId: main.id });
-        return;
-      }
-      let parsed = parseMainOutput(out.text);
-      if (!parsed.parsed) {
-        prompt += '\n\nYour previous answer was not valid JSON. Reply with ONE JSON object only, in the specified format.';
-        const retry = await this.runRouted(main, { prompt, system: MAIN_SYSTEM, role: 'main', complexity: 'low', permission: 'read-only', cwd: project.path, signal: ctl.signal, resume: false, conversationId, stream: false });
-        if (retry.ok) { out = retry; parsed = parseMainOutput(retry.text); }
-      }
-      const details = out.decision && { cli: out.decision.cli, model: out.decision.model, effort: out.decision.effort, reason: out.decision.reason };
-      const created = this.createTasks(project, parsed.tasks, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
-      const reply = parsed.reply || (created.length ? `Working on it: ${created.map((c) => c.title).join('; ')}.` : '');
-      if (reply) this.post(conversationId, 'assistant', reply, { agentId: main.id, details });
-      if (created.length > 1 || created.some((c) => c.dependsOn.length)) {
-        this.post(conversationId, 'system', 'Plan: ' + created.map((c, i) => `${i + 1}. [${c.role}] ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
-      }
-      if (trigger.kind === 'help' && !created.some((c) => c.helpFor === trigger.from.id)) {
-        // No sibling assigned: tell the blocked agent so it can continue on its own judgment.
-        this.followUp(trigger.from, `The main agent did not assign a sibling for your request. Response: ${reply || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
-      }
-      this.pump(projectId);
-    } finally {
-      this.controllers.delete(main.id);
-      this.mainConv.delete(projectId);
-      this.setState(main, 'waiting');
+    const history = this.chatHistory(conversationId, trigger.kind === 'user');
+    const tier: Tier = plan.complexity === 'high' ? 'strong' : plan.complexity === 'low' ? 'cheap' : 'standard';
+    const out = await this.runRouted(main, {
+      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes }), system: LEAD_SYSTEM,
+      contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
+      role: 'main', complexity: plan.complexity, tier, effort: plan.complexity, needs: plan.needs, permission: 'edit', cwd: project.path,
+      signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
+    });
+    if (!out.ok) {
+      this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
+      this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The lead agent could not run: ${out.error}`, { agentId: main.id });
+      return;
     }
+    const proto = parseProtocol(out.allText ?? out.text);
+    const created = this.createTasks(project, proto.delegate, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
+    for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
+    if (created.length) {
+      this.post(conversationId, 'system', 'Delegated: ' + created.map((c, i) => `${i + 1}. ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
+    }
+    const asking = proto.ask[0];
+    if (asking) {
+      this.leadAsked.add(conversationId);
+      if (!stripProtocol(out.text).includes(asking.question)) this.post(conversationId, 'assistant', asking.question, { agentId: main.id });
+      this.askUser(main.id, conversationId, asking);
+    }
+    if (trigger.kind === 'help' && !created.some((c) => c.helpFor === trigger.from.id)) {
+      // No helper assigned: tell the blocked agent so it can continue on its own judgment.
+      this.followUp(trigger.from, `The lead did not assign another helper for your request. Response: ${stripProtocol(out.text) || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
+    }
+    this.pump(project.id);
   }
 
   private createTasks(project: Project, tasks: PlannedTask[], conversationId: Id, requester?: Id): AgentRecord[] {
@@ -249,12 +392,18 @@ export class Orchestrator {
       const deps = graph.get(id)!;
       const wantedSpec = t.specFrom ? resolve(t.specFrom) : undefined;
       const specFromId = wantedSpec && deps.has(wantedSpec) ? wantedSpec : undefined;
+      // A retry of failed or rejected work moves up one complexity level, i.e. one model tier, never beyond high.
+      const prior = t.retryOf ? store.listAgentRecords(project.id).find((a) => a.id === t.retryOf) : undefined;
+      const rejected = prior && (prior.state === 'failed' || prior.result?.verdict === 'changes' || prior.result?.outcome === 'blocked' || prior.checks?.some((c) => !c.ok));
+      const complexity: Complexity = rejected ? (CX_UP_ORDER[Math.max(CX_UP_ORDER.indexOf(t.complexity), CX_UP_ORDER.indexOf(prior.complexity ?? 'medium')) + 1] ?? 'high') : t.complexity;
+      if (rejected && complexity !== t.complexity) this.post(conversationId, 'system', `Retrying "${t.title}" with a stronger model (${t.complexity} → ${complexity}) because "${prior.title}" did not succeed.`);
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
-        effort: t.complexity, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
-        helpFor: t.helpFor ?? requester, revision: 1, complexity: t.complexity,
+        effort: complexity, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
+        needs: t.needs, readOnly: t.access === 'read',
+        helpFor: t.helpFor ?? requester, revision: 1, complexity,
         parentConversationId: conversationId, attempts: 0, created: Date.now(),
-        // Fast path: a clear small change goes straight to one implementer; its instructions are the spec.
+        // A clear edit goes straight to one implementer; its instructions are the spec.
         spec: t.role === 'implementer' && !specFromId ? t.instructions : undefined
       };
       store.upsertAgent(rec);
@@ -277,9 +426,11 @@ export class Orchestrator {
     return this.d.store.listAgentRecords(projectId).filter((a) => a.role !== 'main' && this.running.has(a.id)).length;
   }
 
+  private canEdit(a: AgentRecord): boolean { return EDIT_ROLES.includes(a.role) && !a.readOnly; }
+
   pump(projectId: Id): void {
     const { store } = this.d;
-    const max = this.d.maxActivePerProject ?? 3;
+    const max = this.d.maxActivePerProject ?? 4;
     const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main').sort((a, b) => a.created - b.created);
     const byId = new Map(all.map((a) => [a.id, a]));
     for (const a of all) {
@@ -301,9 +452,9 @@ export class Orchestrator {
     }
   }
 
-  /** Acquire file ownership for edit roles. On conflict, ask the user whether to proceed in parallel. */
+  /** Acquire file ownership for edit helpers. On conflict, ask the user whether to proceed in parallel. */
   private claim(a: AgentRecord): boolean {
-    if (!EDIT_ROLES.includes(a.role) || a.sharedOk) return true;
+    if (!this.canEdit(a) || a.sharedOk) return true;
     const files = a.files?.length ? a.files : [WHOLE_PROJECT];
     const r = this.locks.acquire(a.projectId, a.id, files);
     if (r.ok) return true;
@@ -323,7 +474,7 @@ export class Orchestrator {
     return false;
   }
 
-  // ------------------------------------------------------------ running subagents
+  // ------------------------------------------------------------ running helpers
 
   private failAgent(a: AgentRecord, error: string): void {
     this.running.delete(a.id);
@@ -345,12 +496,12 @@ export class Orchestrator {
     this.setState(a, 'working', { error: undefined });
     this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
 
-    // Workspace: edit roles get an isolated worktree; read-only roles read the project (or the change under review).
+    // Workspace: edit helpers get an isolated worktree; read-only helpers read the project (or the change under review).
     let cwd = project.path;
     let worktreeNote: string | undefined;
     let depsLinked = false;
     const upstream = a.dependsOn.map((id) => store.getAgent(id)).filter((x): x is AgentRecord => !!x);
-    if (EDIT_ROLES.includes(a.role)) {
+    if (this.canEdit(a)) {
       if (!a.worktree && (await this.d.git.isRepoWithCommits(project.path))) {
         try {
           const wt = await this.d.git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), a.title, a.id);
@@ -375,20 +526,17 @@ export class Orchestrator {
       if (src?.report) { a.spec = src.report; store.upsertAgent(a); }
     }
 
-    const prompt = subagentPrompt(a, {
-      projectName: project.name, upstream, siblings: store.listAgentRecords(a.projectId),
-      mailbox: this.drainMailbox(a.id), worktreeNote
-    });
+    const prompt = subagentPrompt(a, { projectName: project.name, upstream, worktreeNote });
     const res = await this.execute(a, prompt, { cwd, resume: false });
     await this.afterRun(a, res);
   }
 
-  /** One CLI run for an agent (initial or follow-up), streaming into its conversation. */
+  /** One CLI run for a helper (initial or follow-up), streaming into its conversation. */
   private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean }): Promise<RoutedRun> {
     const ctl = this.controllers.get(a.id) ?? new AbortController();
     return this.runRouted(a, {
-      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium',
-      permission: EDIT_ROLES.includes(a.role) ? 'edit' : 'read-only', cwd: o.cwd, signal: ctl.signal,
+      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs,
+      permission: this.canEdit(a) ? 'edit' : 'read-only', cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true
     });
   }
@@ -398,7 +546,7 @@ export class Orchestrator {
     this.running.delete(a.id);
     this.controllers.delete(a.id);
     let report = stripProtocol(res.text);
-    const proto = parseProtocol(res.text);
+    const proto = parseProtocol(res.allText ?? res.text);
 
     if (res.ok && a.worktree && a.baseCommit) {
       const cp = await git.checkpoint(a.worktree, `harbor: ${a.title}`);
@@ -417,14 +565,21 @@ export class Orchestrator {
     }
 
     const blocked = res.ok && proto.help.some((h) => h.blocked);
+    const asking = res.ok && proto.ask[0];
     this.locks.release(a.id);
     if (res.stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed' });
-    else if (blocked) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Blocked: waiting for a sibling requested through the main agent.' });
+    else if (asking) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Waiting for your answer.' });
+    else if (blocked) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Blocked: waiting for another helper requested through the lead.' });
     else this.setState(a, 'done', { report, summary: firstLine(report), error: undefined });
 
+    if (asking) {
+      const conv = this.convFor(a);
+      this.post(conv, 'assistant', asking.question, { agentId: a.id });
+      this.post(a.parentConversationId, 'system', `"${a.title}" is waiting for your answer: ${clip(asking.question, 160)}`, { agentId: a.id });
+      this.askUser(a.id, conv, asking);
+    }
     for (const h of proto.help) this.helpRequested(a, h);
-    for (const p of proto.peer) this.sendPeer(a, p.to, p.text);
 
     // Direct prompts that arrived while running are delivered now, resuming this agent's session.
     const queued = this.followups.get(a.id)?.splice(0) ?? [];
@@ -440,17 +595,17 @@ export class Orchestrator {
     const verb = a.state === 'done' ? 'finished' : a.state === 'stopped' ? 'was stopped' : 'failed';
     this.post(parent, 'system', `${a.state === 'done' ? '✓' : '✗'} ${a.title} ${verb}${a.summary ? `: ${clip(a.summary, 200)}` : a.error ? `: ${clip(a.error, 200)}` : ''}`, { agentId: a.id });
 
-    // A sibling helping a blocked agent: hand its report back.
+    // A helper requested for a blocked agent: hand its report back.
     if (a.helpFor && a.state === 'done') {
       const req = store.getAgent(a.helpFor);
-      if (req && req.state === 'waiting') this.followUp(req, `Your requested sibling "${a.title}" finished. Its report:\n${clip(a.report ?? '', 5000)}\n\nContinue your assignment.`);
+      if (req && req.state === 'waiting') this.followUp(req, `Your requested helper "${a.title}" finished. Its report:\n${clip(a.report ?? '', 5000)}\n\nContinue your assignment.`);
     }
 
     this.pump(a.projectId);
     this.maybeReportToMain(a);
   }
 
-  /** Call the main agent only when its judgement is needed: planner done, any failure, or all work finished. */
+  /** Resume the lead only when its judgement is needed: planner done, any failure, or all work finished. */
   private maybeReportToMain(a: AgentRecord): void {
     const { store } = this.d;
     const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main' && x.parentConversationId === a.parentConversationId);
@@ -459,7 +614,7 @@ export class Orchestrator {
     if (!needsMain) return;
     const unreported = agents.filter((x) => TERMINAL.includes(x.state) && !this.reported.has(`${x.id}:${x.revision}:${x.state}`));
     if (!unreported.length) return;
-    // A stop-all should not trigger a flurry of main turns.
+    // A stop-all should not trigger a flurry of lead turns.
     if (unreported.every((x) => x.state === 'stopped')) { unreported.forEach((x) => this.reported.add(`${x.id}:${x.revision}:${x.state}`)); return; }
     const turns = (this.autoTurns.get(a.parentConversationId) ?? 0) + 1;
     this.autoTurns.set(a.parentConversationId, turns);
@@ -468,7 +623,7 @@ export class Orchestrator {
       return;
     }
     unreported.forEach((x) => this.reported.add(`${x.id}:${x.revision}:${x.state}`));
-    this.enqueueMain(a.projectId, { kind: 'reports', items: unreported.map((agent) => ({ agent })) }, a.parentConversationId);
+    this.enqueueMain(a.projectId, { kind: 'reports', items: unreported }, a.parentConversationId);
   }
 
   // ------------------------------------------------------------ direct prompts and follow-ups
@@ -487,79 +642,78 @@ export class Orchestrator {
     } else this.followUp(a, text);
   }
 
-  /** Continue an agent's own session with a new message. */
+  /** Continue a helper's own session with a new message. */
   private followUp(a: AgentRecord, text: string): void {
     if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(text); this.followups.set(a.id, q); return; }
     this.begin(a.id);
     void (async () => {
       const cwd = a.worktree ?? this.project(a.projectId).path;
-      if (EDIT_ROLES.includes(a.role) && !a.worktree) {
+      if (this.canEdit(a) && !a.worktree) {
         const r = this.locks.acquire(a.projectId, a.id, a.files?.length ? a.files : [WHOLE_PROJECT]);
         if (!r.ok) { this.running.delete(a.id); this.post(this.convFor(a), 'system', 'Another agent owns the files this agent needs; try again when it finishes.', { agentId: a.id }); return; }
       }
       this.setState(a, 'working', { error: undefined });
-      const mail = this.drainMailbox(a.id);
-      const prompt = mail.length ? `${text}\n\nMessages delivered to you:\n${mail.map((m) => `- ${m}`).join('\n')}` : text;
-      const res = await this.execute(a, prompt, { cwd, resume: true });
+      const res = await this.execute(a, text, { cwd, resume: true });
       await this.afterRun(a, res);
     })().catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`));
   }
 
-  // ------------------------------------------------------------ collaboration
+  // ------------------------------------------------------------ questions to the user
+
+  /** Pop a question up on the user's screen. The asker has already ended its turn; the answer is its next message. */
+  private askUser(agentId: Id, conversationId: Id, ask: AskRequest): void {
+    for (const [id, q] of this.questions) if (q.agentId === agentId && q.conversationId === conversationId) this.questions.delete(id); // a newer question replaces the old one
+    const requestId = newId();
+    this.questions.set(requestId, { agentId, conversationId });
+    this.sessionState(conversationId, 'waiting', ask.question);
+    this.emit({ type: 'question', requestId, conversationId, agentId, prompt: ask.question, options: ask.options.length ? ask.options : undefined, allowText: ask.allowText });
+  }
+
+  async answerQuestion(requestId: Id, answer: string): Promise<void> {
+    const q = this.questions.get(requestId);
+    if (!q) throw new Error('This question is no longer pending. Answer in the chat instead.');
+    if (!answer.trim()) throw new Error('Choose an option or type an answer.');
+    this.questions.delete(requestId);
+    await this.userMessage(q.conversationId, answer.trim());
+  }
+
+  // ------------------------------------------------------------ help requests
 
   private helpRequested(a: AgentRecord, h: HelpRequest): void {
     this.d.store.addCoordination({ projectId: a.projectId, kind: 'help', from: a.id, text: `${h.reason} → ${h.proposedRole}: ${h.instructions}` });
-    this.post(this.convFor(a), 'system', `Requested help from the main agent: ${h.instructions || h.reason}`, { agentId: a.id });
+    this.post(this.convFor(a), 'system', `Requested help from the lead: ${h.instructions || h.reason}`, { agentId: a.id });
     this.enqueueMain(a.projectId, { kind: 'help', from: a, reason: h.reason, proposedRole: h.proposedRole, instructions: h.instructions, blocked: h.blocked }, a.parentConversationId);
-  }
-
-  private drainMailbox(agentId: Id): string[] { return this.mailbox.get(agentId)?.splice(0) ?? []; }
-
-  /** Sibling message through the in-process bus: logged to both conversations and the coordination record. */
-  sendPeer(from: AgentRecord, to: string, text: string): boolean {
-    const sibs = this.d.store.listAgentRecords(from.projectId).filter((s) => s.role !== 'main' && s.id !== from.id);
-    const q = to.toLowerCase();
-    const matches = sibs.filter((s) => s.id === to || s.title.toLowerCase() === q);
-    const target = matches[0] ?? (sibs.filter((s) => s.title.toLowerCase().includes(q)).length === 1 ? sibs.find((s) => s.title.toLowerCase().includes(q)) : undefined);
-    if (!target) {
-      this.post(this.convFor(from), 'system', `Peer message not delivered: no unique sibling matches "${to}".`, { agentId: from.id });
-      return false;
-    }
-    const box = this.mailbox.get(target.id) ?? [];
-    box.push(`from "${from.title}": ${text}`);
-    this.mailbox.set(target.id, box);
-    this.d.store.addCoordination({ projectId: from.projectId, kind: 'peer', from: from.id, to: target.id, text });
-    const line = `[sibling] ${from.title} → ${target.title}: ${text}`;
-    this.post(this.convFor(from), 'system', line, { agentId: from.id });
-    this.post(this.convFor(target), 'system', line, { agentId: from.id });
-    this.addNote(from.parentConversationId, line);
-    return true;
   }
 
   // ------------------------------------------------------------ routed execution with fallback
 
-  private async runRouted(
-    agent: AgentRecord,
-    o: { prompt: string; system: string; role: AgentRole; complexity: Complexity; permission: 'read-only' | 'edit'; cwd: string; signal: AbortSignal; resume: boolean; conversationId: Id; stream: boolean }
-  ): Promise<RoutedRun> {
+  private async runRouted(agent: AgentRecord, o: RoutedOptions): Promise<RoutedRun> {
     const { store, ledger } = this.d;
     const exclude: CliId[] = [];
+    const key = o.sessionKey ?? agent.id;
     let lastError = 'No eligible CLI is available. Open Settings to install or sign in to a supported CLI.';
-    const maxAttempts = Math.max(1, this.d.getClis().length);
+    // A rate limit now cools down one model, not the CLI, so a CLI may be tried again with a cheaper model before another CLI.
+    const maxAttempts = Math.max(1, this.d.getClis().length * 3);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const link = store.getSession(agent.id);
-      const decision = route({ role: o.role, complexity: o.complexity, continuity: link?.cli, exclude }, {
+      const link = store.getSession(key);
+      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, continuity: o.resume ? link?.cli : undefined, exclude }, {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
-        verified: this.d.verified
+        verified: this.d.verified, catalog: this.d.catalog
       });
       if (!decision) return { ok: false, text: '', error: attempt === 0 ? lastError : `${lastError} (no remaining CLI to fall back to)` };
       const adapter = this.d.adapterFor(decision.cli)!;
       const resumeId = o.resume && link?.cli === decision.cli ? link.sessionId : undefined;
       if (o.resume && !resumeId && link) this.addNote(o.conversationId, `${agent.title}: continuing on ${decision.cli} without the previous ${link.cli} session`);
       this.setState(agent, agent.state, { cli: decision.cli, model: decision.model, effort: decision.effort, attempts: attempt });
+      if (agent.role === 'main') {
+        const c = store.getConversation(o.conversationId);
+        if (c?.activity) store.patchConversation(c.id, { activity: { ...c.activity, cli: decision.cli, model: decision.model } });
+        this.sessionState(o.conversationId, 'working', o.sessionKey?.startsWith('concierge:') ? 'First pass: checking your request.' : 'Lead agent: working on your request.');
+      }
       if (attempt > 0) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
+      const prompt = !resumeId && o.contextIfNoResume ? `${o.contextIfNoResume}\n\n${o.prompt}` : o.prompt;
 
       // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
       let text = '', final = '', ok = false, error: string | undefined, rateLimited = false, usage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
@@ -568,8 +722,8 @@ export class Orchestrator {
       const details = { cli: decision.cli, model: decision.model, effort: decision.effort, reason: decision.reason };
       const t0 = Date.now();
       try {
-        for await (const c of adapter.run(o.prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, systemPrompt: o.system, signal: o.signal }) as AsyncIterable<Chunk>) {
-          if (c.kind === 'session') store.setSession({ agentId: agent.id, cli: decision.cli, sessionId: c.id, updated: Date.now() });
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, systemPrompt: o.system, signal: o.signal }) as AsyncIterable<Chunk>) {
+          if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now() });
           else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
             if (o.stream) {
@@ -593,13 +747,11 @@ export class Orchestrator {
       ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited, limits, ...usage });
       this.emit({ type: 'usage', windows: ledger.windows(this.d.getClis().map((c) => c.id)) });
       if (rateLimited) void this.d.freeReset?.maybePropose(decision.cli).catch(() => {});
-      if (ok) {
-        if (!o.stream) { /* main replies are posted by the caller with details */ }
-        return { ok: true, text: final || text, decision };
-      }
+      if (ok) return { ok: true, text: final || text, allText: text, decision };
       if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped' };
       lastError = `${decision.cli} failed${rateLimited ? ' (rate limit)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
-      exclude.push(decision.cli);
+      // A rate limit is held against the model in the ledger (it may be a per-model cap); anything else is a CLI-level failure.
+      if (!rateLimited) exclude.push(decision.cli);
       store.patchAgent(agent.id, { attempts: attempt + 1 });
     }
     return { ok: false, text: '', error: lastError };

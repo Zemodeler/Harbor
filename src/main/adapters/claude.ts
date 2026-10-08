@@ -43,10 +43,13 @@ export function parseClaudeLine(line: string): Chunk[] {
   } else if (j.type === 'rate_limit_event') {
     // The account's real 5h / 7-day utilization (0..1) as the subscription sees it, not just Harbor's runs.
     const uw = j.rate_limit_info?.unifiedWindows, asOf = Date.now();
-    const limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }> = [];
-    for (const [key, period] of [['five_hour', 'session'], ['seven_day', 'weekly']] as const) {
-      const w = uw?.[key];
-      if (w && typeof w.utilization === 'number' && typeof w.resetsAt === 'number') limits.push({ period, usedPct: w.utilization * 100, resetsAt: w.resetsAt * 1000, asOf });
+    const limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }> = [];
+    // `five_hour` / `seven_day` are account-wide; `seven_day_<model>` (e.g. opus, fable) is a per-model cap. The
+    // per-model key names are inferred from that pattern, not verified against every plan (see BACKLOG).
+    for (const [key, w] of Object.entries(uw ?? {}) as [string, any][]) {
+      const m = /^(five_hour|seven_day)(?:_(.+))?$/.exec(key);
+      if (!m || !w || typeof w.utilization !== 'number' || typeof w.resetsAt !== 'number') continue;
+      limits.push({ period: m[1] === 'five_hour' ? 'session' : 'weekly', usedPct: w.utilization * 100, resetsAt: w.resetsAt * 1000, asOf, ...(m[2] ? { scope: m[2].toLowerCase() } : {}) });
     }
     if (limits.length) out.push({ kind: 'limits', limits });
   } else if (j.type === 'result') {

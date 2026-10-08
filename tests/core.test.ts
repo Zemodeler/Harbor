@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ResolvedCli } from '../src/main/clis/discovery';
+import { DEFAULT_CATALOG, loadCatalog } from '../src/main/clis/capabilities';
 import { Git } from '../src/main/git';
 import { LockTable, WHOLE_PROJECT } from '../src/main/locks';
 import { route } from '../src/main/router';
@@ -134,10 +135,20 @@ describe('router', () => {
   it('skips exhausted CLIs and treats unknown sign-in as usable but less preferred', () => {
     const t = { now: 1 };
     const { ledger, run } = ledgerAt(t);
-    run('claude', { ok: false, rateLimited: true });
+    for (const model of ['haiku', 'sonnet', 'opus', 'claude-fable-5-1']) ledger.record({ cli: 'claude', model, projectId: 'p', agentId: 'a', durationMs: 1, ok: false, rateLimited: true });
     expect(route({ role: 'reviewer', complexity: 'low' }, base([cli('claude'), cli('codex', { authState: 'unknown', signedIn: false })], ledger))!.cli).toBe('codex');
     const fresh = ledgerAt({ now: 1 }).ledger;
     expect(route({ role: 'reviewer', complexity: 'low' }, base([cli('claude'), cli('codex', { authState: 'unknown', signedIn: false })], fresh))!.cli).toBe('claude');
+  });
+
+  it('a rate limit on one model leaves its siblings on the same CLI usable', () => {
+    const { ledger } = ledgerAt({ now: 1 });
+    ledger.record({ cli: 'claude', model: 'opus', projectId: 'p', agentId: 'a', durationMs: 1, ok: false, rateLimited: true });
+    expect(ledger.pressure('claude', 'opus').level).toBe('exhausted');
+    expect(ledger.pressure('claude', 'sonnet').level).toBe('plenty');
+    const d = route({ role: 'implementer', complexity: 'high' }, base([cli('claude')], ledger))!;
+    expect(d.model).toBe('claude-fable-5-1'); // the strong tier minus the capped Opus
+    expect(d.reason).toMatch(/opus skipped/);
   });
 
   it('lowers effort when allowance is low, planners get stronger models', () => {
@@ -154,6 +165,48 @@ describe('router', () => {
     const { ledger } = ledgerAt({ now: 1 });
     const d = route({ role: 'implementer', complexity: 'low' }, base([cli('claude'), cli('codex')], ledger, { load: (c: string) => (c === 'claude' ? 2 : 0) }))!;
     expect(d.cli).toBe('codex');
+  });
+});
+
+describe('router: capability catalog', () => {
+  const base = (clis: ResolvedCli[], ledger: UsageLedger, extra = {}) =>
+    ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, ...extra });
+
+  it('maps tiers to the cheapest fitting model', () => {
+    const { ledger } = ledgerAt({ now: 1 });
+    const inp = base([cli('claude')], ledger);
+    expect(route({ role: 'main', complexity: 'low', tier: 'cheap', effort: 'low' }, inp)!).toMatchObject({ model: 'haiku', effort: 'low' });
+    expect(route({ role: 'main', complexity: 'medium', tier: 'standard' }, inp)!.model).toBe('sonnet');
+    expect(route({ role: 'main', complexity: 'high', tier: 'strong', needs: ['planning'] }, inp)!.model).toBe('opus');
+    expect(route({ role: 'main', complexity: 'high', tier: 'strong' }, inp)!.reason).toContain('claude/opus (strong)');
+  });
+
+  it('lets stated needs pull the choice toward a model that is good at them', () => {
+    const { ledger } = ledgerAt({ now: 1 });
+    const catalog = [
+      { cli: 'claude', model: 'haiku', tier: 'cheap' as const, strengths: ['chat' as const] },
+      { cli: 'codex', model: 'default', tier: 'cheap' as const, strengths: ['code' as const] }
+    ];
+    const inp = base([cli('claude'), cli('codex')], ledger, { catalog });
+    expect(route({ role: 'main', complexity: 'low', tier: 'cheap', needs: ['code'] }, inp)!.cli).toBe('codex');
+    expect(route({ role: 'main', complexity: 'low', tier: 'cheap', needs: ['chat'] }, inp)!.cli).toBe('claude');
+  });
+
+  it('uses a CLI that is missing from the catalog with its default model', () => {
+    const { ledger } = ledgerAt({ now: 1 });
+    expect(route({ role: 'main', complexity: 'low' }, base([cli('gemini')], ledger, { catalog: [] }))!).toMatchObject({ cli: 'gemini', model: 'default' });
+  });
+});
+
+describe('capability catalog file', () => {
+  it('overrides the defaults from capabilities.json and falls back when it is missing or malformed', () => {
+    const d = tmp();
+    const f = join(d, 'capabilities.json');
+    expect(loadCatalog(f)).toBe(DEFAULT_CATALOG);
+    writeFileSync(f, 'not json');
+    expect(loadCatalog(f)).toBe(DEFAULT_CATALOG);
+    writeFileSync(f, JSON.stringify([{ cli: 'claude', model: 'sonnet', tier: 'cheap', strengths: ['code'] }, { cli: 'x', model: 'bad', tier: 'nope', strengths: [] }]));
+    expect(loadCatalog(f)).toEqual([{ cli: 'claude', model: 'sonnet', tier: 'cheap', strengths: ['code'] }]);
   });
 });
 

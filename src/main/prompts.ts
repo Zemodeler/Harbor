@@ -1,103 +1,200 @@
-import type { AgentRole, Id } from '../shared/api';
+import type { AgentRole, Id, Message } from '../shared/api';
+import { NEEDS, type Need } from './clis/capabilities';
 import type { Complexity } from './router';
 import type { AgentRecord } from './types';
 
-// ---------------------------------------------------------------- main agent
+/** A question that pops up on the user's screen. The asking agent ends its turn; the answer comes back as a chat message. */
+export interface AskRequest { question: string; options: string[]; allowText: boolean }
 
+/** One unit of delegated work, emitted by the lead as a HARBOR_DELEGATE line. */
 export interface PlannedTask {
-  /** Local reference used by other tasks in the same plan (dependsOn / specFrom). */
+  /** Local reference used by other tasks in the same turn (dependsOn / specFrom). */
   ref: string;
   title: string;
   role: Exclude<AgentRole, 'main'>;
+  /** read: never edits (research, review). edit: works in its own git worktree. */
+  access: 'read' | 'edit';
   instructions: string;
   complexity: Complexity;
+  needs: Need[];
   dependsOn: string[];
   files: string[];
   specFrom?: string;
-  /** Existing agent that asked for this help (sibling request flow). */
+  /** Existing agent that asked for this help (request-help flow). */
   helpFor?: Id;
+  /** Failed or rejected helper this task redoes. Harbor runs the retry one complexity level up (a stronger model). */
+  retryOf?: Id;
 }
 
-export interface MainOutput { reply: string; tasks: PlannedTask[]; parsed: boolean }
+export interface ImageBrief { subject: string; style: string; prompt: string; notes: string }
 
-export const MAX_TASKS_PER_PLAN = 8;
+/** A helper's machine-readable summary (HARBOR_RESULT line). Self-reported: checks here are claims, not evidence. */
+export interface HelperResult {
+  outcome: 'done' | 'partial' | 'blocked';
+  summary: string;
+  verdict?: 'approve' | 'changes';
+  checks: Array<{ cmd: string; ok: boolean }>;
+}
 
-export const MAIN_SYSTEM = `You are the MAIN AGENT of a software project in Harbor. You only coordinate: you assign work, monitor subagents, receive their reports, and keep the user informed.
-You MUST NOT write code, investigate the codebase, design features, run checks, review, or integrate. You do not use tools. If anything substantive is needed, assign a subagent.
+export const MAX_TASKS_PER_TURN = 8;
 
-Roles you can assign (one responsibility each):
-- planner: thinks through ONE feature/task and returns a written specification, acceptance criteria and proposed assignments. Never implements.
-- implementer: implements ONE bounded change strictly from a specification. Works in its own git worktree.
-- reviewer: reviews a defined change against its specification (read-only).
-- other: investigation, testing, or integration with a single stated responsibility.
+// ---------------------------------------------------------------- concierge (cheap front door)
 
-Rules:
-- Anything beyond a clear, small, fully specified change starts with a planner. When a planner's report arrives, assign implementers and set "specFrom" to the planner's task ref or agent id so the spec is passed verbatim.
-- A clear small edit may go straight to one implementer (put the precise spec in "instructions").
-- Questions about status are answered from the register below with no tasks.
-- Reviewers/testers depend on the implementer they check (use "dependsOn").
-- Subagents never create agents. When one asks for help, you decide whether to assign a sibling.
-- Never promise results are verified unless a reviewer/tester report says so.
+export interface Escalation { complexity: Complexity; needs: Need[]; ack: string }
+export type ConciergeDecision = { kind: 'answer'; text: string } | { kind: 'escalate'; escalation: Escalation; parsed: boolean };
 
+export const CONCIERGE_SYSTEM = `You are the front desk of Harbor, an assistant that works on one software project. You are fast and cheap. You do not use tools and you cannot read or change files.
+For each new user message, decide ONE of:
+1. Answer it yourself, right now: greetings, thanks, short questions about the conversation so far, status of running work (use the register), explanations that need no file access, or clarifying questions.
+2. Escalate to the lead agent, which can read and edit the project, run commands and delegate to helpers: anything that needs the codebase, files, commands, research or real work.
+When unsure, escalate. Never pretend to have inspected files, run anything or finished work.
 Reply with ONE JSON object and nothing else:
-{"reply": "<short message to the user>", "tasks": [{"ref":"t1","title":"<short imperative>","role":"planner|implementer|reviewer|other","instructions":"<what to do and the deliverable>","complexity":"low|medium|high","dependsOn":["<ref or agent id>"],"files":["<paths the task will edit>"],"specFrom":"<ref or agent id, optional>","helpFor":"<agent id, optional>"}]}
-Use "tasks": [] when nothing needs to be assigned.`;
+{"answer": "<your reply to the user>"}
+or
+{"escalate": {"complexity": "low|medium|high", "needs": ["chat|code|research|planning|review|long-context|vision"], "ack": "<one short sentence telling the user what happens next>"}}
+complexity: low = one trivial step; medium = ordinary multi-step work; high = hard, risky or large work.`;
+
+export function conciergePrompt(projectName: string, agents: AgentRecord[], history: Message[], text: string): string {
+  const parts = [`Project: ${projectName}`, `Running and finished work in this conversation:\n${registerText(agents)}`];
+  if (history.length) parts.push(`Recent conversation:\n${historyText(history)}`);
+  parts.push(`New message from the user:\n${text}`);
+  return parts.join('\n\n');
+}
+
+const asNeeds = (v: unknown): Need[] => strs(v).filter((n): n is Need => (NEEDS as readonly string[]).includes(n));
+
+// A front-desk answer to these is almost always a guess: they need files, commands or the code.
+const WORKSPACE_STRONG = [
+  /\b[\w./\\-]+\.(ts|tsx|js|jsx|mjs|cjs|json|md|py|cs|go|rs|java|kt|css|scss|html|ya?ml|toml|sql|sh|ps1|cmd)\b/i,
+  /```/,
+  /^\s*at \S+ \(|\b\w*(Error|Exception):/m
+];
+const WORKSPACE_WORDS = /\b(implement|refactor|fix|debug|build|compile|commit|merge|rebase|deploy|install|lint|typecheck|diff|branch|repo(sitory)?|codebase|the code|this code|source code|function|class|file|folder|directory|yourself|your (own )?code)\b/i;
+const SMALL_TALK = /^\s*(thanks|thank you|thx|ok(ay)?|great|cool|nice|hi|hello|hey|status\b|how('?s| is) it going|(is|are) .*\b(done|finished|running)\b)/i;
+
+/** True when a message clearly needs the workspace, so a front-desk answer must not stand. */
+export function needsWorkspace(text: string): boolean {
+  if (WORKSPACE_STRONG.some((r) => r.test(text))) return true;
+  return WORKSPACE_WORDS.test(text) && !SMALL_TALK.test(text);
+}
+
+export function parseConcierge(text: string): ConciergeDecision {
+  const j = extractJson(text) as Record<string, unknown> | undefined;
+  const fallback: ConciergeDecision = { kind: 'escalate', parsed: false, escalation: { complexity: 'medium', needs: ['code'], ack: '' } };
+  if (!j || typeof j !== 'object') return fallback;
+  const e = j['escalate'];
+  if (e && typeof e === 'object') {
+    const r = e as Record<string, unknown>;
+    return { kind: 'escalate', parsed: true, escalation: { complexity: CX.has(str(r['complexity'])) ? (r['complexity'] as Complexity) : 'medium', needs: asNeeds(r['needs']), ack: str(r['ack']).trim().slice(0, 300) } };
+  }
+  const answer = str(j['answer']).trim();
+  return answer ? { kind: 'answer', text: answer } : fallback;
+}
+
+// ---------------------------------------------------------------- lead agent
+
+export const LEAD_SYSTEM = `You are the LEAD agent of Harbor for one software project. The user talks to you directly, like a normal coding assistant: read the code, make changes, run commands, answer questions. Do the work yourself whenever it fits in one focused session. Be efficient: no filler, do not re-derive what you already know, do not ask for what you can find out.
+
+Delegating: you may hand work to helpers that Harbor starts for you. Delegate ONLY when it clearly pays off: independent parts that can run in parallel, long or bulky work (broad research sweeps, many mechanical edits), or an independent review of finished work. Split as finely as is useful and no finer, at most ${MAX_TASKS_PER_TURN} per turn. Do not delegate small things you can do in a few steps. Helpers cannot talk to each other or start helpers; give each one precise instructions, the files it owns and what to report back.
+Each delegation is one line, exactly this format, on its own line at the END of your answer:
+HARBOR_DELEGATE: {"ref":"t1","title":"<short imperative>","access":"edit|read","role":"implementer|reviewer|planner|other","instructions":"<what to do and the deliverable>","complexity":"low|medium|high","needs":["code|research|planning|review|long-context|vision"],"files":["<paths it will edit>"],"dependsOn":["<ref of an earlier delegation>"],"specFrom":"<ref whose report is its spec, optional>","retryOf":"<id of a failed or rejected helper this redoes, optional>"}
+Harbor picks the CLI and model for each helper from "needs" and "complexity" (cheapest that fits). When you redo work that a helper failed or a reviewer rejected, set "retryOf" to that helper's id: Harbor then runs the retry on a stronger model, so do not raise "complexity" yourself, runs them in parallel where it can, then resumes you with their reports. After delegating, end your turn with one or two sentences saying what is running. Edit helpers work in their own git worktree on a harbor/<slug> branch: do not edit the files they own meanwhile. When their reports arrive, check them (checks Harbor ran itself are evidence; checks a helper says it ran are claims), merge finished harbor/* branches into the current branch yourself when the user's request implies applying the changes (stop and report on conflicts, never push), and tell the user what was and was not verified.
+
+Asking the user: when you truly cannot continue without a decision, put one line at the end of your answer and finish your turn (do not guess):
+HARBOR_ASK: {"question":"<one clear question>","options":["<short choice>", ...],"allowText":true|false}
+
+Images: you cannot generate images and Harbor has no image tool. If the user wants an image, say so plainly and give them a ready-to-paste brief for an image generator, as one line at the end of your answer:
+HARBOR_IMAGE_BRIEF: {"subject":"<what the image shows>","style":"<art style, medium, lighting, palette>","prompt":"<the complete prompt to paste, with composition, aspect ratio and anything to avoid>","notes":"<which kind of tool suits it and what to adjust>"}
+
+Never use native Task/Agent tools or plugins to spawn agents; use HARBOR_DELEGATE. If the project root contains AGENTS.md, follow its conventions.`;
+
+export type LeadTrigger =
+  | { kind: 'user'; text: string; /** The stored user message; history is everything before it. */ messageId?: Id }
+  | { kind: 'reports'; items: AgentRecord[] }
+  | { kind: 'help'; from: AgentRecord; reason: string; proposedRole: string; instructions: string; blocked: boolean };
+
+export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[] } = {}): string {
+  const parts = [`Project: ${projectName}`];
+  if (o.history?.length) parts.push(`Conversation so far (your earlier session is not available):\n${historyText(o.history)}`);
+  if (agents.length) parts.push(`Helpers you started (authoritative; persisted by Harbor):\n${registerText(agents)}`);
+  if (o.notes?.length) parts.push(`Recent notes:\n${o.notes.map((e) => `- ${e}`).join('\n')}`);
+  if (t.kind === 'user') parts.push(`User:\n${t.text}`);
+  else if (t.kind === 'reports') {
+    parts.push('Helper reports (not independently verified unless a reviewer says so):\n' +
+      t.items.map((a) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}${a.branch ? `, branch=${a.branch}` : ''}${a.headCommit ? `, commit=${a.headCommit.slice(0, 10)}` : ''})\n${evidenceText(a)}${clip(a.report ?? a.error ?? '(no report)', REPORT_CHARS)}`).join('\n\n'));
+    parts.push('Decide the next step: delegate follow-up work, do it yourself, or if everything is finished write a concise summary for the user with evidence, saying what was and was not verified.');
+  } else {
+    parts.push(`Help request from helper "${t.from.title}" (id=${t.from.id}, blocked=${t.blocked}):\nreason: ${t.reason}\nproposed role: ${t.proposedRole}\nrequested work: ${t.instructions}\nDecide: delegate another helper (set helpFor to ${t.from.id}), do it yourself, or answer in plain text.`);
+  }
+  return parts.join('\n\n');
+}
+
+/** Reports are compressed before they reach the lead: the lead's context is the expensive part. */
+const REPORT_CHARS = 6000;
+
+export function registerText(agents: AgentRecord[]): string {
+  const subs = agents.filter((a) => a.role !== 'main');
+  if (!subs.length) return '(none)';
+  return subs.map((a) => {
+    const deps = a.dependsOn.length ? ` dependsOn=[${a.dependsOn.join(',')}]` : '';
+    // The helper's own summary line beats the first 300 characters of its report (often preamble).
+    const sum = a.result?.summary || a.report || a.summary || a.error;
+    const result = a.result ? ` outcome=${a.result.outcome}${a.result.verdict ? ` verdict=${a.result.verdict}` : ''}` : '';
+    const checks = a.checks?.length ? ` harborChecks=${a.checks.every((c) => c.ok) ? 'pass' : 'FAIL'}` : '';
+    return `- id=${a.id} role=${a.role} state=${a.state} title="${a.title}"${deps}${a.branch ? ` branch=${a.branch}` : ''}${result}${checks}${sum ? ` report="${clip(sum, 300)}"` : ''}`;
+  }).join('\n');
+}
+
+/** What is known about a helper's work beyond its prose: Harbor's own check runs, then its self-reported result. */
+export function evidenceText(a: AgentRecord): string {
+  const lines: string[] = [];
+  if (a.checks?.length) {
+    lines.push(`Checks Harbor ran on ${a.testedCommit?.slice(0, 10) ?? 'the branch'}: ${a.checks.map((c) => `${c.cmd} ${c.ok ? 'PASS' : `FAIL${c.timedOut ? ' (timed out)' : ` (exit ${c.exitCode})`}`}`).join('; ')}`);
+  }
+  if (a.result) {
+    const self = a.result.checks.length ? `; self-reported checks: ${a.result.checks.map((c) => `${c.cmd} ${c.ok ? 'pass' : 'fail'}`).join(', ')}` : '';
+    lines.push(`Result: outcome=${a.result.outcome}${a.result.verdict ? `, verdict=${a.result.verdict}` : ''}${self}`);
+  }
+  return lines.length ? `${lines.join('\n')}\n` : '';
+}
+
+/** Long messages keep their start and their end: conclusions usually come last. The latest exchange gets more room. */
+export function historyText(history: Message[]): string {
+  const msgs = history.filter((m) => m.role === 'user' || m.role === 'assistant');
+  return msgs.map((m, i) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${clipMiddle(m.text, i >= msgs.length - 2 ? 2000 : 600)}`).join('\n');
+}
+
+// ---------------------------------------------------------------- subagents
 
 export const ROLE_CONTRACTS: Record<Exclude<AgentRole, 'main'>, string> = {
-  planner: `You are a PLANNER subagent with one responsibility: think through the assigned task and write a specification. Do NOT modify files and do NOT implement. Read the repository as needed.
-Final answer format (markdown): ## Goal, ## Specification (precise behavior, files and interfaces), ## Acceptance criteria, ## Proposed assignments (one per implementer, each with the files it owns and its dependencies), ## Risks and open questions.`,
-  implementer: `You are an IMPLEMENTER subagent with one responsibility: implement the assigned specification exactly. No separate planning, no scope expansion, no architectural invention. Work only inside your worktree, commit your work to the current branch, and run only the narrow checks that the specification asks for.
+  planner: `You are a PLANNER helper with one responsibility: think through the assigned task and write a specification. Do NOT modify files and do NOT implement. Read the repository as needed.
+Final answer format (markdown): ## Goal, ## Specification (precise behavior, files and interfaces), ## Acceptance criteria, ## Risks and open questions.`,
+  implementer: `You are an IMPLEMENTER helper with one responsibility: implement the assigned work exactly. No scope expansion, no architectural invention. Work only inside your worktree, commit your work to the current branch, and run only the narrow checks the assignment asks for.
 If a design question is unresolved, stop and ask (see protocol). Final answer: what changed (files), checks run and their results, unresolved issues.`,
-  reviewer: `You are a REVIEWER subagent with one responsibility: review the referenced change against its specification. Do NOT modify files. Final answer: findings ordered by severity with evidence (file:line), and a clear verdict (approve / changes requested). State exactly which version (branch/commit) you reviewed.`,
-  other: `You are a focused subagent with one responsibility, stated in your assignment. Stay within it. Final answer: findings or results with evidence, and anything unresolved.`
+  reviewer: `You are a REVIEWER helper with one responsibility: review the referenced change against its goal. Do NOT modify files. Final answer: findings ordered by severity with evidence (file:line), and a clear verdict (approve / changes requested). State exactly which version (branch/commit) you reviewed.`,
+  other: `You are a focused helper with one responsibility, stated in your assignment. Stay within it. Final answer: findings or results with evidence, and anything unresolved.`
 };
 
 export const PROTOCOL = `If the project root contains AGENTS.md, read it first and follow its conventions and ownership rules.
 Coordination protocol (print each on its own line, exactly this format, when needed):
 HARBOR_REQUEST_HELP: {"reason":"...","proposedRole":"planner|implementer|reviewer|other","instructions":"<single responsibility>","blocked":true|false}
-HARBOR_PEER: {"to":"<sibling agent title or id>","text":"<short message>"}
-You can talk normally with the user and siblings. You must NEVER spawn agents yourself, including through native CLI subagent/Task tools or plugins; use HARBOR_REQUEST_HELP instead.`;
+HARBOR_ASK: {"question":"<one clear question for the user>","options":["<short choice>", ...],"allowText":true|false}
+HARBOR_RESULT: {"outcome":"done|partial|blocked","summary":"<at most two sentences>","verdict":"approve|changes (reviewers only)","checks":[{"cmd":"<command you ran>","ok":true|false}]}
+Use HARBOR_ASK only when you cannot continue without the user's decision: it pops up on their screen. Then finish your turn right away (do not guess and carry on); their answer arrives as your next message.
+End every final answer with exactly one HARBOR_RESULT line. List only checks you actually ran.
+You must NEVER spawn agents yourself, including through native CLI subagent/Task tools or plugins; use HARBOR_REQUEST_HELP instead and the lead decides.`;
 
-export function registerText(agents: AgentRecord[]): string {
-  const subs = agents.filter((a) => a.role !== 'main');
-  if (!subs.length) return '(no assignments yet)';
-  return subs.map((a) => {
-    const deps = a.dependsOn.length ? ` dependsOn=[${a.dependsOn.join(',')}]` : '';
-    const sum = a.report ?? a.summary ?? a.error;
-    return `- id=${a.id} role=${a.role} state=${a.state} rev=${a.revision} title="${a.title}"${deps}${a.branch ? ` branch=${a.branch}` : ''}${sum ? ` report="${clip(sum, 400)}"` : ''}`;
-  }).join('\n');
-}
-
-export type MainTrigger =
-  | { kind: 'user'; text: string }
-  | { kind: 'reports'; items: { agent: AgentRecord }[] }
-  | { kind: 'help'; from: AgentRecord; reason: string; proposedRole: string; instructions: string; blocked: boolean };
-
-export function mainPrompt(projectName: string, agents: AgentRecord[], t: MainTrigger, extra: string[] = []): string {
-  const parts = [`Project: ${projectName}`, `Assignment register (authoritative; persisted by Harbor):\n${registerText(agents)}`];
-  if (extra.length) parts.push(`Recent notes:\n${extra.map((e) => `- ${e}`).join('\n')}`);
-  if (t.kind === 'user') parts.push(`New message from the user:\n${t.text}`);
-  else if (t.kind === 'reports') {
-    parts.push('Subagent reports received (not independently verified unless a reviewer/tester says so):\n' +
-      t.items.map(({ agent: a }) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}, rev=${a.revision})\n${clip(a.report ?? a.error ?? '(no report)', 24000)}`).join('\n\n'));
-    parts.push('Decide the next step: assign follow-up work (e.g. implementers from a planner spec, reviewers for finished changes), or if all work is finished, write a concise summary for the user that keeps sources and evidence and says what was and was not verified.');
-  } else {
-    parts.push(`Help request from "${t.from.title}" (id=${t.from.id}, blocked=${t.blocked}):\nreason: ${t.reason}\nproposed role: ${t.proposedRole}\nrequested work: ${t.instructions}\nDecide: assign a sibling (set helpFor to ${t.from.id}), or answer in "reply" if no new agent is warranted.`);
-  }
-  return parts.join('\n\n');
-}
-
-// ---------------------------------------------------------------- subagents
-
-export function subagentPrompt(a: AgentRecord, ctx: { projectName: string; upstream: AgentRecord[]; siblings: AgentRecord[]; mailbox: string[]; worktreeNote?: string }): string {
+export function subagentPrompt(a: AgentRecord, ctx: { projectName: string; upstream: AgentRecord[]; worktreeNote?: string }): string {
   const p = [`Project: ${ctx.projectName}`, `Your assignment (id=${a.id}, revision ${a.revision}): ${a.title}`, `Instructions:\n${a.task}`];
   if (a.spec) p.push(`Specification you must follow:\n${a.spec}`);
   if (a.files?.length) p.push(`Files you own for this assignment: ${a.files.join(', ')}. Do not edit other files; ask for help instead.`);
   if (ctx.worktreeNote) p.push(ctx.worktreeNote);
-  if (ctx.upstream.length) p.push('Inputs from earlier assignments:\n' + ctx.upstream.map((u) => `### ${u.title} (${u.role}${u.branch ? `, branch ${u.branch}` : ''}${u.worktree ? `, worktree ${u.worktree}` : ''})\n${clip(u.report ?? '(no report)', 5000)}`).join('\n\n'));
-  const sibs = ctx.siblings.filter((s) => s.id !== a.id && s.state !== 'done' && s.state !== 'failed' && s.state !== 'stopped');
-  if (sibs.length) p.push('Active siblings (message with HARBOR_PEER):\n' + sibs.map((s) => `- ${s.title} (id=${s.id}, ${s.role}) files: ${(s.files ?? []).join(', ') || 'n/a'}`).join('\n'));
-  if (ctx.mailbox.length) p.push('Messages delivered to you:\n' + ctx.mailbox.map((m) => `- ${m}`).join('\n'));
+  if (ctx.upstream.length) p.push('Inputs from earlier assignments:\n' + ctx.upstream.map((u) => {
+    const head = `### ${u.title} (${u.role}${u.branch ? `, branch ${u.branch}` : ''}${u.headCommit ? `, commit ${u.headCommit}` : ''}${u.worktree ? `, worktree ${u.worktree}` : ''})`;
+    // A reviewer judges the change against what was asked, not against the implementer's own account of it.
+    const spec = a.role === 'reviewer' && u.spec ? `\nSpecification it was built against (verbatim):\n${clip(u.spec, 8000)}\n` : '';
+    return `${head}${spec}\n${evidenceText(u)}${clip(u.report ?? '(no report)', 5000)}`;
+  }).join('\n\n'));
   return p.join('\n\n');
 }
 
@@ -132,47 +229,93 @@ export function extractJson(text: string): unknown | undefined {
 const str = (v: unknown, d = ''): string => (typeof v === 'string' ? v : d);
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
-export function parseMainOutput(text: string): MainOutput {
-  const j = extractJson(text) as Record<string, unknown> | undefined;
-  if (!j || typeof j !== 'object' || (!('reply' in j) && !('tasks' in j))) return { reply: text.trim(), tasks: [], parsed: false };
-  const tasks: PlannedTask[] = [];
-  const seen = new Set<string>();
-  for (const [i, raw] of (Array.isArray(j['tasks']) ? (j['tasks'] as Record<string, unknown>[]) : []).entries()) {
-    if (!raw || typeof raw !== 'object' || tasks.length >= MAX_TASKS_PER_PLAN) continue;
-    let ref = str(raw['ref'], `t${i + 1}`) || `t${i + 1}`;
-    while (seen.has(ref)) ref += '_';
-    seen.add(ref);
-    const role = ROLES.has(str(raw['role'])) ? (raw['role'] as PlannedTask['role']) : 'other';
-    const instructions = str(raw['instructions']).trim();
-    if (!instructions) continue;
-    tasks.push({
-      ref, role, instructions,
-      title: str(raw['title'], instructions.slice(0, 60)).slice(0, 80),
-      complexity: CX.has(str(raw['complexity'])) ? (raw['complexity'] as Complexity) : 'medium',
-      dependsOn: strs(raw['dependsOn']), files: strs(raw['files']),
-      specFrom: str(raw['specFrom']) || undefined, helpFor: str(raw['helpFor']) || undefined
-    });
-  }
-  return { reply: str(j['reply']).trim(), tasks, parsed: true };
+export function toAsk(v: unknown): AskRequest | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const r = v as Record<string, unknown>;
+  const question = str(r['question']).trim();
+  if (!question) return undefined;
+  const options = strs(r['options']).map((o) => o.trim()).filter(Boolean).slice(0, 6);
+  return { question: question.slice(0, 600), options, allowText: r['allowText'] === true || !options.length };
+}
+
+function toTask(raw: Record<string, unknown>, i: number, seen: Set<string>): PlannedTask | undefined {
+  const instructions = str(raw['instructions']).trim();
+  if (!instructions) return undefined;
+  let ref = str(raw['ref'], `t${i + 1}`) || `t${i + 1}`;
+  while (seen.has(ref)) ref += '_';
+  seen.add(ref);
+  const role = ROLES.has(str(raw['role'])) ? (raw['role'] as PlannedTask['role']) : 'other';
+  // Planners and reviewers never edit, whatever the line says.
+  const access = role === 'planner' || role === 'reviewer' || raw['access'] === 'read' ? 'read' : 'edit';
+  return {
+    ref, role, access, instructions,
+    title: str(raw['title'], instructions.slice(0, 60)).slice(0, 80),
+    complexity: CX.has(str(raw['complexity'])) ? (raw['complexity'] as Complexity) : 'medium',
+    needs: asNeeds(raw['needs']),
+    dependsOn: strs(raw['dependsOn']), files: strs(raw['files']),
+    specFrom: str(raw['specFrom']) || undefined, helpFor: str(raw['helpFor']) || undefined, retryOf: str(raw['retryOf']) || undefined
+  };
 }
 
 export interface HelpRequest { reason: string; proposedRole: string; instructions: string; blocked: boolean }
-export interface PeerMessage { to: string; text: string }
 
-/** Scan agent output for protocol lines. */
-export function parseProtocol(text: string): { help: HelpRequest[]; peer: PeerMessage[] } {
-  const help: HelpRequest[] = [], peer: PeerMessage[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^\s*HARBOR_(REQUEST_HELP|PEER):\s*(\{.*\})\s*$/);
-    if (!m) continue;
-    let j: Record<string, unknown>;
-    try { j = JSON.parse(m[2]!); } catch { continue; }
-    if (m[1] === 'REQUEST_HELP') help.push({ reason: str(j['reason']), proposedRole: str(j['proposedRole'], 'other'), instructions: str(j['instructions']), blocked: j['blocked'] !== false });
-    else if (str(j['to']) && str(j['text'])) peer.push({ to: str(j['to']), text: str(j['text']) });
-  }
-  return { help, peer };
+function toResult(j: Record<string, unknown>): HelperResult | undefined {
+  const outcome = str(j['outcome']);
+  if (outcome !== 'done' && outcome !== 'partial' && outcome !== 'blocked') return undefined;
+  const verdict = str(j['verdict']);
+  const checks = (Array.isArray(j['checks']) ? j['checks'] : [])
+    .filter((c): c is Record<string, unknown> => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>)['cmd'] === 'string')
+    .map((c) => ({ cmd: str(c['cmd']).slice(0, 200), ok: c['ok'] === true })).slice(0, 10);
+  return { outcome, summary: str(j['summary']).trim().slice(0, 400), verdict: verdict === 'approve' || verdict === 'changes' ? verdict : undefined, checks };
 }
 
-export const stripProtocol = (text: string): string => text.split(/\r?\n/).filter((l) => !/^\s*HARBOR_(REQUEST_HELP|PEER):/.test(l)).join('\n').trim();
+const KINDS = 'REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT';
+const LINE = new RegExp(`^\\s*HARBOR_(${KINDS}):\\s*(\\{.*\\})\\s*$`);
+const PREFIX = new RegExp(`^\\s*HARBOR_(${KINDS}):`);
+
+export interface Protocol { help: HelpRequest[]; ask: AskRequest[]; delegate: PlannedTask[]; image: ImageBrief[]; result?: HelperResult; malformed: string[] }
+
+/** Scan agent output for protocol lines. Malformed lines are hidden by stripProtocol and returned so they can be reported. */
+export function parseProtocol(text: string): Protocol {
+  const out: Protocol = { help: [], ask: [], delegate: [], image: [], malformed: [] };
+  const seen = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    if (!PREFIX.test(line)) continue;
+    const m = line.match(LINE);
+    let j: Record<string, unknown> | undefined;
+    try { j = m ? JSON.parse(m[2]!) : undefined; } catch { j = undefined; }
+    if (!m || !j || typeof j !== 'object') { out.malformed.push(clip(line.trim(), 300)); continue; }
+    let ok = true;
+    if (m[1] === 'REQUEST_HELP') out.help.push({ reason: str(j['reason']), proposedRole: str(j['proposedRole'], 'other'), instructions: str(j['instructions']), blocked: j['blocked'] !== false });
+    else if (m[1] === 'ASK') { const a = toAsk(j); if (a) out.ask.push(a); else ok = false; }
+    else if (m[1] === 'DELEGATE') {
+      if (out.delegate.length >= MAX_TASKS_PER_TURN) ok = false;
+      else { const t = toTask(j, out.delegate.length, seen); if (t) out.delegate.push(t); else ok = false; }
+    } else if (m[1] === 'RESULT') { const r = toResult(j); if (r) out.result = r; else ok = false; }
+    else if (str(j['prompt']).trim()) out.image.push({ subject: str(j['subject']), style: str(j['style']), prompt: str(j['prompt']).trim(), notes: str(j['notes']) });
+    else ok = false;
+    if (!ok) out.malformed.push(clip(line.trim(), 300));
+  }
+  return out;
+}
+
+export const stripProtocol = (text: string): string => text.split(/\r?\n/).filter((l) => !PREFIX.test(l) && !/^\s*HARBOR_PEER:/.test(l)).join('\n').trim();
+
+/** Chat rendering of an image brief: Harbor cannot generate images, so the user pastes the prompt into a generator. */
+export function imageBriefText(b: ImageBrief): string {
+  const fence = '```';
+  const parts = ["I can't generate images myself. Paste this into an image generator:"];
+  if (b.subject) parts.push(`**Subject:** ${b.subject}`);
+  if (b.style) parts.push(`**Style:** ${b.style}`);
+  parts.push(`${fence}text\n${b.prompt}\n${fence}`);
+  if (b.notes) parts.push(b.notes);
+  return parts.join('\n\n');
+}
 
 export function clip(s: string, n: number): string { return s.length > n ? `${s.slice(0, n)}… [truncated]` : s; }
+
+export function clipMiddle(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const head = Math.floor(n / 3);
+  return `${s.slice(0, head)} … [${s.length - n} chars omitted] … ${s.slice(s.length - (n - head))}`;
+}

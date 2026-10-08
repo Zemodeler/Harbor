@@ -151,3 +151,38 @@ describe('CLI re-check', () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe('per-model limits and pacing', () => {
+  const HOUR = 3_600_000;
+  const mk = (limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; scope?: string }>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'harbor-pace-'));
+    const ledger = new UsageLedger(new Store(dir), { now: () => NOW });
+    ledger.record({ cli: 'claude', projectId: 'p', agentId: 'a', model: 'm', durationMs: 1, ok: true, limits: limits.map((l) => ({ ...l, asOf: NOW })) });
+    return { ledger, dir };
+  };
+
+  it('parses seven_day_<model> windows as scoped limits', () => {
+    const ev = JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { unifiedWindows: { seven_day: { utilization: 0.1, resetsAt: NOW / 1000 + 9 }, seven_day_fable: { utilization: 0.9, resetsAt: NOW / 1000 + 9 } } } });
+    const l = (parseClaudeLine(ev)[0] as { limits: Array<{ scope?: string }> }).limits;
+    expect(l.map((x) => x.scope)).toEqual([undefined, 'fable']);
+  });
+
+  it('a capped model is exhausted while other models on the account are not', () => {
+    const { ledger, dir } = mk([{ period: 'weekly', usedPct: 20, resetsAt: NOW + 6 * 24 * HOUR }, { period: 'weekly', usedPct: 100, resetsAt: NOW + 2 * HOUR, scope: 'fable' }]);
+    try {
+      expect(ledger.pressure('claude', 'claude-fable-5-1').level).toBe('exhausted');
+      expect(ledger.pressure('claude', 'sonnet').level).not.toBe('exhausted');
+      expect(ledger.windows(['claude']).some((w) => w.model === 'fable')).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('ahead of pace tightens a level, under pace relaxes it', () => {
+    // 5h window half over: 40% used projects to 80% (fine); 60% used projects to 120% (tighten).
+    const a = mk([{ period: 'session', usedPct: 60, resetsAt: NOW + 2.5 * HOUR }]);
+    const b = mk([{ period: 'session', usedPct: 55, resetsAt: NOW + 0.5 * HOUR }]);
+    try {
+      expect(a.ledger.pressure('claude', 'opus')).toMatchObject({ level: 'low', projectedPct: 120 });
+      expect(b.ledger.pressure('claude', 'opus').level).toBe('plenty'); // 55% with 90% of the window gone projects ~61%: relaxed
+    } finally { rmSync(a.dir, { recursive: true, force: true }); rmSync(b.dir, { recursive: true, force: true }); }
+  });
+});

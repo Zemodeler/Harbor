@@ -2,7 +2,8 @@ import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** One provider-reported limit window (e.g. Codex's 5h and weekly windows). */
-export interface ReportedLimit { period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number }
+/** `scope` names a model family the limit applies to (e.g. 'opus'); absent means the whole account. */
+export interface ReportedLimit { period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }
 
 const TAIL_BYTES = 512 * 1024;
 

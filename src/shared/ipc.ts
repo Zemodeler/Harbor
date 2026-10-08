@@ -7,9 +7,10 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listClis', 'refreshClis', 'openLogin',
   'listProjects', 'addProject', 'removeProject', 'setProjectImage',
   'listConversations', 'newConversation', 'deleteConversation',
+  'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder',
   'listMessages', 'send',
   'listAgents', 'openAgentConversation', 'stopAgent',
-  'getUsage', 'getSettings', 'setSettings', 'answerPermission'
+  'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'answerQuestion'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;
