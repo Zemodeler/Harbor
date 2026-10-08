@@ -46,7 +46,7 @@ const VERIFIED = new Set<CliId>(['claude']);
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
-  const ledger = new UsageLedger(store, opts.ledger);
+  const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), ...opts.ledger });
   const git = opts.git ?? new Git();
   const worktreesRoot = opts.worktreesRoot ?? join(opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test'), 'worktrees');
   let clis: ResolvedCli[] = [];

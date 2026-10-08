@@ -23,6 +23,8 @@ export interface LedgerOptions {
   reported?: (cli: CliId) => ReportedLimit[];
   weekMs?: number;
   runsPerWeek?: number;
+  /** CLIs Harbor can neither run nor read limits from (Gemini today) get no window: a 0% estimate would mislead. */
+  measurable?: (cli: CliId) => boolean;
 }
 
 /**
@@ -103,7 +105,7 @@ export class UsageLedger {
     const weekMs = this.opts.weekMs ?? WEEK_MS;
     const oldestOf = (events: UsageEvent[]) => events.reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
     const clock = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-    return clis.flatMap((cli): UsageWindow[] => {
+    return clis.filter((c) => this.opts.measurable?.(c) ?? true).flatMap((cli): UsageWindow[] => {
       const free = this.opts.entitlement?.(cli) ? true : undefined;
       const cooldown = this.cooldownUntil(cli);
       const rs = this.reportedFor(cli, 'session'), rw = this.reportedFor(cli, 'weekly');
