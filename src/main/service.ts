@@ -6,11 +6,13 @@ import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
 import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
+import { loadCatalog } from './clis/capabilities';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
 import { Git } from './git';
 import { Orchestrator, toAgent } from './orchestrator';
 import { newId, Store } from './store';
+import { reviewDirectory } from './review';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
 export type HarborService = Omit<HarborApi, 'onEvent'> & {
@@ -27,6 +29,7 @@ export interface ServiceOptions {
   dataDir?: string;
   /** Folder picker for addProject(); injected so this module never imports electron. */
   pickFolder?: () => Promise<string | undefined>;
+  openFolder?: (path: string) => Promise<void>;
   /** Replace discovery (tests). */
   discover?: () => Promise<ResolvedCli[]>;
   /** Replace adapter construction (tests). */
@@ -81,6 +84,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
     verified: (c) => VERIFIED.has(c),
+    // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog.
+    catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
     maxActivePerProject: opts.maxActivePerProject
   });
 
@@ -154,13 +159,56 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const main = store.mainAgent(needProject(projectId).id);
       return store.listConversations(projectId).filter((c) => c.agentId === main?.id);
     },
+    async updateConversation(id, patch) {
+      const c = store.getConversation(id);
+      if (!c) throw new Error('This conversation is no longer available.');
+      if (patch.archived && (c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['queued', 'working', 'waiting'].includes(a.state)))) throw new Error('Finish or stop the session and answer pending requests before archiving.');
+      if (patch.title !== undefined && (typeof patch.title !== 'string' || !patch.title.trim() || patch.title.length > 160)) throw new Error('Use a conversation name between 1 and 160 characters.');
+      const update: Partial<typeof c> = {};
+      if (patch.title !== undefined) { update.title = patch.title.trim(); update.customTitle = true; }
+      if (patch.pinned !== undefined) { if (typeof patch.pinned !== 'boolean') throw new Error('Invalid pin preference.'); update.pinned = patch.pinned; }
+      if (patch.archived !== undefined) { if (typeof patch.archived !== 'boolean') throw new Error('Invalid archive preference.'); update.archived = patch.archived; }
+      store.patchConversation(id, update);
+      bus.emit({ type: 'conversation', conversation: { ...c } });
+      return { ...c };
+    },
+    async searchConversations(query, projectId) {
+      const term = query.trim().toLocaleLowerCase();
+      if (!term) return [];
+      const projects = projectId ? [needProject(projectId)] : store.listProjects();
+      return projects.flatMap(p => store.listConversations(p.id).filter(c => c.agentId === store.mainAgent(p.id)?.id).flatMap(c => {
+        const m = store.listMessages(c.id).find(m => m.text.toLocaleLowerCase().includes(term));
+        if (!c.title.toLocaleLowerCase().includes(term) && !m) return [];
+        const index = m?.text.toLocaleLowerCase().indexOf(term) ?? 0;
+        return [{ conversation: { ...c }, projectName: p.name, excerpt: m?.text.slice(Math.max(0, index - 50), index + 150) }];
+      })).sort((a, b) => b.conversation.updated - a.conversation.updated).slice(0, 100);
+    },
+    async stopConversation(id) { orchestrator.stopConversation(id); },
+    async getReview(id) {
+      const c = store.getConversation(id);
+      if (!c) throw new Error('This conversation is no longer available.');
+      const project = needProject(c.projectId);
+      const roots = [{ directory: project.path, source: project.name, base: c.reviewBase }, ...store.listAgentRecords(project.id).filter(a => a.parentConversationId === id && a.worktree).map(a => ({ directory: a.worktree!, source: a.title, base: a.baseCommit }))];
+      const files = [], notes = ['Current workspace changes may include edits made outside this session.', 'Verification has not been tied to this snapshot. Check the agent reports and rerun relevant checks before merging.', 'Credential file previews are excluded.'];
+      for (const root of roots) {
+        try { files.push(...await reviewDirectory(root.directory, root.source, root.base)); }
+        catch (e) { notes.push(e instanceof Error ? e.message : 'A workspace could not be read.'); }
+      }
+      return { conversationId: id, capturedAt: Date.now(), files, notes };
+    },
+    async openProjectFolder(id) {
+      const project = needProject(id);
+      if (!opts.openFolder) throw new Error('Opening folders is available in the desktop app.');
+      await opts.openFolder(project.path);
+    },
     async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
     async listMessages(conversationId) { return store.listMessages(conversationId); },
     async deleteConversation(id) {
       const c = store.getConversation(id);
       if (!c) return;
-      if (store.getAgent(c.agentId)?.state === 'working') throw new Error('Stop the running agents before deleting this conversation.');
+      if (c.activity && ['working', 'queued', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['working', 'queued', 'waiting'].includes(a.state))) throw new Error('Stop the running session and answer pending requests before deleting this conversation.');
       store.removeConversation(id);
+      for (const k of [`lead:${id}`, `concierge:${id}`]) store.clearSession(k);
     },
     async send(conversationId, text) {
       await ready;
@@ -188,6 +236,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       pending.delete(requestId);
       r(allow);
     },
+    async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     onEvent: (cb) => bus.on(cb)
   };
 }

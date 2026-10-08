@@ -1,11 +1,11 @@
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import { createMockApi, installMockApi } from '../mock/mockApi';
 import { Markdown } from '../components/Markdown';
 
-beforeEach(() => { window.harbor = createMockApi({ delay: 0 }); });
+beforeEach(() => { localStorage.clear(); window.harbor = createMockApi({ delay: 0 }); });
 async function ready() { render(<App/>); await screen.findByRole('heading', { name: 'Build the account page' }); await screen.findByText(/I've assigned the account page/); }
 
 describe('Harbor main flows', () => {
@@ -82,5 +82,21 @@ describe('Delete conversation', () => {
     const before = (await screen.findAllByRole('button', { name: /^Delete conversation/ })).length;
     await userEvent.click(screen.getAllByRole('button', { name: /^Delete conversation/ })[0]);
     await waitFor(() => expect(screen.getAllByRole('button', { name: /^Delete conversation/ }).length).toBe(before - 1));
+  });
+  it('pops up an agent question, answers it with an option, and can be dismissed to answer in chat', async () => {
+    const api = window.harbor, listeners: Array<(e: any) => void> = [], orig = api.onEvent;
+    api.onEvent = cb => { listeners.push(cb); return orig(cb); };
+    await ready();
+    const ask = (requestId: string, prompt: string) => act(() => listeners.forEach(cb => cb({ type: 'question', requestId, conversationId: 'account', prompt, options: ['Blue', 'Green'], allowText: true })));
+    ask('q1', 'Which theme?');
+    const dialog = await screen.findByRole('dialog', { name: /has a question/ });
+    expect(within(dialog).getByText('Which theme?')).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Blue' }));
+    expect(dialog).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send answer' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /has a question/ })).not.toBeInTheDocument());
+    ask('q2', 'Anything else?');
+    await userEvent.click(within(await screen.findByRole('dialog', { name: /has a question/ })).getByRole('button', { name: 'Answer in chat' }));
+    expect(screen.queryByRole('dialog', { name: /has a question/ })).not.toBeInTheDocument();
   });
 });

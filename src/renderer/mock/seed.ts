@@ -25,6 +25,9 @@ export function seed(empty = false) {
   );
   const messages: Message[] = empty ? [] : [
     { id: 'user-intro', conversationId: 'account', role: 'user', time: now - 60000, text: 'Build an account page where customers can update their profile and manage their addresses. Keep it consistent with the storefront.' },
+    { id: 'tool-read', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 59000, text: 'Read src/account.tsx\nSample file inspection; no local files read.' },
+    { id: 'tool-search', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 58000, text: 'Grep address validation\nSample search activity.' },
+    { id: 'tool-command', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 57000, text: 'Bash npm test\nSample command activity; no command was executed.' },
     { id: 'intro', conversationId: 'account', role: 'assistant', agentId: 'main-store', time: now - 55000, text: "I've assigned the account page to an implementation agent using the completed plan. The verification agent has checked the profile and address flows.\n\n### Ready for a first look\nThe implementation agent reports that the profile form and address list are ready. It’s finishing the empty address state before the final review.\n\nThis is sample activity. No project files have been changed.", details: { cli: 'codex', model: 'default', effort: 'medium', reason: 'A ready connection with useful project context.' } }
   ];
   const windows: UsageWindow[] = [

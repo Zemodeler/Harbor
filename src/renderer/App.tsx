@@ -1,15 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import { useHarbor } from './hooks/useHarbor';
+import { useAppearance } from './hooks/useAppearance';
+import { useWorkspace } from './hooks/useWorkspace';
+import type { Conversation as ConversationRecord } from '../shared/api';
+import { CommandMenu } from './components/CommandMenu';
+import { SessionPanel } from './components/SessionPanel';
+import { ReviewPanel } from './components/ReviewPanel';
+import { SessionStatus } from './components/SessionStatus';
+import { sessionStatus } from './session';
+import { MenuIcon, PanelIcon } from './components/Icons';
 import { Sidebar } from './components/Sidebar';
 import { Conversation } from './components/Conversation';
 import { Settings } from './components/Settings';
 import { Modal } from './components/Modal';
+import { QuestionDialog } from './components/Question';
 import s from './Harbor.module.css';
 
 export default function App() {
   const state = useHarbor();
+  const appearance = useAppearance();
+  const workspace = useWorkspace();
+  const [panel, setPanel] = useState<'activity' | 'review'>();
+  const [wide, setWide] = useState(() => window.innerWidth >= 1180);
+  const [renaming, setRenaming] = useState<ConversationRecord>();
+  const [newTitle, setNewTitle] = useState('');
   const [view, setView] = useState<'conversation' | 'settings'>('conversation');
-  const [dialog, setDialog] = useState<'switch' | 'add' | 'remove'>();
+  const [dialog, setDialog] = useState<'switch' | 'history' | 'add' | 'remove'>();
   const [menu, setMenu] = useState(false);
   const [query, setQuery] = useState('');
   const [path, setPath] = useState('');
@@ -17,8 +33,16 @@ export default function App() {
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const project = state.projects.find(p => p.id === state.projectId);
   const agent = state.agents.find(a => a.id === state.conversation?.agentId);
-  const activeAgents = state.agents.filter(a => a.id === state.conversation?.agentId || a.parentId === state.conversation?.agentId);
-  const status = activeAgents.some(a => a.state === 'failed') ? 'Needs attention' : activeAgents.some(a => ['working', 'queued'].includes(a.state)) ? 'Working' : activeAgents.some(a => a.role !== 'main' && a.state === 'waiting') ? 'Needs input' : activeAgents.length && activeAgents.every(a => a.state === 'done') ? 'Ready to review' : 'Ready';
+  const status = sessionStatus(state.conversation, state.agents, state.sending);
+  useEffect(() => {
+    const media = window.matchMedia?.('(min-width: 1180px)');
+    const update = () => setWide(media?.matches ?? window.innerWidth >= 1180);
+    media?.addEventListener('change', update);
+    return () => media?.removeEventListener('change', update);
+  }, []);
+  function rename(c: ConversationRecord) { setRenaming(c); setNewTitle(c.title); setMenu(false); }
+  function search(history = false) { setMenu(false); setDialog(history ? 'history' : 'switch'); }
+  const sideProps = { state, add: openProject, settings: () => { setMenu(false); setView('settings'); }, close: () => { setMenu(false); setView('conversation'); }, search: () => search(), history: () => search(true), rename };
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!state.permissions.length) { setQuery(''); setDialog('switch'); } }
@@ -35,22 +59,29 @@ export default function App() {
     if (await state.addProject(undefined)) setView('conversation');
   }
   const permission = state.permissions[0];
+  const question = permission ? undefined : state.questions[0];
   return <div className={s.app}>
-    <div className={s.desktopSidebar}><Sidebar state={state} add={openProject} settings={() => setView('settings')} close={() => setView('conversation')}/></div>
+    <div className={s.desktopSidebar}><Sidebar {...sideProps}/></div>
     <main className={s.workspace}>
-      <header className={s.header}><button ref={menuTrigger} className={s.mobileMenu} aria-label="Open project menu" aria-expanded={menu} onClick={() => setMenu(true)}>☰</button>
+      <header className={s.header}><button ref={menuTrigger} className={s.mobileMenu} aria-label="Open project menu" aria-expanded={menu} onClick={() => setMenu(true)}><MenuIcon size={18} aria-hidden="true"/></button>
         <div className={s.headerTitle}><small>{view === 'settings' ? 'Harbor / Settings' : `${project?.name || 'Harbor'} / ${agent?.title || 'Main agent'}`}</small><h1>{view === 'settings' ? 'Connections & preferences' : state.conversation?.title || project?.name || 'Your workspace'}</h1></div>
-        <div className={s.headerActions}>{view === 'settings' ? <button onClick={() => setView('conversation')}>Back to conversation</button> : <><span className={s.taskStatus}>{status}</span>{agent && agent.role !== 'main' ? <button onClick={() => void state.openAgent(agent.parentId || '')}>Back to main</button> : null}<button onClick={() => setView('settings')} aria-label="Open settings">Settings</button></>}</div>
+        <div className={s.headerActions}>{view === 'settings' ? <button onClick={() => setView('conversation')}>Back to conversation</button> : <><SessionStatus status={status}/>{agent && agent.role !== 'main' ? <button onClick={() => void state.openAgent(agent.parentId || '')}>Back to main</button> : null}<button className={s.sessionInfoButton} disabled={!state.conversation} aria-label="Session information" aria-expanded={panel === 'activity'} onClick={() => setPanel(panel === 'activity' ? undefined : 'activity')}><PanelIcon size={17} aria-hidden="true"/><span>Session info</span></button><button onClick={() => setView('settings')} aria-label="Open settings">Settings</button></>}</div>
       </header>
       {state.error ? <div className={s.error} role="alert"><span>{state.error}</span><button onClick={() => void state.reload()}>Reload workspace</button></div> : null}
       {!state.loading && !state.clis.some(c => c.installed && c.signedIn && c.authState !== 'unknown' && state.settings?.cliOverrides[c.id]?.enabled !== false) ? <div className={s.notice}>No connection is ready. Enable or sign in to an installed CLI.<button onClick={() => setView('settings')}>View connections</button></div> : null}
-      {state.loading ? <div className={s.empty} role="status">Opening your workspace…</div> : view === 'settings' ? <Settings state={state}/> : <Conversation state={state} openProject={openProject}/>}
+      {state.loading ? <div className={s.empty} role="status">Opening your workspace…</div> : view === 'settings' ? <Settings state={state} appearanceState={appearance} workspace={workspace}/> : <div className={s.workbody}>
+        {panel && wide ? <aside className={`${s.infoPanel} ${panel === 'review' ? s.reviewPanel : ''}`} aria-label={panel === 'activity' ? 'Session information' : 'Change review'}>{panel === 'activity' ? <SessionPanel state={state} close={() => setPanel(undefined)}/> : <ReviewPanel state={state} close={() => setPanel(undefined)}/>}</aside> : null}
+        <div className={s.conversationSurface}><Conversation state={state} openProject={openProject} workspace={workspace} review={() => setPanel('review')}/></div>
+      </div>}
     </main>
-    {menu && !dialog && !permission ? <Modal title="Projects" close={() => { setMenu(false); menuTrigger.current?.focus(); }}><Sidebar state={state} add={openProject} settings={() => { setMenu(false); setView('settings'); }} close={() => { setMenu(false); setView('conversation'); menuTrigger.current?.focus(); }}/></Modal> : null}
-    {dialog && !permission ? <Modal title={dialog === 'switch' ? 'Switch project' : dialog === 'remove' ? 'Remove project entry?' : 'Open a project'} close={() => setDialog(undefined)}>
-      {dialog === 'switch' ? <><input autoFocus className={s.search} aria-label="Find a project" placeholder="Find a project…" value={query} onChange={e => setQuery(e.target.value)}/><div className={s.switchList}>{state.projects.filter(p => p.name.toLowerCase().includes(query.toLowerCase())).map(p => <button key={p.id} onClick={() => { void state.selectProject(p.id); setDialog(undefined); setView('conversation'); }}>{p.name}<small>{p.path}</small></button>)}</div>{!state.projects.filter(p => p.name.toLowerCase().includes(query.toLowerCase())).length ? <p>No matching projects.</p> : null}<button onClick={openProject}>Open another project</button>{project ? <button onClick={() => setDialog('remove')}>Remove {project.name} entry…</button> : null}</> : dialog === 'add' ? <><p>Choose a local folder for your project.</p><label className={s.field}>Project folder<input autoFocus value={path} placeholder="C:\Projects\My project" onChange={e => setPath(e.target.value)}/></label><div className={s.actions}><button disabled={pending} onClick={() => void add(true)}>Browse folders…</button><button disabled={pending || !path.trim()} className={s.primary} onClick={() => void add(false)}>{pending ? 'Opening…' : 'Open project'}</button></div></> : <><p>Remove {project?.name} from Harbor? Local project files remain on disk.</p><div className={s.actions}><button onClick={() => setDialog(undefined)}>Keep project</button><button disabled={pending} onClick={() => { if (!project) return; setPending(true); void state.run(async () => { await state.api.removeProject(project.id); await state.reload(); setDialog(undefined); }).finally(() => setPending(false)); }}>Remove entry</button></div></>}
+    {menu && !dialog && !permission && !question ? <Modal title="Projects" close={() => { setMenu(false); menuTrigger.current?.focus(); }}><Sidebar {...sideProps}/></Modal> : null}
+    {panel && !wide && view === 'conversation' && !permission && !question && !dialog && !renaming && !menu ? <Modal title={panel === 'activity' ? 'Session details' : 'Current changes'} close={() => setPanel(undefined)}>{panel === 'activity' ? <SessionPanel state={state} close={() => setPanel(undefined)}/> : <ReviewPanel state={state} close={() => setPanel(undefined)}/>}</Modal> : null}
+    {renaming && !permission && !question ? <Modal title="Rename conversation" close={() => setRenaming(undefined)}><form onSubmit={e => { e.preventDefault(); if (!newTitle.trim()) return; setPending(true); void state.updateConversation(renaming, { title: newTitle }).then(result => { if (result) setRenaming(undefined); }).finally(() => setPending(false)); }}><label className={s.field}>Conversation name<input autoFocus value={newTitle} maxLength={160} onChange={e => setNewTitle(e.target.value)}/></label><div className={s.actions}><button type="button" onClick={() => setRenaming(undefined)}>Cancel</button><button className={s.primary} disabled={pending || !newTitle.trim()}>Save name</button></div>{state.error ? <p role="alert">{state.error}</p> : null}</form></Modal> : null}
+    {dialog && !permission && !question ? <Modal title={dialog === 'switch' ? 'Quick actions' : dialog === 'history' ? 'Conversation history' : dialog === 'remove' ? 'Remove project entry?' : 'Open a project'} close={() => setDialog(undefined)}>
+      {dialog === 'switch' || dialog === 'history' ? <CommandMenu state={state} history={dialog === 'history'} close={() => { setDialog(undefined); setView('conversation'); }} settings={() => setView('settings')} add={openProject} review={() => setPanel('review')} activity={() => setPanel('activity')}/> : dialog === 'add' ? <><p>Choose a local folder for your project.</p><label className={s.field}>Project folder<input autoFocus value={path} placeholder="C:\Projects\My project" onChange={e => setPath(e.target.value)}/></label><div className={s.actions}><button disabled={pending} onClick={() => void add(true)}>Browse folders…</button><button disabled={pending || !path.trim()} className={s.primary} onClick={() => void add(false)}>{pending ? 'Opening…' : 'Open project'}</button></div></> : <><p>Remove {project?.name} from Harbor? Local project files remain on disk.</p><div className={s.actions}><button onClick={() => setDialog(undefined)}>Keep project</button><button disabled={pending} onClick={() => { if (!project) return; setPending(true); void state.run(async () => { await state.api.removeProject(project.id); await state.reload(); setDialog(undefined); }).finally(() => setPending(false)); }}>Remove entry</button></div></>}
       {state.error ? <p role="alert">{state.error}</p> : null}
     </Modal> : null}
+    {question ? <QuestionDialog key={question.requestId} q={question} who={state.agents.find(a => a.id === question.agentId)?.title || 'Harbor'} pending={pending} error={state.error ?? undefined} dismiss={() => state.dismissQuestion(question.requestId)} answer={text => { setPending(true); void state.answerQuestion(question.requestId, text).finally(() => setPending(false)); }}/> : null}
     {permission ? <Modal title={permission.kind === 'freeReset' ? 'Approve optional free reset?' : permission.kind === 'conflict' ? 'Resolve a conflict' : 'Tool permission required'} dismissible={false} close={() => {}}><p>{permission.prompt}</p><small>{state.agents.find(a => a.id === permission.agentId)?.title || 'Project agent'} · {state.permissions.length} pending</small><div className={s.actions}><button autoFocus disabled={pending} onClick={() => { setPending(true); void state.answerPermission(permission.requestId, false).finally(() => setPending(false)); }}>Deny</button><button className={s.primary} disabled={pending} onClick={() => { setPending(true); void state.answerPermission(permission.requestId, true).finally(() => setPending(false)); }}>Approve</button></div>{state.error ? <p role="alert">{state.error}</p> : null}</Modal> : null}
   </div>;
 }

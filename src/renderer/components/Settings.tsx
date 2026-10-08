@@ -1,17 +1,36 @@
-import { useState } from 'react';
+import { useState, type CSSProperties } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
+import type { AppearanceState } from '../hooks/useAppearance';
+import { palettes, paletteTokens } from '../appearance';
+import type { WorkspaceState } from '../hooks/useWorkspace';
+import { WorkspaceSettings } from './WorkspaceSettings';
 import s from '../Harbor.module.css';
 
-export function Settings({ state }: { state: HarborState }) {
+export function Settings({ state, appearanceState, workspace }: { state: HarborState; appearanceState: AppearanceState; workspace: WorkspaceState }) {
   const [tab, setTab] = useState('Connections');
+  const { appearance, scheme, updateAppearance, saveError } = appearanceState;
   const [pending, setPending] = useState(false);
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   return <section className={s.settings} aria-label="Settings">
-    <div className={s.settingsHeading}><h2>Your tools, connected.</h2><button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button></div>
-    <p className={s.muted}>Harbor discovers installed CLIs and uses their existing sign-ins.</p>
-    <div className={s.tabs} role="tablist" aria-label="Settings sections">{['Connections', 'Routing', 'Usage'].map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
+    <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
+    <p className={s.muted}>{tab === 'Appearance' ? 'Choose a palette and appearance for your workspace.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
+    <div className={s.tabs} role="tablist" aria-label="Settings sections">{['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage'].map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
     <div role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
-      {state.loading || !state.settings ? <p role="status">Loading settings…</p> : tab === 'Connections' ? <>
+      {tab === 'Workspace' ? <WorkspaceSettings state={state} workspace={workspace}/> : tab === 'Appearance' ? <>
+        <fieldset className={s.appearanceGroup}><legend>Appearance</legend><p className={s.muted} id="appearance-help">Follow your device, or keep Harbor always light or dark.</p>
+          <div className={s.modeChoices} aria-describedby="appearance-help">{(['system', 'light', 'dark'] as const).map(mode => <label key={mode} className={s.modeChoice}>
+            <input type="radio" name="appearance-mode" checked={appearance.mode === mode} onChange={() => updateAppearance({ mode })}/><span>{mode === 'system' ? 'Use system' : mode === 'light' ? 'Light' : 'Dark'}</span>
+          </label>)}</div>
+        </fieldset>
+        <fieldset className={s.appearanceGroup}><legend>Color palette</legend><p className={s.muted} id="palette-help">A coordinated set of colors for navigation, messages, and controls.</p>
+          <div className={s.paletteGrid} aria-describedby="palette-help">{palettes.map(palette => <label key={palette.id} className={s.paletteChoice} style={paletteTokens(palette.id, scheme, '--preview-') as CSSProperties}>
+            <input type="radio" name="color-palette" aria-label={palette.name} checked={appearance.palette === palette.id} onChange={() => updateAppearance({ palette: palette.id })}/>
+            <span className={s.palettePreview} aria-hidden="true"><span className={s.previewRail}><i/><i/></span><span className={s.previewSidebar}><i/><i/><i/></span><span className={s.previewChat}><i/><i/><span><i/></span></span></span>
+            <span className={s.paletteCaption}><strong>{palette.name}</strong><span>{palette.description}</span></span>
+          </label>)}</div>
+        </fieldset>
+        <p className={s.appearanceSaved} role="status">{saveError ? 'Applied for this session. Harbor could not save this preference on your device.' : 'Changes apply instantly and are saved on this device.'}</p>
+      </> : state.loading || !state.settings ? <p role="status">Loading settings…</p> : tab === 'Connections' ? <>
         {!state.clis.length ? <p>No CLIs detected. Install a supported CLI, then refresh.</p> : state.clis.map(cli => <div className={s.connection} key={cli.id}>
           <div className={s.connectionHeading}><h3>{cli.name}</h3><span className={cli.signedIn ? s.ready : s.muted}>{!cli.installed ? 'Not installed' : cli.authState === 'unknown' ? 'Status unknown' : cli.signedIn ? '✓ Ready' : 'Needs login'}</span></div>
           <p>{!cli.installed ? 'Install this CLI through its native installer, then refresh.' : cli.signedIn ? 'Available when enabled for routing.' : cli.authState === 'unknown' ? 'Sign-in status could not be confirmed. Open the native CLI or refresh.' : 'Installed. Sign in through its native CLI to start using it.'}</p>

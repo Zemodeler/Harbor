@@ -92,6 +92,11 @@ export class Store {
     this.dirty();
   }
   addConversation(c: Conversation): Conversation { this.state.conversations.push(c); this.dirty(); return c; }
+  patchConversation(id: Id, patch: Partial<Conversation>): Conversation | undefined {
+    const c = this.getConversation(id);
+    if (c) { Object.assign(c, patch); this.dirty(); }
+    return c;
+  }
   touchConversation(id: Id, patch: Partial<Pick<Conversation, 'title'>> = {}): void {
     const c = this.getConversation(id);
     if (c) { Object.assign(c, patch, { updated: Date.now() }); this.dirty(); }
