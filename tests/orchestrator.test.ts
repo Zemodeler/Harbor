@@ -344,4 +344,31 @@ describe('plan hygiene', () => {
     expect((await h.texts()).some((t) => t.startsWith('Ignored a circular dependency'))).toBe(true);
     expect(h.svc.store.listAgentRecords(h.project.id).filter((a) => a.role === 'other').every((a) => a.state === 'done')).toBe(true);
   });
+
+  it('keeps two conversations of one project from seeing each other\'s agents or reports', async () => {
+    const mainPrompts: string[] = [];
+    const claude: FakeScript = (prompt, o) => {
+      if (isMain(o)) {
+        mainPrompts.push(prompt);
+        if (prompt.includes('New message from the user:\nRouting')) return plan('Investigating.', [{ ref: 'a', title: 'Routing report', role: 'other', instructions: 'Explain routing', complexity: 'low' }]);
+        if (prompt.includes('New message from the user:\nSelf')) return plan('Investigating.', [{ ref: 'b', title: 'Self-modification study', role: 'other', instructions: 'Study self-modification', complexity: 'low' }]);
+        return plan('Done.');
+      }
+      return say('report');
+    };
+    const h = await harness({ claude }, { ids: ['claude'] });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'Routing');
+    await h.svc.whenIdle();
+    await h.svc.send(second.id, 'Self');
+    await h.svc.whenIdle();
+
+    const forSecond = mainPrompts.filter((p) => p.includes('New message from the user:\nSelf') || p.includes('Self-modification study'));
+    expect(forSecond.length).toBeGreaterThan(0);
+    expect(forSecond.some((p) => p.includes('Routing report'))).toBe(false);
+    // Reports go to the conversation that owns the agent.
+    const agents = h.svc.store.listAgentRecords(h.project.id);
+    expect(agents.find((a) => a.title === 'Self-modification study')!.parentConversationId).toBe(second.id);
+    expect((await h.texts(h.conv.id)).some((t) => t.includes('Self-modification'))).toBe(false);
+  });
 });

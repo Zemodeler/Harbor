@@ -46,8 +46,10 @@ export class Orchestrator {
   private mailbox = new Map<Id, string[]>();
   private followups = new Map<Id, string[]>();
   private reported = new Set<Id>();
+  // Keyed by conversation: the main agent is shared by a project's conversations, but its context must not be.
   private notes = new Map<Id, string[]>();
   private autoTurns = new Map<Id, number>();
+  private mainConv = new Map<Id, Id>();
   private conflictAsked = new Set<Id>();
   private idle = new Set<() => void>();
 
@@ -81,10 +83,10 @@ export class Orchestrator {
     return p;
   }
 
-  private addNote(projectId: Id, note: string): void {
-    const n = this.notes.get(projectId) ?? [];
+  private addNote(conversationId: Id, note: string): void {
+    const n = this.notes.get(conversationId) ?? [];
     n.push(clip(note, 300));
-    this.notes.set(projectId, n.slice(-10));
+    this.notes.set(conversationId, n.slice(-10));
   }
 
   /** Resolves when no agent work or main turn is in flight (used by tests and the smoke script). */
@@ -144,7 +146,7 @@ export class Orchestrator {
     this.post(conversationId, 'user', text, { agentId: agent.id });
     if (conv.title === DEFAULT_TITLE) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
-      this.autoTurns.set(agent.projectId, 0);
+      this.autoTurns.set(conversationId, 0);
       this.enqueueMain(agent.projectId, { kind: 'user', text }, conversationId);
     } else {
       this.direct(agent, text, conversationId);
@@ -155,7 +157,11 @@ export class Orchestrator {
     const a = this.d.store.getAgent(agentId);
     if (!a) return;
     if (a.role === 'main') {
-      for (const s of this.d.store.listAgentRecords(a.projectId)) if (s.role !== 'main') this.stop(s.id);
+      // Stop only the conversation whose main turn is running; other conversations keep their agents.
+      const conv = this.mainConv.get(a.projectId);
+      for (const s of this.d.store.listAgentRecords(a.projectId)) {
+        if (s.role !== 'main' && (!conv || s.parentConversationId === conv)) this.stop(s.id);
+      }
       this.controllers.get(a.id)?.abort();
       return;
     }
@@ -181,9 +187,10 @@ export class Orchestrator {
   private async mainTurn(projectId: Id, trigger: MainTrigger, conversationId: Id): Promise<void> {
     const project = this.project(projectId);
     const main = this.ensureProject(project).main;
-    const notes = this.notes.get(projectId) ?? [];
-    this.notes.delete(projectId);
-    const agents = this.d.store.listAgentRecords(projectId);
+    const notes = this.notes.get(conversationId) ?? [];
+    this.notes.delete(conversationId);
+    const agents = this.d.store.listAgentRecords(projectId).filter((x) => x.role === 'main' || x.parentConversationId === conversationId);
+    this.mainConv.set(projectId, conversationId);
     let prompt = mainPrompt(project.name, agents, trigger, notes);
     const ctl = new AbortController();
     this.controllers.set(main.id, ctl);
@@ -214,6 +221,7 @@ export class Orchestrator {
       this.pump(projectId);
     } finally {
       this.controllers.delete(main.id);
+      this.mainConv.delete(projectId);
       this.setState(main, 'waiting');
     }
   }
@@ -445,7 +453,7 @@ export class Orchestrator {
   /** Call the main agent only when its judgement is needed: planner done, any failure, or all work finished. */
   private maybeReportToMain(a: AgentRecord): void {
     const { store } = this.d;
-    const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main');
+    const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main' && x.parentConversationId === a.parentConversationId);
     const active = agents.some((x) => x.state === 'queued' || x.state === 'working' || x.state === 'waiting');
     const needsMain = a.role === 'planner' || a.state === 'failed' || !active;
     if (!needsMain) return;
@@ -453,8 +461,8 @@ export class Orchestrator {
     if (!unreported.length) return;
     // A stop-all should not trigger a flurry of main turns.
     if (unreported.every((x) => x.state === 'stopped')) { unreported.forEach((x) => this.reported.add(`${x.id}:${x.revision}:${x.state}`)); return; }
-    const turns = (this.autoTurns.get(a.projectId) ?? 0) + 1;
-    this.autoTurns.set(a.projectId, turns);
+    const turns = (this.autoTurns.get(a.parentConversationId) ?? 0) + 1;
+    this.autoTurns.set(a.parentConversationId, turns);
     if (turns > (this.d.maxAutoTurns ?? 12)) {
       this.post(a.parentConversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
       return;
@@ -467,7 +475,7 @@ export class Orchestrator {
 
   private direct(a: AgentRecord, text: string, conversationId: Id): void {
     this.d.store.addCoordination({ projectId: a.projectId, kind: 'direct', to: a.id, text });
-    this.addNote(a.projectId, `User sent "${a.title}" directly: ${text}`);
+    this.addNote(a.parentConversationId, `User sent "${a.title}" directly: ${text}`);
     this.post(a.parentConversationId, 'system', `You messaged "${a.title}" directly: ${clip(text, 160)}`, { agentId: a.id });
     a.revision += 1;
     this.d.store.upsertAgent(a);
@@ -524,7 +532,7 @@ export class Orchestrator {
     const line = `[sibling] ${from.title} → ${target.title}: ${text}`;
     this.post(this.convFor(from), 'system', line, { agentId: from.id });
     this.post(this.convFor(target), 'system', line, { agentId: from.id });
-    this.addNote(from.projectId, line);
+    this.addNote(from.parentConversationId, line);
     return true;
   }
 
@@ -549,7 +557,7 @@ export class Orchestrator {
       if (!decision) return { ok: false, text: '', error: attempt === 0 ? lastError : `${lastError} (no remaining CLI to fall back to)` };
       const adapter = this.d.adapterFor(decision.cli)!;
       const resumeId = o.resume && link?.cli === decision.cli ? link.sessionId : undefined;
-      if (o.resume && !resumeId && link) this.addNote(agent.projectId, `${agent.title}: continuing on ${decision.cli} without the previous ${link.cli} session`);
+      if (o.resume && !resumeId && link) this.addNote(o.conversationId, `${agent.title}: continuing on ${decision.cli} without the previous ${link.cli} session`);
       this.setState(agent, agent.state, { cli: decision.cli, model: decision.model, effort: decision.effort, attempts: attempt });
       if (attempt > 0) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
 
