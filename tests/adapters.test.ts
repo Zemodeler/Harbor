@@ -8,10 +8,11 @@ const base: RunOptions = { cwd: '.', model: 'sonnet', effort: 'medium', permissi
 
 describe('claude adapter', () => {
   it('builds headless args and blocks native subagent tools', () => {
-    const a = claudeArgs({ ...base, resumeId: 'abc', systemPrompt: 'role' });
+    const a = claudeArgs({ ...base, resumeId: 'abc', systemPrompt: 'role' }, 'sp.txt');
     expect(a).toEqual(expect.arrayContaining(['-p', '--output-format', 'stream-json', '--verbose', '--model', 'sonnet', '--effort', 'medium', '--resume', 'abc']));
     expect(a.join(' ')).toMatch(/--disallowedTools Task Agent/);
-    expect(a.join(' ')).toMatch(/--append-system-prompt role/);
+    expect(a.join(' ')).toMatch(/--append-system-prompt-file sp\.txt/);
+    expect(a).not.toContain('role'); // never on the command line
     expect(a).not.toContain('--prompt');
   });
   it('read-only uses plan mode', () => {

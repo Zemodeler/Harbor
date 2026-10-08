@@ -26,6 +26,6 @@ describe('prompt parsing', () => {
     const p = parseProtocol(t);
     expect(p.help).toEqual([{ reason: 'r', proposedRole: 'planner', instructions: 'i', blocked: false }]);
     expect(p.peer).toEqual([{ to: 'B', text: 'hey' }]);
-    expect(stripProtocol(t)).toBe('text\nHARBOR_PEER: not json');
+    expect(stripProtocol(t)).toBe('text'); // malformed protocol lines are hidden too
   });
 });

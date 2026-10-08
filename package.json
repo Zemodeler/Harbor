@@ -11,10 +11,14 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+<<<<<<< HEAD
     "smoke": "tsx scripts/smoke.ts",
     "dist": "node build/dist.mjs",
     "dev:renderer": "npm --prefix src/renderer run dev:renderer",
     "test:renderer": "npm --prefix src/renderer test"
+=======
+    "smoke": "tsx scripts/smoke.ts"
+>>>>>>> claude/core
   },
   "dependencies": {
     "react": "^19.3.0",

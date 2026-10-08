@@ -2,6 +2,7 @@ import type { Agent, AgentRole, AgentState, CliId, Conversation, HarborEvent, Id
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
 import type { ResolvedCli } from './clis/discovery';
 import type { Git } from './git';
+import { breakCycles } from './graph';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
   MAIN_SYSTEM, clip, mainPrompt, parseMainOutput, parseProtocol, stripProtocol, subagentPrompt, systemFor,
@@ -222,11 +223,24 @@ export class Orchestrator {
     const refToId = new Map<string, Id>(tasks.map((t) => [t.ref, newId()]));
     const resolve = (r: string): Id | undefined => refToId.get(r) ?? store.listAgentRecords(project.id).find((a) => a.id === r)?.id;
     const out: AgentRecord[] = [];
+    // Resolve the whole dependency graph first so cycles can be detected and broken (never left waiting forever).
+    const graph = new Map<Id, Set<Id>>();
     for (const t of tasks) {
       const id = refToId.get(t.ref)!;
-      const specFromId = t.specFrom ? resolve(t.specFrom) : undefined;
       const deps = new Set(t.dependsOn.map(resolve).filter((x): x is Id => !!x && x !== id));
-      if (specFromId) deps.add(specFromId);
+      const spec = t.specFrom ? resolve(t.specFrom) : undefined;
+      if (spec && spec !== id) deps.add(spec);
+      graph.set(id, deps);
+    }
+    for (const [from, to] of breakCycles(graph)) {
+      const title = (i: Id) => tasks.find((t) => refToId.get(t.ref) === i)?.title ?? i;
+      this.post(conversationId, 'system', `Ignored a circular dependency: "${title(from)}" cannot wait for "${title(to)}".`);
+    }
+    for (const t of tasks) {
+      const id = refToId.get(t.ref)!;
+      const deps = graph.get(id)!;
+      const wantedSpec = t.specFrom ? resolve(t.specFrom) : undefined;
+      const specFromId = wantedSpec && deps.has(wantedSpec) ? wantedSpec : undefined;
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
         effort: t.complexity, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
@@ -326,15 +340,20 @@ export class Orchestrator {
     // Workspace: edit roles get an isolated worktree; read-only roles read the project (or the change under review).
     let cwd = project.path;
     let worktreeNote: string | undefined;
+    let depsLinked = false;
     const upstream = a.dependsOn.map((id) => store.getAgent(id)).filter((x): x is AgentRecord => !!x);
     if (EDIT_ROLES.includes(a.role)) {
       if (!a.worktree && (await this.d.git.isRepoWithCommits(project.path))) {
         try {
           const wt = await this.d.git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), a.title, a.id);
           this.setState(a, 'working', { worktree: wt.path, branch: wt.branch, baseCommit: wt.baseCommit });
+          depsLinked = await this.d.git.linkDependencies(project.path, wt.path);
         } catch (e) { return this.failAgent(a, `Could not create a git worktree: ${String((e as Error).message)}`); }
       }
-      if (a.worktree) { cwd = a.worktree; worktreeNote = `You work in an isolated git worktree on branch ${a.branch}. Commit your work to this branch. Do not touch other directories.`; }
+      if (a.worktree) {
+        cwd = a.worktree;
+        worktreeNote = `You work in an isolated git worktree on branch ${a.branch}. Commit your work to this branch. Do not touch other directories.${depsLinked ? ' node_modules is linked from the main checkout: do not run npm install and never delete node_modules.' : ''}`;
+      }
       else worktreeNote = 'This project is not a git repository with commits, so you edit the project directory directly while holding exclusive ownership. Keep changes minimal and scoped.';
     } else {
       const reviewed = upstream.find((u) => u.worktree);
@@ -579,7 +598,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, summary: a.summary };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();
