@@ -59,7 +59,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename }
       {state.projects.map(p => <button key={p.id} className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} title={`${p.name}\n${p.path}`} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button>)}
       <button className={s.chip} aria-label="Add project" title="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button>
       <span className={s.railSpace}/>
-      <button className={s.chip} aria-label="Settings" title="Settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button>
+      <button className={s.chip} aria-label="Open settings" title="Settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button>
       <button className={s.mobileClose} onClick={close} aria-label="Close project menu"><CloseIcon size={18} aria-hidden="true"/></button>
     </div>
     <div className={s.panel}>

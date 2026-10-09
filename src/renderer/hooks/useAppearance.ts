@@ -22,9 +22,10 @@ export function useAppearance() {
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.dataset.palette = appearance.palette;
+    root.dataset.layout = appearance.layout;
     root.style.colorScheme = scheme;
     for (const [name, value] of Object.entries(paletteTokens(appearance.palette, scheme))) root.style.setProperty(name, value);
-  }, [appearance.palette, scheme]);
+  }, [appearance.palette, appearance.layout, scheme]);
   function updateAppearance(patch: Partial<Appearance>) {
     const next = { ...appearance, ...patch };
     setAppearance(next);

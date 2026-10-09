@@ -29,9 +29,10 @@ describe('Workspace appearance', () => {
   it('recovers from invalid saved preferences and supports keyboard palette selection', async () => {
     localStorage.setItem(appearanceKey, '{"palette":"missing","mode":"dark"}');
     render(<App/>); await openAppearance();
+    expect(screen.getByRole('radio', { name: 'Command' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Dark' })).toBeChecked();
     const harbor = screen.getByRole('radio', { name: 'Harbor' });
-    expect(harbor).toBeChecked();
-    expect(screen.getByRole('radio', { name: 'Use system' })).toBeChecked();
+    await userEvent.click(harbor);
     harbor.focus(); await userEvent.keyboard('{ArrowRight}');
     expect(screen.getByRole('radio', { name: 'Ocean' })).toBeChecked();
   });
@@ -41,6 +42,7 @@ describe('Workspace appearance', () => {
     vi.stubGlobal('matchMedia', () => media);
     try {
       render(<App/>); await openAppearance();
+      await userEvent.click(screen.getByRole('radio', { name: 'Use system' }));
       act(() => { media.matches = true; listeners.forEach(cb => cb()); });
       expect(document.documentElement.style.colorScheme).toBe('dark');
       await userEvent.click(screen.getByRole('radio', { name: 'Light' }));
