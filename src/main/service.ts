@@ -16,6 +16,7 @@ import type { ProcessKiller } from './proc';
 import { newId, Store } from './store';
 import { Journal } from './journal';
 import { reviewDirectory } from './review';
+import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
 export type HarborService = Omit<HarborApi, 'onEvent'> & {
@@ -46,6 +47,8 @@ export interface ServiceOptions {
   worktreesRoot?: string;
   /** Replace the startup orphan-process killer (tests). */
   killer?: ProcessKiller;
+  /** Where rollback evidence patches are written (default: <dataDir>/patches; none for an in-memory store). */
+  patchesRoot?: string;
 }
 
 const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
@@ -166,7 +169,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog.
     catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
     maxActivePerProject: opts.maxActivePerProject,
-    killer: opts.killer
+    killer: opts.killer,
+    patchesRoot: opts.patchesRoot ?? (opts.dataDir ? join(opts.dataDir, 'patches') : undefined)
   });
 
   // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude
@@ -349,6 +353,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const to = a.integration?.head ?? (a.branch ? await git.branchHead(repo, a.branch) : undefined);
       return from && to ? git.changes(repo, from, to) : [];
     },
+    async previewRollback(agentId, target) {
+      const a = store.getAgent(agentId);
+      if (!a) throw new Error('Unknown agent');
+      if (a.role === 'main') throw new Error('The lead agent has no task to roll back.');
+      if (target !== undefined && typeof target !== 'string') throw new Error('Name an existing local branch, or leave the target out.');
+      return previewRollback({ git, repo: needProject(a.projectId).path, agents: store.listAgentRecords(a.projectId) }, a, target);
+    },
+    async rollbackTask(agentId, target) { await ready; return toAgent(orchestrator.rollbackTask(agentId, target)); },
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },
