@@ -11,7 +11,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'getGitOverview', 'getGitLog', 'getGitChanges', 'getGitDiff',
   'listMessages', 'send',
   'listAgents', 'openAgentConversation', 'stopAgent',
-  'setAgentPriority', 'pauseAgent', 'resumeAgent',
+  'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'answerQuestion'
 ];
 
