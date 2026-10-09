@@ -47,6 +47,9 @@ export interface ServiceOptions {
 /** CLIs whose headless flow has been verified against a real install in this repo's history (codex: 0.160.0, see adapters/codex.ts). */
 const VERIFIED = new Set<CliId>(['claude', 'codex']);
 
+/** Login failures from either CLI. Claude reports them in its result text; codex uses the same wording as discovery (clis/registry.ts). */
+export const SIGNED_OUT_RE = /not logged in|logged out|not signed in|please run \/login/i;
+
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
@@ -61,7 +64,28 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     if (id === 'codex') return new CodexAdapter(r.path);
     return undefined; // gemini and others: detected, but no headless adapter yet
   };
-  const adapterFor = (id: CliId) => (opts.adapterFor ?? defaultAdapter)(id, clis.find((c) => c.id === id));
+  // A run that reports a login failure takes the CLI out of routing until the next refresh (discovery sets authState).
+  const markSignedOut = (id: CliId) => {
+    const c = clis.find((x) => x.id === id);
+    if (!c || c.authState === 'signedOut') return;
+    // Replace rather than mutate: discovery may hand back shared objects.
+    const next: ResolvedCli = { ...c, authState: 'signedOut', signedIn: false, note: 'Installed, login required.' };
+    clis = clis.map((x) => (x === c ? next : x));
+    bus.emit({ type: 'cli', cli: toStatus(next) });
+  };
+  const watchAuth = (id: CliId, a: CliAdapter): CliAdapter => ({
+    id: a.id,
+    async *run(prompt, o) {
+      for await (const c of a.run(prompt, o)) {
+        if (c.kind === 'done' && !c.ok && SIGNED_OUT_RE.test(c.error ?? '')) markSignedOut(id);
+        yield c;
+      }
+    }
+  });
+  const adapterFor = (id: CliId) => {
+    const a = (opts.adapterFor ?? defaultAdapter)(id, clis.find((c) => c.id === id));
+    return a && watchAuth(id, a);
+  };
 
   // ---- permissions: every request is an event; nothing is granted without an explicit answer.
   const pending = new Map<Id, (allow: boolean) => void>();
