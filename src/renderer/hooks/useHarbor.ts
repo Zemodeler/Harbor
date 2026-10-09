@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Agent, CliStatus, Conversation, HarborEvent, Message, Project, Settings, UsageWindow } from '../../shared/api';
+import type { Agent, CliStatus, Conversation, ConversationMode, HarborEvent, Message, Project, Settings, UsageWindow } from '../../shared/api';
+
+export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
 type Permission = Extract<HarborEvent, { type: 'permission' }>;
 export type Question = Extract<HarborEvent, { type: 'question' }>;
@@ -134,12 +136,22 @@ export function useHarbor() {
   async function setProjectImage(id: string, image: string | null) {
     await run(async () => { await api.setProjectImage(id, image); setProjects(await api.listProjects()); });
   }
-  async function send(text: string) {
+  async function setConversationMode(c: Conversation, mode: ConversationMode, goal?: string) {
+    return run(async () => {
+      const updated = await api.setConversationMode(c.id, mode, goal);
+      if (current.current.projectId === c.projectId) {
+        setConversations(cs => cs.map(x => x.id === c.id ? updated : x));
+        if (current.current.conversationId === c.id) setConversation(updated);
+      }
+      return updated;
+    });
+  }
+  async function send(text: string, attachments?: ImageUpload[]) {
     const c = conversation;
     if (!c) return false;
     setSending(s => new Set(s).add(c.id));
     let success = false;
-    await run(async () => { await api.send(c.id, text); success = true;
+    await run(async () => { await api.send(c.id, text, attachments?.length ? attachments : undefined); success = true;
       const cs = await api.listConversations(c.projectId);
       if (current.current.projectId === c.projectId) setConversations(cs);
     });
@@ -172,7 +184,7 @@ export function useHarbor() {
   return { api, projects, clis, conversations, agents, messages, usage, settings, projectId, conversation,
     lastActivity, updateConversation, openConversation,
     permissions, questions, dismissQuestion, answerQuestion, loading, messagesLoading, projectLoading, error, sending, run, reload, selectProject, selectConversation,
-    newConversation, deleteConversation, openAgent, addProject, setProjectImage, send, answerPermission, updateSettings,
+    newConversation, deleteConversation, openAgent, addProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

@@ -109,14 +109,24 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       data.conversations.unshift(c); return copy(c);
     },
     async listMessages(conversationId) { requireConversation(conversationId); await pause(); return copy(data.messages.filter(m => m.conversationId === conversationId)); },
-    async send(conversationId, text) {
+    async setConversationMode(conversationId, mode, goal) {
+      const c = requireConversation(conversationId);
+      if (mode === 'goal' && !goal?.trim()) throw new Error('Describe the goal first.');
+      c.mode = mode;
+      if (mode === 'goal') c.goal = goal!.trim(); else delete c.goal;
+      emit({ type: 'conversation', conversation: c }); return copy(c);
+    },
+    async send(conversationId, text, attachments) {
       const c = requireConversation(conversationId);
       if (c.archived) throw new Error('Restore this conversation before sending a message.');
-      if (!text.trim()) throw new Error('Write a message first.');
+      if (attachments && attachments.length > 6) throw new Error('You can attach up to 6 images per message.');
+      if (attachments?.some(a => !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(a.mime) || a.dataBase64.length * 0.75 > 10 * 1024 * 1024)) throw new Error('Images must be PNG, JPEG, GIF or WebP and under 10 MB.');
+      if (!text.trim() && !attachments?.length) throw new Error('Write a message first.');
+      text = text.trim() ? text : 'See the attached image(s).';
       if (!data.clis.some(cli => cli.installed && cli.signedIn && settings.cliOverrides[cli.id]?.enabled !== false)) throw new Error('Enable and sign in to a connection in Settings.');
       let agent = data.agents.find(a => a.id === c.agentId)!;
       if (runs.has(agent.id)) throw new Error('This agent is still working. Stop it or wait before sending again.');
-      const user: Message = { id: id(), conversationId, role: 'user', text, time: Date.now() };
+      const user: Message = { id: id(), conversationId, role: 'user', text, time: Date.now(), ...(attachments?.length ? { attachments: attachments.map(a => ({ name: a.name, mime: a.mime })) } : {}) };
       data.messages.push(user); emit({ type: 'message', message: user });
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
       if (/ask me a question/i.test(text)) {
@@ -132,7 +142,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
         agent = worker;
       }
       const run = { cancelled: false }; runs.set(agent.id, run);
-      c.activity = { state: 'working', started: Date.now(), updated: Date.now(), cli: agent.cli, model: agent.model, detail: 'Sample implementation in progress.' }; emit({ type: 'conversation', conversation: c });
+      c.activity = { state: 'working', started: Date.now(), updated: Date.now(), cli: agent.cli, model: agent.model, detail: 'Sample implementation in progress.', complexity: text.length > 200 || /refactor|migrate|redesign/i.test(text) ? 'high' : text.length > 60 ? 'medium' : 'low', effort: agent.effort }; emit({ type: 'conversation', conversation: c });
       agent.state = 'queued'; updateAgent(agent);
       try {
         await pause(); if (run.cancelled) return;
@@ -177,6 +187,11 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       const affected = data.agents.filter(x => x.id === agentId || (a.role === 'main' && x.parentId === agentId));
       affected.forEach(x => { const run = runs.get(x.id); if (run) run.cancelled = true; x.state = 'stopped'; x.summary = 'Stopped by you. Conversation history retained.'; updateAgent(x); });
     },
+    // Queue controls exist in the contract; this demo has no queue UI, so they only validate the agent.
+    async setAgentPriority(agentId, priority) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); x.priority = priority; updateAgent(x); },
+    async pauseAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); if (x.state === 'queued') { x.paused = true; updateAgent(x); } },
+    async resumeAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); x.paused = false; updateAgent(x); },
+    async resumeAgentSession(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x || x.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.'); x.state = 'working'; updateAgent(x); },
     async getUsage() { await pause(); return copy(data.windows); },
     async getSettings() { await pause(); return copy(settings); },
     async setSettings(s) { settings = { ...settings, ...copy(s) }; return copy(settings); },
