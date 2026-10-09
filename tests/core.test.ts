@@ -125,6 +125,19 @@ describe('router', () => {
     expect(route({ role: 'implementer', complexity: 'low', continuity: 'claude' }, inp)!.cli).toBe('claude');
   });
 
+  it('honours a CLI the user asked for, and says so when it cannot', () => {
+    const t = { now: 1 };
+    const { ledger } = ledgerAt(t, 10);
+    const inp = base([cli('claude'), cli('codex')], ledger);
+    const d = route({ role: 'main', complexity: 'low', tier: 'cheap', prefer: 'codex', continuity: 'claude' }, inp)!;
+    expect(d.cli).toBe('codex');
+    expect(d.reason).toMatch(/codex requested by you/);
+    const only = base([cli('claude'), cli('codex', { installed: false })], ledger);
+    const f = route({ role: 'main', complexity: 'low', prefer: 'codex' }, only)!;
+    expect(f.cli).toBe('claude');
+    expect(f.reason).toMatch(/you asked for codex but it is unavailable/);
+  });
+
   it('falls back by excluding a failed CLI; returns undefined when none left', () => {
     const { ledger } = ledgerAt({ now: 1 });
     const inp = base([cli('claude'), cli('codex')], ledger);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractJson, imageBriefText, isApproval, parseConcierge, parseProtocol, stripProtocol } from '../src/main/prompts';
+import { extractJson, imageBriefText, isApproval, parseConcierge, requestedCli, parseProtocol, stripProtocol } from '../src/main/prompts';
 
 describe('prompt parsing', () => {
   it('extracts JSON from fences and chatter, handling braces inside strings', () => {
@@ -88,5 +88,15 @@ describe('concierge decisions', () => {
     for (const bad of ['just chatting', '{"answer":""}', '{"nothing":1}']) {
       expect(parseConcierge(bad)).toMatchObject({ kind: 'escalate', parsed: false, escalation: { complexity: 'medium' } });
     }
+  });
+});
+
+describe('requested CLI', () => {
+  it('reads explicit "use codex" phrasing only', () => {
+    expect(requestedCli('Use codex for this next integration')).toBe('codex');
+    expect(requestedCli('please run this with Claude Code')).toBe('claude');
+    expect(requestedCli("don't use codex here")).toBeUndefined();
+    expect(requestedCli('add a codex adapter test')).toBeUndefined();
+    expect(requestedCli('what does Gemini cost?')).toBeUndefined();
   });
 });

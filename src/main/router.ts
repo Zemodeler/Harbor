@@ -20,6 +20,8 @@ export interface RouteRequest {
   exclude?: CliId[];
   /** CLIs needed by an explicit extension request; restricts the choice when present. */
   requireCli?: CliId;
+  /** CLI the user asked for by name. Strong preference, not a requirement: if it is unavailable, another CLI takes over and the reason says so. */
+  prefer?: CliId;
   /** Retry of failed or rejected work: worth the highest effort. */
   retry?: boolean;
   /** `effort` is a deliberate choice (the concierge, a user's /deep) that the effort policy must not shift. */
@@ -68,6 +70,8 @@ const MISSING_NEED = 4;
  * it is a bonus, never a bypass of the hard skips above.
  */
 const PREFERRED = 30;
+/** A CLI the user asked for by name in this message ("use codex"): stronger than a standing settings preference. */
+const REQUESTED = 60;
 /** With lowAllowance 'switch', a model at low allowance loses to any healthy option of similar fit. */
 const LOW_SWITCH_PENALTY = 40;
 
@@ -141,6 +145,7 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
       let score = 100 - LEVEL_PENALTY[level] - usagePenalty(p.pct) - 5 * inp.load(c.id) - tierPenalty(want, entry.tier) + needsFit(req.needs, entry) - (entry.cost ?? 0);
       if (c.authState === 'unknown') score -= 15; // sign-in unverified: usable, but prefer confirmed ones
       if (req.continuity === c.id) score += 25;
+      if (req.prefer === c.id) score += REQUESTED; // outweighs continuity (25) and a tier miss; not an exhausted allowance (skipped above)
       if (inp.verified?.(c.id)) score += 2;
       if (prefersCli(c.id)) score += PREFERRED;
       if (prefersModel(c.id, entry.model)) score += PREFERRED;
@@ -164,6 +169,10 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
   }
   // 'switch' already steered away from low allowance in scoring; when nothing healthier exists, still spend less.
   if (best.level === 'low' && pol.lowAllowance === 'switch') why.push('allowance low and no healthier option to switch to');
+  if (req.prefer) {
+    if (req.prefer === best.cli.id) why.push(`${req.prefer} requested by you`);
+    else why.push(`you asked for ${req.prefer} but it is unavailable (${notes.filter((n) => n.startsWith(`${req.prefer}`)).join('; ') || 'no usable model'})`);
+  }
   if (best.level === 'low' && effort !== 'low') { effort = stepDown(effort); why.push('effort lowered: allowance low'); }
   why.push(`${req.role}/${req.complexity} → effort ${effort}`);
   if (notes.length) why.push(notes.join('; '));
