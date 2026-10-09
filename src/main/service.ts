@@ -10,6 +10,7 @@ import { loadCatalog } from './clis/capabilities';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
 import { Git } from './git';
+import { GitView } from './gitView';
 import { Orchestrator, toAgent } from './orchestrator';
 import { newId, Store } from './store';
 import { reviewDirectory } from './review';
@@ -43,8 +44,8 @@ export interface ServiceOptions {
   worktreesRoot?: string;
 }
 
-/** CLIs whose headless flow has been verified against a real install in this repo's history. */
-const VERIFIED = new Set<CliId>(['claude']);
+/** CLIs whose headless flow has been verified against a real install in this repo's history (codex: 0.160.0, see adapters/codex.ts). */
+const VERIFIED = new Set<CliId>(['claude', 'codex']);
 
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
@@ -113,6 +114,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     const p = store.getProject(id);
     if (!p) throw new Error(`Unknown project ${id}`);
     return p;
+  };
+  const gitViewOf = async (projectId: Id): Promise<GitView> => {
+    const view = await GitView.open(needProject(projectId).path);
+    if (!view) throw new Error('This project folder is not a Git repository.');
+    return view;
   };
 
   return {
@@ -201,6 +207,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!opts.openFolder) throw new Error('Opening folders is available in the desktop app.');
       await opts.openFolder(project.path);
     },
+    async getGitOverview(projectId) {
+      const view = await GitView.open(needProject(projectId).path);
+      if (!view) return { projectId, branches: [], worktrees: [], notes: ['This project folder is not a Git repository.'] };
+      return view.overview(projectId, store.listAgentRecords(projectId));
+    },
+    async getGitLog(projectId, opts) { return (await gitViewOf(projectId)).log(opts); },
+    async getGitChanges(projectId, target) { return (await gitViewOf(projectId)).changes(target); },
+    async getGitDiff(projectId, path, target) { return (await gitViewOf(projectId)).diff(path, target); },
     async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
     async listMessages(conversationId) { return store.listMessages(conversationId); },
     async deleteConversation(id) {

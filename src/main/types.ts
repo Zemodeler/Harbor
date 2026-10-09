@@ -33,6 +33,8 @@ export interface AgentRecord extends Agent {
   helpFor?: Id;
   /** User allowed this agent to overlap file claims held by a sibling. */
   sharedOk?: boolean;
+  /** Redoes failed or rejected work (one complexity level up, high effort). */
+  retry?: boolean;
   /** Number of CLI fallbacks used. */
   attempts: number;
   created: number;

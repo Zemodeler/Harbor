@@ -15,6 +15,8 @@ export interface CatalogEntry {
   tier: Tier;
   /** Needs this model is a good fit for. These are editable defaults, not benchmarks: change them in capabilities.json. */
   strengths: Need[];
+  /** Optional extra cost in score points (default 0): makes a pricier model lose close calls. */
+  cost?: number;
   note?: string;
 }
 
@@ -25,16 +27,17 @@ export interface CatalogEntry {
  */
 export const DEFAULT_CATALOG: CatalogEntry[] = [
   { cli: 'claude', model: 'haiku', tier: 'cheap', strengths: ['chat', 'research', 'code'], note: 'fast and cheap: chat, lookups, small mechanical edits' },
-  { cli: 'claude', model: 'sonnet', tier: 'standard', strengths: ['code', 'research', 'review', 'vision', 'chat'], note: 'balanced everyday model' },
+  { cli: 'claude', model: 'sonnet', tier: 'standard', strengths: ['code', 'research', 'review', 'planning', 'long-context', 'vision', 'chat'], note: 'balanced everyday model' },
   { cli: 'claude', model: 'opus', tier: 'strong', strengths: ['planning', 'code', 'review', 'research', 'long-context', 'vision'], note: 'strongest reasoning for hard problems' },
   { cli: 'claude', model: 'claude-fable-5-1', tier: 'strong', strengths: ['planning', 'code', 'review', 'research', 'long-context', 'vision'], note: 'Fable 5.1 (full id; the alias is unverified). Has its own usage limit, tracked separately' },
-  { cli: 'codex', model: 'default', tier: 'standard', strengths: ['code', 'review', 'research'], note: "Codex's default model" }
+  { cli: 'codex', model: 'default', tier: 'standard', strengths: ['code', 'review', 'research', 'planning', 'chat'], note: "Codex's default model" }
 ];
 
 const isEntry = (e: unknown): e is CatalogEntry => {
   const r = e as Record<string, unknown> | null;
   return !!r && typeof r['cli'] === 'string' && typeof r['model'] === 'string' && TIERS.includes(r['tier'] as Tier)
-    && Array.isArray(r['strengths']) && (r['strengths'] as unknown[]).every((s) => NEEDS.includes(s as Need));
+    && Array.isArray(r['strengths']) && (r['strengths'] as unknown[]).every((s) => NEEDS.includes(s as Need))
+    && (r['cost'] === undefined || (typeof r['cost'] === 'number' && Number.isFinite(r['cost'])));
 };
 
 /** Reads an optional override file. A missing or malformed file falls back to the defaults. */

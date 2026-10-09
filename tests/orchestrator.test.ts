@@ -111,7 +111,22 @@ describe('concierge: the cheap front desk', () => {
     const h = await harness({ claude: script({ concierge: () => escalate('high'), lead: () => say('done') }) });
     await h.svc.send(h.conv.id, 'redesign the storage layer');
     await h.svc.whenIdle();
-    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'opus', effort: 'high' });
+    // The strong model already covers hard work; high effort on top is kept for planners, retries and /deep.
+    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'opus', effort: 'medium' });
+  });
+
+  it('a short go-ahead continues the last request at its size without a new front-desk call', async () => {
+    let n = 0;
+    const h = await harness({ claude: script({ concierge: () => (n++ === 0 ? escalate('medium') : escalate('high')), lead: () => say('ok') }) });
+    await h.svc.send(h.conv.id, 'draft a plan for the git view');
+    await h.svc.whenIdle();
+    await h.svc.send(h.conv.id, 'Yes, build the panel');
+    await h.svc.whenIdle();
+    expect(h.calls(isConcierge)).toHaveLength(1);
+    expect(h.calls(isLead).map((c) => [c.opts.model, c.opts.effort])).toEqual([['sonnet', 'medium'], ['sonnet', 'medium']]);
+    await h.svc.send(h.conv.id, 'thanks!');
+    await h.svc.whenIdle();
+    expect(h.calls(isConcierge)).toHaveLength(2); // small talk still goes to the cheap front desk
   });
 
   it('escalates when the front desk returns something unusable', async () => {
@@ -127,7 +142,7 @@ describe('concierge: the cheap front desk', () => {
     await h.svc.whenIdle();
     expect(h.calls(isConcierge)).toHaveLength(0);
     const [lead] = h.calls(isLead);
-    expect(lead!.opts.model).toBe('opus');
+    expect(lead!.opts).toMatchObject({ model: 'opus', effort: 'high' }); // explicitly asked for: the one lead turn at high effort
     expect(lead!.prompt).toContain('User:\nfix everything');
   });
 
@@ -251,6 +266,9 @@ describe('lead: delegation and sessions', () => {
     expect(hs.length).toBeGreaterThanOrEqual(2);
     expect(hs[0]!.complexity).toBe('low');
     expect(hs[1]!.complexity).toBe('medium');
+    expect(hs[0]!.retry).toBeUndefined();
+    expect(hs[1]!.retry).toBe(true);
+    expect(h.calls(isHelper).at(-1)!.opts.effort).toBe('high'); // a retry gets the highest effort
     expect((await h.texts()).some((t) => t.startsWith('Retrying "Do it" with a stronger model'))).toBe(true);
   });
 

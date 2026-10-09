@@ -1,5 +1,6 @@
 import type { AgentRole, Id, Message } from '../shared/api';
 import { NEEDS, type Need } from './clis/capabilities';
+import type { Effort } from './adapters/types';
 import type { Complexity } from './router';
 import type { AgentRecord } from './types';
 
@@ -40,7 +41,8 @@ export const MAX_TASKS_PER_TURN = 8;
 
 // ---------------------------------------------------------------- concierge (cheap front door)
 
-export interface Escalation { complexity: Complexity; needs: Need[]; ack: string }
+/** `effort` overrides the effort derived from complexity (only "/deep" sets it). */
+export interface Escalation { complexity: Complexity; needs: Need[]; ack: string; effort?: Effort }
 export type ConciergeDecision = { kind: 'answer'; text: string } | { kind: 'escalate'; escalation: Escalation; parsed: boolean };
 
 export const CONCIERGE_SYSTEM = `You are the front desk of Harbor, an assistant that works on one software project. You are fast and cheap. You do not use tools and you cannot read or change files.
@@ -52,7 +54,11 @@ Reply with ONE JSON object and nothing else:
 {"answer": "<your reply to the user>"}
 or
 {"escalate": {"complexity": "low|medium|high", "needs": ["chat|code|research|planning|review|long-context|vision"], "ack": "<one short sentence telling the user what happens next>"}}
-complexity: low = one trivial step; medium = ordinary multi-step work; high = hard, risky or large work.`;
+complexity (it picks the model, so do not overrate it):
+- low = one trivial step (a rename, a one-line fix, a quick lookup).
+- medium = ordinary work, even when it spans several files or needs a plan first. Most requests are medium.
+- high = only large or risky work: a broad refactor or redesign, security- or data-sensitive changes, or a bug whose cause is unclear across many files.
+Needing planning or a long context does not by itself make work high. When unsure between medium and high, choose medium.`;
 
 export function conciergePrompt(projectName: string, agents: AgentRecord[], history: Message[], text: string): string {
   const parts = [`Project: ${projectName}`, `Running and finished work in this conversation:\n${registerText(agents)}`];
@@ -71,6 +77,14 @@ const WORKSPACE_STRONG = [
 ];
 const WORKSPACE_WORDS = /\b(implement|refactor|fix|debug|build|compile|commit|merge|rebase|deploy|install|lint|typecheck|diff|branch|repo(sitory)?|codebase|the code|this code|source code|function|class|file|folder|directory|yourself|your (own )?code)\b/i;
 const SMALL_TALK = /^\s*(thanks|thank you|thx|ok(ay)?|great|cool|nice|hi|hello|hey|status\b|how('?s| is) it going|(is|are) .*\b(done|finished|running)\b)/i;
+
+// Go-ahead words only: a bare "ok" or "thanks" is small talk the front desk answers cheaply.
+const APPROVAL = /^\s*(ok(ay)?[,!.]?\s+)?(yes|yep|yeah|sure|go ahead|go for it|do it|proceed|continue|carry on|please do|approved?|lgtm|ship it|build it|make it|start|implement it)\b[\s\w,'!.]{0,40}$/i;
+
+/** A short go-ahead ("yes, build it") continues the previous request; re-triaging it would only guess its size anew. */
+export function isApproval(text: string): boolean {
+  return text.trim().length <= 60 && APPROVAL.test(text) && !/\b(thanks|thank you|thx)\b/i.test(text);
+}
 
 /** True when a message clearly needs the workspace, so a front-desk answer must not stand. */
 export function needsWorkspace(text: string): boolean {
