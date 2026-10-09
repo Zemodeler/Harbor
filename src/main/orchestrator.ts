@@ -520,7 +520,12 @@ export class Orchestrator {
       else worktreeNote = 'This project is not a git repository with commits, so you edit the project directory directly while holding exclusive ownership. Keep changes minimal and scoped.';
     } else {
       const reviewed = upstream.find((u) => u.worktree);
-      if (a.role === 'reviewer' && reviewed?.worktree) cwd = reviewed.worktree;
+      if (a.role === 'reviewer' && reviewed?.worktree) {
+        cwd = reviewed.worktree;
+        // Pin the exact version under review now; the branch may move while the reviewer works.
+        const tested = await this.d.git.head(cwd);
+        if (tested) this.setState(a, 'working', { testedCommit: tested, testedWorktree: cwd, outdated: false });
+      }
       worktreeNote = 'Read-only: do not modify files.';
     }
 
@@ -545,6 +550,18 @@ export class Orchestrator {
     });
   }
 
+  /** Flag verification of a branch as outdated once its head differs from the commit that was tested. */
+  private markOutdated(projectId: Id, worktree: string, head: string): void {
+    for (const x of this.d.store.listAgentRecords(projectId)) {
+      if (x.testedWorktree !== worktree || !x.testedCommit) continue;
+      const outdated = x.testedCommit !== head;
+      if (x.outdated === outdated) continue;
+      x.outdated = outdated;
+      this.d.store.upsertAgent(x);
+      this.publish(x);
+    }
+  }
+
   private async afterRun(a: AgentRecord, res: RoutedRun): Promise<void> {
     const { store, git } = this.d;
     this.running.delete(a.id);
@@ -558,6 +575,7 @@ export class Orchestrator {
       const files = await git.changedFiles(a.worktree, a.baseCommit);
       if (stat) report += `\n\nChanges on ${a.branch}${cp.committed ? ' (uncommitted work was checkpointed by Harbor)' : ''}:\n${stat}`;
       else report += `\n\nNo changes were committed on ${a.branch}.`;
+      if (cp.head) { a.headCommit = cp.head; this.markOutdated(a.projectId, a.worktree, cp.head); }
       const claimed = (a.files ?? []).map((f) => f.replace(/\\/g, '/').toLowerCase());
       const outside = claimed.length ? files.filter((f) => !claimed.some((c) => f.toLowerCase() === c || f.toLowerCase().startsWith(c.replace(/\/?$/, '/')))) : [];
       if (outside.length) {
@@ -765,7 +783,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();

@@ -45,6 +45,8 @@ export interface AgentRecord extends Agent {
   /** Checks Harbor itself ran on `testedCommit` (evidence, unlike result.checks). */
   checks?: CheckRun[];
   testedCommit?: string;
+  /** Worktree whose head `testedCommit` was taken from, so Harbor can tell when that branch moves. */
+  testedWorktree?: string;
 }
 type Id = string;
 
