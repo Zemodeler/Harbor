@@ -101,6 +101,14 @@ export class Store {
     if (c) { Object.assign(c, patch); this.dirty(); }
     return c;
   }
+  /** Internal (not part of the API contract): a goal-mode conversation paused by a question or failure stops auto-continuing until the user writes. */
+  isGoalPaused(id: Id): boolean { return !!(this.getConversation(id) as (Conversation & { goalPaused?: boolean }) | undefined)?.goalPaused; }
+  setGoalPaused(id: Id, paused: boolean): void {
+    const c = this.getConversation(id) as (Conversation & { goalPaused?: boolean }) | undefined;
+    if (!c || !!c.goalPaused === paused) return;
+    if (paused) c.goalPaused = true; else delete c.goalPaused;
+    this.dirty();
+  }
   touchConversation(id: Id, patch: Partial<Pick<Conversation, 'title'>> = {}): void {
     const c = this.getConversation(id);
     if (c) { Object.assign(c, patch, { updated: Date.now() }); this.dirty(); }

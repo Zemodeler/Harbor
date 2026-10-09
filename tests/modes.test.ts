@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeArgs } from '../src/main/adapters/claude';
 import { codexArgs } from '../src/main/adapters/codex';
@@ -9,7 +9,7 @@ import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { parseProtocol, stripProtocol } from '../src/main/prompts';
-import { createHarborService, saveAttachments } from '../src/main/service';
+import { attachmentDir, createHarborService, saveAttachments } from '../src/main/service';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-modes-')); dirs.push(d); return d; };
@@ -252,5 +252,147 @@ describe('session activity and CLI pinning', () => {
     expect(rec.state).toBe('done');
     const conv = h.svc.store.findConversationByAgent(rec.id)!;
     expect((await h.svc.listMessages(conv.id)).some((m) => m.text.includes('pinned CLI codex is unavailable'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- review fixes
+
+const gate = () => { let open!: () => void; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+const until = async (cond: () => boolean, ms = 5000) => { const t0 = Date.now(); while (!cond()) { if (Date.now() - t0 > ms) throw new Error('until timed out'); await new Promise((r) => setTimeout(r, 15)); } };
+const settle = () => new Promise((r) => setTimeout(r, 150));
+
+describe('plan mode constrains helpers at execution time', () => {
+  it('holds queued edit helpers in plan mode with a note, notes that running ones continue, and releases them on leaving plan', async () => {
+    const g = gate();
+    const h = await harness({
+      claude: script({
+        lead: (_p, _o, i) => say(i === 0 ? [delegateLine({ ref: 'look', title: 'look', role: 'other', access: 'read', instructions: 'research' }), delegateLine({ ref: 'b', title: 'build', role: 'implementer', access: 'edit', instructions: 'edit things', dependsOn: ['look'] })].join('\n') : 'all done'),
+        helper: async (p) => { if (p.includes('research')) await g.p; return say('ok'); }
+      })
+    }, ['claude']);
+    await h.svc.send(h.conv.id, 'go');
+    await until(() => h.all().some((c) => c.prompt.includes('research')));
+    await h.svc.setConversationMode(h.conv.id, 'plan');
+    expect((await h.texts()).some((t) => /1 running helper\(s\) continue/.test(t))).toBe(true);
+    g.open();
+    await until(() => h.svc.store.listAgentRecords(h.project.id).find((a) => a.title === 'look')?.state === 'done');
+    await settle();
+    const build = () => h.svc.store.listAgentRecords(h.project.id).find((a) => a.title === 'build')!;
+    expect(build().state).toBe('queued');
+    expect(h.all().some((c) => c.prompt.includes('edit things'))).toBe(false);
+    expect((await h.texts()).some((t) => t.includes('"build" stays queued until you leave plan mode'))).toBe(true);
+    await h.svc.setConversationMode(h.conv.id, 'default');
+    await h.svc.whenIdle();
+    expect(build().state).toBe('done');
+    expect(h.all().find((c) => c.prompt.includes('edit things'))!.opts.permission).toBe('edit');
+  });
+
+  it('a helper that runs in a plan-mode conversation (a follow-up here) is read-only; auto only affects later runs', async () => {
+    const h = await harness({
+      claude: script({ lead: (_p, _o, i) => say(i === 0 ? delegateLine({ title: 'build', role: 'implementer', access: 'edit', instructions: 'edit things' }) : 'done') })
+    }, ['claude']);
+    await h.svc.send(h.conv.id, 'go');
+    await h.svc.whenIdle();
+    const rec = h.svc.store.listAgentRecords(h.project.id).find((a) => a.title === 'build')!;
+    expect(h.all().find((c) => c.prompt.includes('edit things'))!.opts.permission).toBe('edit');
+    await h.svc.setConversationMode(h.conv.id, 'auto');
+    expect((await h.texts()).some((t) => /Auto mode applies to runs that start from now on/.test(t))).toBe(true);
+    await h.svc.setConversationMode(h.conv.id, 'plan');
+    const direct = await h.svc.openAgentConversation(rec.id);
+    const before = h.all().length;
+    await h.svc.send(direct.id, 'also tweak the footer');
+    await h.svc.whenIdle();
+    const follow = h.all().slice(before).find((c) => c.prompt.includes('footer'))!;
+    expect(follow.opts.permission).toBe('read-only');
+  });
+});
+
+describe('goal loop and helpers', () => {
+  it('does not continue while any helper of the conversation is still active, even after a planner-triggered lead turn', async () => {
+    const g = gate();
+    const h = await harness({
+      claude: script({
+        lead: (_p, _o, i) => say(i === 0 ? [delegateLine({ title: 'plan it', role: 'planner', access: 'read', instructions: 'make a plan' }), delegateLine({ title: 'slow', role: 'other', access: 'read', instructions: 'slow research' })].join('\n')
+          : i === 1 ? 'reviewing the plan' : 'finished\nHARBOR_GOAL_DONE: {"summary":"ok"}'),
+        helper: async (p) => { if (p.includes('slow research')) await g.p; return say('report'); }
+      })
+    }, ['claude']);
+    await h.svc.setConversationMode(h.conv.id, 'goal', 'g');
+    await h.svc.send(h.conv.id, 'start');
+    const leads = () => h.all().filter((c) => isLead(c.opts)).length;
+    await until(() => leads() === 2);
+    await settle();
+    expect(leads()).toBe(2); // the planner's report resumed the lead once; no automatic continuation while "slow" runs
+    g.open();
+    await h.svc.whenIdle();
+    expect(leads()).toBe(3);
+    expect((await h.texts()).some((t) => t.includes('Goal reached'))).toBe(true);
+  });
+
+  it('pauses on a helper failure: the report resumes the lead once without the auto-continue loop, and a new message clears the pause', async () => {
+    const h = await harness({
+      claude: script({
+        lead: (_p, _o, i) => say(i === 0 ? delegateLine({ title: 'flaky', role: 'other', access: 'read', instructions: 'explode' }) : 'still going'),
+        helper: () => [{ kind: 'done', ok: false, error: 'boom' }]
+      })
+    }, ['claude']);
+    await h.svc.setConversationMode(h.conv.id, 'goal', 'g');
+    await h.svc.send(h.conv.id, 'start');
+    await h.svc.whenIdle();
+    await settle();
+    const leads = () => h.all().filter((c) => isLead(c.opts)).length;
+    expect(leads()).toBe(2);
+    expect(h.svc.store.isGoalPaused(h.conv.id)).toBe(true);
+    await h.svc.send(h.conv.id, 'carry on');
+    expect(h.svc.store.isGoalPaused(h.conv.id)).toBe(false);
+    await h.svc.whenIdle();
+    expect(leads()).toBeGreaterThan(4); // the loop runs again after the user's message
+  });
+
+  it('persists the pause when the lead asks, and a user message clears it', async () => {
+    const h = await harness({ claude: script({ lead: () => say('need input\nHARBOR_ASK: {"question":"which one?"}') }) }, ['claude']);
+    await h.svc.setConversationMode(h.conv.id, 'goal', 'g');
+    await h.svc.send(h.conv.id, 'start');
+    await h.svc.whenIdle();
+    expect(h.svc.store.isGoalPaused(h.conv.id)).toBe(true);
+    h.svc.store.flush();
+    expect(JSON.parse(readFileSync(join(h.dataDir, 'state.json'), 'utf8')).conversations.find((c: { id: string }) => c.id === h.conv.id).goalPaused).toBe(true);
+    await h.svc.send(h.conv.id, 'the first');
+    expect(h.svc.store.isGoalPaused(h.conv.id)).toBe(false);
+    await h.svc.whenIdle();
+  });
+});
+
+describe('attachment hardening', () => {
+  const ok = { name: 'a.png', mime: 'image/png', dataBase64: PNG };
+  it('rejects non-canonical base64', () => {
+    const dir = join(tmp(), 'att');
+    for (const bad of ['iVBORw0KGgo', 'iVBO*w0KGgo=', 'iVBORw0KGgp=', 'iVBORw0K Ggo=', 'iVBORw0KGgo===', 'iV=ORw0K', 'iVBORw0KGgo=\n']) {
+      expect(() => saveAttachments(dir, [{ ...ok, dataBase64: bad }]), bad).toThrow(/valid image data|empty/);
+    }
+    expect(existsSync(dir)).toBe(false);
+    expect(saveAttachments(dir, [ok])).toHaveLength(1);
+  });
+  it('only accepts own-property mime types', () => {
+    const dir = join(tmp(), 'att');
+    for (const mime of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'image/svg+xml']) {
+      expect(() => saveAttachments(dir, [{ ...ok, mime }]), mime).toThrow(/supported image/);
+    }
+  });
+  it('validates conversation ids and keeps attachment paths inside <data>/attachments', () => {
+    const root = tmp();
+    for (const id of ['..', '../x', 'a/b', 'a\\b', '', 'x'.repeat(65), '.', 'C:\\evil', 'a b']) expect(() => attachmentDir(root, id), id).toThrow(/Invalid conversation id/);
+    const good = attachmentDir(root, '3f2a-b_9');
+    expect(relative(join(root, 'attachments'), good)).toBe('3f2a-b_9');
+  });
+  it('send() and deleteConversation never touch paths outside the attachments folder', async () => {
+    const h = await harness({});
+    const victim = join(h.dataDir, 'keep.txt');
+    writeFileSync(victim, 'x');
+    h.svc.store.addConversation({ id: '..', projectId: h.project.id, title: 'evil', updated: 0, agentId: h.conv.agentId });
+    await expect(h.svc.send('..', 'hi', [ok])).rejects.toThrow(/Invalid conversation id/);
+    await h.svc.deleteConversation('..');
+    expect(existsSync(victim)).toBe(true);
+    expect(existsSync(h.dataDir)).toBe(true);
   });
 });

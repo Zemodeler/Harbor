@@ -25,6 +25,8 @@ export function Conversation({ state, openProject, workspace, review }: { state:
   const stream = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const c = state.conversation;
+  const currentId = useRef(c?.id);
+  currentId.current = c?.id;
   const agent = state.agents.find(a => a.id === c?.agentId);
   const project = state.projects.find(p => p.id === state.projectId);
   // Subagents only appear here, in the chat with the main agent, and only while they run: the user talks to the main
@@ -54,10 +56,12 @@ export function Conversation({ state, openProject, workspace, review }: { state:
   useEffect(() => { if (follow.current && stream.current) stream.current.scrollTop = stream.current.scrollHeight; }, [state.messages, c?.id]);
   async function addImages(files: File[]) {
     if (!c || !files.length) return;
+    const id = c.id;
     const { accepted, error } = acceptImages(images.length, files);
     setAttachmentError(error);
-    try { const read = await Promise.all(accepted.map(readImage)); setImages(prev => [...prev, ...read].slice(0, 6)); }
-    catch { setAttachmentError('An image could not be read. Try another file.'); }
+    // Reading is async: if the user switched conversations meanwhile, these images belong to the old one and are dropped.
+    try { const read = await Promise.all(accepted.map(readImage)); if (currentId.current === id) setImages(prev => [...prev, ...read].slice(0, 6)); }
+    catch { if (currentId.current === id) setAttachmentError('An image could not be read. Try another file.'); }
   }
   function send() {
     if (!c || (!draft.trim() && !images.length) || c.archived) return;
@@ -66,7 +70,12 @@ export function Conversation({ state, openProject, workspace, review }: { state:
     if (busy && sent.length) { setAttachmentError('Images can be sent when the session is idle. Remove them to queue this text.'); return; }
     if (busy) { workspace.setQueue(id, [...queue, { id: crypto.randomUUID(), text }]); workspace.setDraft(id, ''); return; }
     workspace.setDraft(id, ''); setImages([]); setAttachmentError('');
-    void state.send(text, sent.map(({ name, mime, dataBase64 }) => ({ name, mime, dataBase64 }))).then(ok => { if (!ok) { workspace.setDraft(id, newer => newer || text); setImages(now => now.length ? now : sent); setSendError('Your message was kept. Retry when the connection is ready.'); } });
+    void state.send(text, sent.map(({ name, mime, dataBase64 }) => ({ name, mime, dataBase64 }))).then(ok => {
+      if (ok) return;
+      workspace.setDraft(id, newer => newer || text); // drafts are stored per conversation, so this is safe after a switch
+      if (currentId.current !== id) return; // the composer now shows another conversation: keep its images and errors untouched
+      setImages(now => now.length ? now : sent); setSendError('Your message was kept. Retry when the connection is ready.');
+    });
   }
   async function attach(file: File) {
     if (!c) return;
