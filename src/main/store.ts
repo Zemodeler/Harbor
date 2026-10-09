@@ -5,8 +5,13 @@ import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message
 import type { TrackedProcess } from './proc';
 import type { AgentRecord, CoordinationEntry, FileLock, SessionLink, State, UsageEvent } from './types';
 
-/** State plus fields added after version 1; `processes` is optional so older files still load. */
-type Persisted = State & { processes?: TrackedProcess[] };
+/**
+ * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
+ * report delivery (`AgentRecord.reportDelivered`); its absence means a file written before that existed.
+ */
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1 };
+
+const TERMINAL_STATES = ['done', 'failed', 'stopped'];
 
 export const DEFAULT_SETTINGS: Settings = { routing: 'auto', cliOverrides: {}, allowFreeReset: 'ask' };
 
@@ -34,14 +39,16 @@ export class Store {
   }
 
   private load(): Persisted {
-    if (!this.file || !existsSync(this.file)) return emptyState();
+    if (!this.file || !existsSync(this.file)) return { ...emptyState(), reportLedger: 1 };
     try {
-      const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<State>;
-      return { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
+      const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Persisted>;
+      const state: Persisted = { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
+      if (!state.reportLedger) baselineReports(state);
+      return state;
     } catch {
       // Keep the unreadable file for inspection rather than silently overwriting it.
       try { renameSync(this.file, `${this.file}.corrupt-${Date.now()}`); } catch { /* ignore */ }
-      return emptyState();
+      return { ...emptyState(), reportLedger: 1 };
     }
   }
 
@@ -141,6 +148,24 @@ export class Store {
     if (a) { Object.assign(a, patch); this.dirty(); }
     return a;
   }
+  /**
+   * Records that these helper results reached the lead. Written to disk at once: a restart that lost the mark would hand
+   * the same report to the lead again. A mark never moves back to an older revision.
+   */
+  markReportsDelivered(marks: Array<Pick<AgentRecord, 'id' | 'revision' | 'state'>>): void {
+    const time = Date.now();
+    for (const m of marks) {
+      const a = this.getAgent(m.id);
+      if (!a || (a.reportDelivered && a.reportDelivered.revision > m.revision)) continue;
+      a.reportDelivered = { v: 1, revision: m.revision, state: m.state, time };
+    }
+    this.flush();
+  }
+  /** A stopped agent resumed in place keeps its revision: its old mark must not hide the outcome of the resumed run. */
+  clearReportDelivered(id: Id): void {
+    const a = this.getAgent(id);
+    if (a?.reportDelivered) { delete a.reportDelivered; this.dirty(); }
+  }
 
   // ---- sessions (native CLI session ids)
   getSession(agentId: Id): SessionLink | undefined { return this.state.sessions.find((s) => s.agentId === agentId); }
@@ -218,6 +243,18 @@ export class Store {
     this.state.settings = next;
     this.dirty(); return this.state.settings;
   }
+}
+
+/**
+ * A file written before report delivery was recorded: its finished helpers were reported in earlier runs (Harbor reported
+ * them as they finished), so they are marked delivered once instead of all being replayed to the lead after the upgrade.
+ */
+function baselineReports(state: Persisted): void {
+  const time = Date.now();
+  for (const a of state.agents) {
+    if (a.role !== 'main' && !a.reportDelivered && TERMINAL_STATES.includes(a.state)) a.reportDelivered = { v: 1, revision: a.revision, state: a.state, time };
+  }
+  state.reportLedger = 1;
 }
 
 // ---- settings validation and resolution (pure)
