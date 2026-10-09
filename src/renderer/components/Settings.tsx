@@ -1,7 +1,7 @@
 import { useState, type CSSProperties } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
 import type { AppearanceState } from '../hooks/useAppearance';
-import { palettes, paletteTokens } from '../appearance';
+import { layouts, palettes, paletteTokens } from '../appearance';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { WorkspaceSettings } from './WorkspaceSettings';
 import s from '../Harbor.module.css';
@@ -13,10 +13,19 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   return <section className={s.settings} aria-label="Settings">
     <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
-    <p className={s.muted}>{tab === 'Appearance' ? 'Choose a palette and appearance for your workspace.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
+    <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
     <div className={s.tabs} role="tablist" aria-label="Settings sections">{['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage'].map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
     <div role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
       {tab === 'Workspace' ? <WorkspaceSettings state={state} workspace={workspace}/> : tab === 'Appearance' ? <>
+        <fieldset className={s.appearanceGroup}><legend>Workspace mode</legend><p className={s.muted} id="layout-help">Three ways to work. Switching keeps your conversations, drafts, and running agents.</p>
+          <div className={s.layoutChoices} aria-describedby="layout-help">{layouts.map(layout => <label key={layout.id} className={s.layoutChoice}>
+            <input type="radio" name="workspace-layout" aria-label={layout.name} checked={appearance.layout === layout.id} onChange={() => updateAppearance({ layout: layout.id })}/>
+            <span className={s.layoutPreview} data-layout={layout.id} aria-hidden="true"><span className={s.layoutPreviewNav}/><span className={s.layoutPreviewBody}><i/><i/><i/><span/></span><span className={s.layoutPreviewDetail}><i/><i/><i/></span></span>
+            <strong>{layout.name}</strong><span>{layout.description}</span>
+          </label>)}</div>
+          <button className={s.recommendedTheme} onClick={() => { const layout = layouts.find(l => l.id === appearance.layout)!; updateAppearance({ palette: layout.palette, mode: layout.mode }); }}>Use this mode’s original colors</button>
+          <p className={s.muted}>Layout and colors are independent. Try any palette with any mode.</p>
+        </fieldset>
         <fieldset className={s.appearanceGroup}><legend>Appearance</legend><p className={s.muted} id="appearance-help">Follow your device, or keep Harbor always light or dark.</p>
           <div className={s.modeChoices} aria-describedby="appearance-help">{(['system', 'light', 'dark'] as const).map(mode => <label key={mode} className={s.modeChoice}>
             <input type="radio" name="appearance-mode" checked={appearance.mode === mode} onChange={() => updateAppearance({ mode })}/><span>{mode === 'system' ? 'Use system' : mode === 'light' ? 'Light' : 'Dark'}</span>

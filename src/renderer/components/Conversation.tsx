@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { Markdown } from './Markdown';
@@ -11,7 +11,7 @@ import { ModePicker } from './ModePicker';
 import { acceptImages, IMAGE_TYPES, readImage, type PendingImage } from '../attachments';
 import s from '../Harbor.module.css';
 
-export function Conversation({ state, openProject, workspace, review }: { state: HarborState; openProject: () => void; workspace: WorkspaceState; review: () => void }) {
+export function Conversation({ state, openProject, workspace, review, dock, showCrew = true }: { state: HarborState; openProject: () => void; workspace: WorkspaceState; review: () => void; dock?: ReactNode; showCrew?: boolean }) {
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [attachmentError, setAttachmentError] = useState('');
   const [sendError, setSendError] = useState('');
@@ -100,7 +100,7 @@ export function Conversation({ state, openProject, workspace, review }: { state:
             {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{m.id === latestRouted && c?.activity?.complexity ? <> · <ComplexityBadge complexity={c.activity.complexity}/></> : null}</p><p>{m.details.reason}</p></details> : null}
           </article>; })}
         </>}
-        {crew.length ? <section className={s.crew} aria-label="Subagents"><h3>{crew.length === 1 ? '1 subagent' : `${crew.length} subagents`}</h3><div className={s.crewList}>{crew.map(a => <div className={s.crewCard} key={a.id}>
+        {showCrew && crew.length ? <section className={s.crew} aria-label="Subagents"><h3>{crew.length === 1 ? '1 subagent' : `${crew.length} subagents`}</h3><div className={s.crewList}>{crew.map(a => <div className={s.crewCard} key={a.id}>
           <button className={s.crewOpen} onClick={() => void state.openAgent(a.id)}><span className={s.dot} data-state={a.state}/><span>{a.title}<small>{a.role} · {a.state} · {a.cli} / {a.model}</small></span></button>
           {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop</button> : null}
         </div>)}</div></section> : null}
@@ -109,6 +109,7 @@ export function Conversation({ state, openProject, workspace, review }: { state:
       </div>
     </div>
     <div className={s.composerArea}>
+      {dock}
       {c.archived ? <div className={s.archivedNotice}>This conversation is archived.<button onClick={() => void state.updateConversation(c, { archived: false })}>Restore conversation</button></div> : null}
       {queue.length ? <details className={s.promptQueue} open><summary>{queue.length} queued {queue.length === 1 ? 'follow-up' : 'follow-ups'}</summary>{queue.map((item, i) => <div key={item.id}><span>{item.text.slice(0, 100)}{item.paused ? ' · Paused' : ''}</span>{item.paused || (['stopped', 'failed'].includes(status) && resumed !== c.id) ? <button onClick={() => { setResumed(c.id); workspace.setQueue(c.id, items => items.map(x => ({ ...x, paused: false }))); }}>Resume queue</button> : null}{i > 0 ? <button aria-label={`Move follow-up ${i + 1} first`} onClick={() => workspace.setQueue(c.id, [item, ...queue.filter(x => x.id !== item.id)])}>Move first</button> : null}<button onClick={() => { workspace.setDraft(c.id, item.text); workspace.setQueue(c.id, queue.filter(x => x.id !== item.id)); }}>Edit</button><button aria-label={`Remove follow-up ${i + 1}`} onClick={() => workspace.setQueue(c.id, queue.filter(x => x.id !== item.id))}>Remove</button></div>)}</details> : null}
       <div className={s.composer} data-dragging={dragging || undefined}

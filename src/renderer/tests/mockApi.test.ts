@@ -15,7 +15,9 @@ describe('Mock execution lifecycle', () => {
     const api = createMockApi({ delay: 0 }); let requestId = '';
     api.onEvent(e => { if (e.type === 'permission') requestId = e.requestId; });
     await api.send('account', 'Demo'); expect((await api.getUsage())[1].usedPct).toBe(73);
+    expect((await api.listPendingPermissions()).map(p => p.requestId)).toEqual([requestId]);
     await api.answerPermission(requestId, true); expect((await api.getUsage())[1].usedPct).toBe(0);
+    expect(await api.listPendingPermissions()).toEqual([]);
     await expect(api.answerPermission(requestId, true)).rejects.toThrow('no longer pending');
   });
 });

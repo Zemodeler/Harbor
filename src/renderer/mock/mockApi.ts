@@ -19,11 +19,15 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
   const listeners = new Set<(e: HarborEvent) => void>();
   const runs = new Map<string, { cancelled: boolean }>();
   const permissions = new Map<string, (allow: boolean) => void>();
+  const pendingPermissions = new Map<string, Extract<HarborEvent, { type: 'permission' }>>();
   const questions = new Map<string, string>();
   let settings: Settings = { routing: 'auto', cliOverrides: { codex: { enabled: true }, claude: { enabled: true }, gemini: { enabled: false } }, allowFreeReset: 'ask' };
   let requested = false;
   const copy = <T,>(v: T): T => structuredClone(v);
-  const emit = (e: HarborEvent) => listeners.forEach(cb => cb(copy(e)));
+  const emit = (e: HarborEvent) => {
+    if (e.type === 'permission') pendingPermissions.set(e.requestId, copy(e));
+    listeners.forEach(cb => cb(copy(e)));
+  };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
   const requireConversation = (conversationId: string) => {
@@ -192,13 +196,25 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
     async pauseAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); if (x.state === 'queued') { x.paused = true; updateAgent(x); } },
     async resumeAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); x.paused = false; updateAgent(x); },
     async resumeAgentSession(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x || x.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.'); x.state = 'working'; updateAgent(x); },
+    // The browser demo must not pretend to apply changes to a real Git checkout.
+    async integrateBranches() { throw new Error('Branch integration is available in the desktop app.'); },
+    async applyIntegration() { throw new Error('Applying integration is available in the desktop app.'); },
+    async getChanges(agentId) {
+      if (!data.agents.some(a => a.id === agentId)) throw new Error('This agent is no longer available.');
+      return copy(agentId === 'implement' ? demoChanges : []);
+    },
+    async previewRollback() { return { supported: false, notes: ['Task rollback is available in the desktop app.'] }; },
+    async rollbackTask() { throw new Error('Task rollback is available in the desktop app.'); },
+    async listToolRules() { return []; },
+    async removeToolRule() { return []; },
+    async listPendingPermissions() { return copy([...pendingPermissions.values()]); },
     async getUsage() { await pause(); return copy(data.windows); },
     async getSettings() { await pause(); return copy(settings); },
     async setSettings(s) { settings = { ...settings, ...copy(s) }; return copy(settings); },
     async answerPermission(requestId, allow) {
       const resolve = permissions.get(requestId);
       if (!resolve) throw new Error('This permission request is no longer pending.');
-      permissions.delete(requestId); resolve(allow);
+      permissions.delete(requestId); pendingPermissions.delete(requestId); resolve(allow);
     },
     async answerQuestion(requestId, answer) {
       const c = data.conversations.find(c => c.id === questions.get(requestId)) || data.conversations[0];

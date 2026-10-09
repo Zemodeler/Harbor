@@ -1,7 +1,14 @@
 export type AppearanceMode = 'system' | 'light' | 'dark';
-export type PaletteId = 'harbor' | 'ocean' | 'olive' | 'amber' | 'rose';
+export type PaletteId = 'harbor' | 'ocean' | 'olive' | 'amber' | 'rose' | 'command' | 'porcelain' | 'graphite' | 'violet' | 'ice';
+export type LayoutMode = 'command' | 'focus' | 'mission';
 export type ColorScheme = 'light' | 'dark';
-export interface Appearance { palette: PaletteId; mode: AppearanceMode }
+export interface Appearance { palette: PaletteId; mode: AppearanceMode; layout: LayoutMode }
+
+export const layouts = [
+  { id: 'command', name: 'Command Center', description: 'Conversation and live activity, side by side.', palette: 'command', mode: 'dark' },
+  { id: 'focus', name: 'Focus Studio', description: 'A calm conversation with details on demand.', palette: 'porcelain', mode: 'light' },
+  { id: 'mission', name: 'Mission Board', description: 'Every conversation organized by its live status.', palette: 'graphite', mode: 'dark' }
+] as const;
 
 // Surface, text, and navigation colors travel together so a palette is more than a button tint.
 const tokenNames = ['bg', 'sidebar', 'surface', 'ink', 'muted', 'line', 'accent', 'wash', 'on-accent', 'rail', 'rail-ink', 'rail-accent', 'rail-on-accent'] as const;
@@ -20,17 +27,33 @@ export const palettes = [
     dark: ['#24211d', '#1d1b17', '#302c26', '#f4eee4', '#cabca6', '#494137', '#e8c185', '#493824', '#30220e', '#15130f', '#f0dfc1', '#e8c185', '#33291a'] },
   { id: 'rose', name: 'Rose', description: 'Muted plum & pink',
     light: ['#fffdfd', '#f6f1f3', '#f8f4f6', '#382a34', '#725b6b', '#e3d7df', '#95506c', '#f4e7ed', '#ffffff', '#34212d', '#edd6e2', '#e8b5ce', '#34212d'],
-    dark: ['#231c23', '#1d171e', '#302631', '#f3e9f1', '#ceb4c5', '#483849', '#e8b5ce', '#493042', '#331d2a', '#160f17', '#edd6e2', '#e8b5ce', '#34212d'] }
+    dark: ['#231c23', '#1d171e', '#302631', '#f3e9f1', '#ceb4c5', '#483849', '#e8b5ce', '#493042', '#331d2a', '#160f17', '#edd6e2', '#e8b5ce', '#34212d'] },
+  { id: 'command', name: 'Command', description: 'Deep navy & electric cyan',
+    light: ['#f8fbff', '#edf3fa', '#eaf1f8', '#14283e', '#40566c', '#cfdeeb', '#006580', '#dceef4', '#ffffff', '#0b1b30', '#d9e8fa', '#50d9f5', '#082134'],
+    dark: ['#0b1523', '#101e30', '#15273b', '#ecf4ff', '#a9bed6', '#2b415a', '#50d9f5', '#193c50', '#082134', '#08111e', '#d9e8fa', '#50d9f5', '#082134'] },
+  { id: 'porcelain', name: 'Porcelain', description: 'Cool white & precise blue',
+    light: ['#ffffff', '#f3f6fc', '#edf2fa', '#14233e', '#445771', '#d7e1f0', '#075bd8', '#e4edff', '#ffffff', '#e8eef9', '#203656', '#075bd8', '#ffffff'],
+    dark: ['#131c2b', '#172238', '#1e2c43', '#eff4ff', '#b3c4e0', '#344966', '#98bbff', '#273f63', '#112441', '#0e1728', '#d6e5ff', '#98bbff', '#112441'] },
+  { id: 'graphite', name: 'Graphite', description: 'Charcoal & bright mint',
+    light: ['#f9fcfb', '#eef4f1', '#e8f0ec', '#192e28', '#435f54', '#cfdfd7', '#006b49', '#dceee4', '#ffffff', '#14251e', '#d6eee2', '#6df0b4', '#102c21'],
+    dark: ['#101a1c', '#142123', '#1b2b2d', '#f0f8f4', '#b2c9c2', '#324847', '#6df0b4', '#203d32', '#102c21', '#0b1417', '#d6eee2', '#6df0b4', '#102c21'] },
+  { id: 'violet', name: 'Violet', description: 'Midnight plum & lavender',
+    light: ['#fcfbff', '#f2eff9', '#ede8f5', '#30213f', '#605073', '#ddd4ea', '#6c3db3', '#ede1fc', '#ffffff', '#231632', '#e9ddfb', '#c4a4ff', '#27143f'],
+    dark: ['#1a1425', '#20192e', '#2a213b', '#f5edff', '#c9b8e1', '#453653', '#c4a4ff', '#3c2c52', '#27143f', '#120e1b', '#e9ddfb', '#c4a4ff', '#27143f'] },
+  { id: 'ice', name: 'Ice', description: 'Arctic slate & glacier blue',
+    light: ['#f9fdff', '#edf5f8', '#e6f0f5', '#17333f', '#405f6e', '#cddfe6', '#086b83', '#dceef5', '#ffffff', '#18313f', '#d8edf5', '#8ddcf7', '#14333f'],
+    dark: ['#111e28', '#142633', '#1d3140', '#edf9ff', '#b1cddd', '#34505f', '#8ddcf7', '#254354', '#14333f', '#0a1720', '#d8edf5', '#8ddcf7', '#14333f'] }
 ] as const;
 
 export const appearanceKey = 'harbor.appearance.v1';
-export const defaultAppearance: Appearance = { palette: 'harbor', mode: 'system' };
+export const defaultAppearance: Appearance = { palette: 'command', mode: 'dark', layout: 'command' };
 export function parseAppearance(value: string | null): Appearance {
   try {
     const parsed: unknown = value ? JSON.parse(value) : null;
     if (parsed && typeof parsed === 'object' && 'palette' in parsed && 'mode' in parsed &&
       palettes.some(p => p.id === parsed.palette) && ['system', 'light', 'dark'].includes(String(parsed.mode))) {
-      return { palette: parsed.palette as PaletteId, mode: parsed.mode as AppearanceMode };
+      const layout = 'layout' in parsed && layouts.some(l => l.id === parsed.layout) ? parsed.layout as LayoutMode : 'command';
+      return { palette: parsed.palette as PaletteId, mode: parsed.mode as AppearanceMode, layout };
     }
   } catch { /* A damaged preference must not prevent the workspace from opening. */ }
   return defaultAppearance;
@@ -40,5 +63,7 @@ export function paletteTokens(id: PaletteId, scheme: ColorScheme, prefix = '--')
   const tokens: Record<string, string> = {};
   tokenNames.forEach((name, i) => { tokens[prefix + name] = palette[scheme][i]; });
   tokens[prefix + 'error'] = scheme === 'dark' ? '#ffb4ab' : '#a42828';
+  tokens[prefix + 'warning'] = scheme === 'dark' ? '#ffd078' : '#805300';
+  tokens[prefix + 'success'] = scheme === 'dark' ? '#85e5b0' : '#17613d';
   return tokens;
 }
