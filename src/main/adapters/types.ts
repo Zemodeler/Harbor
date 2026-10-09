@@ -16,8 +16,28 @@ export interface RunOptions {
   systemPrompt?: string;
   /** Lead runs: forbid git merge/rebase/cherry-pick/reset/push where the CLI can enforce it (the integrator lands branches). */
   denyGitWrites?: boolean;
+  /**
+   * Asked before the CLI runs a tool outside its allowlist (`edit` runs only; deny rules are applied first).
+   * `signal` aborts when the CLI cancels the request or the run stops. Without it, such tools are denied silently as before.
+   * Only Claude honours it: `codex exec` has no host approval channel (verified flags: --approve-for-me,
+   * --dangerously-bypass-approvals-and-sandbox, -s; `codex app-server` has requestApproval but is experimental and out of scope).
+   */
+  onToolPermission?(req: ToolPermissionRequest, signal: AbortSignal): Promise<ToolPermissionDecision>;
   signal?: AbortSignal;
 }
+
+/** A CLI asking the host whether it may run one tool call. */
+export interface ToolPermissionRequest {
+  tool: string;
+  input: unknown;
+  toolUseId?: string;
+  description?: string;
+  blockedPath?: string;
+  /** The CLI's own reason for asking (e.g. why the rule did not match). */
+  reason?: string;
+}
+
+export type ToolPermissionDecision = { allow: true } | { allow: false; message: string };
 
 export type Chunk =
   | { kind: 'session'; id: string }

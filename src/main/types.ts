@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, CliId, Conversation, GitFileChange, Message, Project, Settings } from '../shared/api';
+import type { Agent, AgentResult, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Complexity } from './router';
 
@@ -102,4 +102,6 @@ export interface State {
   resetApprovals: ResetApproval[];
   /** Free-reset windows the user already used, keyed by cli. */
   settings: Settings;
+  /** "Always allow for this project" tool rules, keyed by project id. Optional so older files still load. */
+  toolRules?: Record<Id, ToolRule[]>;
 }

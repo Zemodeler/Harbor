@@ -49,6 +49,9 @@ export interface ServiceOptions {
   killer?: ProcessKiller;
   /** Where rollback evidence patches are written (default: <dataDir>/patches; none for an in-memory store). */
   patchesRoot?: string;
+  /** Tool permission timeout and timer (tests); defaults in orchestrator.ts. */
+  toolPermissionTimeoutMs?: number;
+  setTimer?: (fn: () => void, ms: number) => () => void;
 }
 
 const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
@@ -170,7 +173,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
     maxActivePerProject: opts.maxActivePerProject,
     killer: opts.killer,
-    patchesRoot: opts.patchesRoot ?? (opts.dataDir ? join(opts.dataDir, 'patches') : undefined)
+    patchesRoot: opts.patchesRoot ?? (opts.dataDir ? join(opts.dataDir, 'patches') : undefined),
+    toolPermissionTimeoutMs: opts.toolPermissionTimeoutMs,
+    setTimer: opts.setTimer
   });
 
   // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude
@@ -370,13 +375,21 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       for (const p of store.listProjects()) orchestrator.pump(p.id);
       return next;
     },
-    async answerPermission(requestId, allow) {
+    async answerPermission(requestId, allow, o) {
+      // Tool requests live in the orchestrator (they time out and end with their run); the rest are plain yes/no asks.
+      if (orchestrator.answerToolPermission(requestId, allow === true, o?.always === true)) return;
       const r = pending.get(requestId);
       if (!r) return;
       pending.delete(requestId);
       r(allow);
     },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
+    async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },
+    async removeToolRule(projectId, ruleId) {
+      needProject(projectId);
+      store.removeToolRule(projectId, ruleId);
+      return store.listToolRules(projectId);
+    },
     onEvent: (cb) => bus.on(cb)
   };
 }
