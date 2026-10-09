@@ -10,8 +10,8 @@ import { breakCycles } from './graph';
 import { Journal, journalDigest, type JournalEntry, type JournalKind } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
-  type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
+  type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type SessionPeer
 } from './prompts';
 import { reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
@@ -82,6 +82,8 @@ const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
 const TERMINAL: AgentState[] = ['done', 'failed', 'stopped'];
 const DEFAULT_TITLE = 'New conversation';
 const GOAL_MAX_CONTINUATIONS = 8;
+const MAX_PEER_WAKES = 2;
+const MAX_PEER_INBOX = 10;
 
 interface RoutedRun {
   ok: boolean;
@@ -150,6 +152,10 @@ export class Orchestrator {
   private planHeldNoted = new Set<Id>();
   /** Open questions to the user. In memory only: after a restart the question text is still in the chat to answer by typing. */
   private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
+  /** Peer messages waiting for a lead's next turn, by target conversation. In memory: a restart ends the sessions they were meant for. */
+  private peerInbox = new Map<Id, PeerMessage[]>();
+  /** Urgent wake-ups of an idle lead since the user last wrote to it; bounded so two leads cannot wake each other forever. */
+  private peerWakes = new Map<Id, number>();
   private sessionGeneration = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
   /** Pending tool permission requests by request id. */
@@ -336,6 +342,7 @@ export class Orchestrator {
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
+      this.peerWakes.delete(conversationId);
       const images = attachments.map((a) => a.path).filter((p): p is string => !!p);
       this.enqueueMain(agent.projectId, { kind: 'user', text, ...(images.length ? { images } : {}) }, conversationId);
     } else {
@@ -490,6 +497,59 @@ export class Orchestrator {
     }
   }
 
+  // ------------------------------------------------------------ other sessions of the same project
+
+  /** Conversations led by the project's lead agent (helper chats are not sessions), archived ones excluded. */
+  private leadConversations(projectId: Id, except: Id): Conversation[] {
+    const main = this.d.store.mainAgent(projectId);
+    return this.d.store.listConversations(projectId).filter((c) => c.id !== except && !c.archived && !!main && c.agentId === main.id);
+  }
+
+  /** What one lead is told about its siblings: only sessions that are running, described from Harbor's own records. */
+  sessionPeers(projectId: Id, conversationId: Id): SessionPeer[] {
+    return this.leadConversations(projectId, conversationId)
+      .filter((c) => c.activity?.state === 'working' || c.activity?.state === 'queued')
+      .map((c) => ({
+        id: c.id, title: c.title, state: c.activity!.state,
+        goal: this.d.store.listMessages(c.id).filter((m) => m.role === 'user').at(-1)?.text ?? c.title,
+        branches: this.registerFor(projectId, c.id).filter((a) => a.branch && !TERMINAL.includes(a.state)).map((a) => a.branch!)
+      }));
+  }
+
+  /** Id, id prefix, exact title, then unique title substring. Ambiguity resolves to nothing: a message must never reach the wrong session. */
+  private resolveSession(candidates: Conversation[], to: string): Conversation | undefined {
+    const q = to.trim().toLowerCase();
+    if (!q) return undefined;
+    const pick = (pred: (c: Conversation) => boolean) => { const m = candidates.filter(pred); return m.length === 1 ? m[0] : undefined; };
+    return pick((c) => c.id.toLowerCase() === q) ?? (q.length >= 6 ? pick((c) => c.id.toLowerCase().startsWith(q)) : undefined)
+      ?? pick((c) => c.title.toLowerCase() === q) ?? pick((c) => c.title.toLowerCase().includes(q));
+  }
+
+  /** A lead's HARBOR_PEER line: recorded, shown in both transcripts, and handed to the target's lead at a turn boundary. */
+  private deliverPeer(projectId: Id, fromConv: Id, req: PeerRequest): void {
+    const sender = this.d.store.getConversation(fromConv);
+    const target = this.resolveSession(this.leadConversations(projectId, fromConv), req.to);
+    if (!sender) return;
+    if (!target) {
+      this.post(fromConv, 'system', `Could not deliver a message to "${clip(req.to, 60)}": no single other session of this project matches.`);
+      return;
+    }
+    const msg: PeerMessage = { fromId: sender.id, fromTitle: sender.title, text: req.text, urgent: req.urgent, time: Date.now() };
+    this.d.store.addCoordination({ projectId, kind: 'peer', from: sender.id, to: target.id, text: req.text });
+    this.post(fromConv, 'system', `You told session "${clip(target.title, 60)}": ${clip(req.text, 200)}`);
+    this.post(target.id, 'system', `Message from session "${clip(sender.title, 60)}": ${clip(req.text, 200)}`);
+    const idle = !this.leads.has(target.id) && !this.stoppedSessions.has(target.id);
+    const wakes = this.peerWakes.get(target.id) ?? 0;
+    // Waking an idle lead spends quota, so only an urgent message does, and only a few times between user messages.
+    if (req.urgent && idle && wakes < MAX_PEER_WAKES) {
+      this.peerWakes.set(target.id, wakes + 1);
+      this.enqueueMain(projectId, { kind: 'peer', messages: [msg] }, target.id);
+      return;
+    }
+    const q = this.peerInbox.get(target.id) ?? [];
+    this.peerInbox.set(target.id, [...q, msg].slice(-MAX_PEER_INBOX));
+  }
+
   private registerFor(projectId: Id, conversationId: Id): AgentRecord[] {
     return this.d.store.listAgentRecords(projectId).filter((x) => x.role !== 'main' && x.parentConversationId === conversationId);
   }
@@ -527,13 +587,15 @@ export class Orchestrator {
     this.notes.delete(conversationId);
     const history = this.chatHistory(conversationId, trigger.kind === 'user');
     const tier: Tier = plan.complexity === 'high' ? 'strong' : plan.complexity === 'low' ? 'cheap' : 'standard';
+    const inbox = this.peerInbox.get(conversationId) ?? [];
+    this.peerInbox.delete(conversationId);
     const conv = this.d.store.getConversation(conversationId);
     const mode = conv?.mode ?? 'default';
     const goal = mode === 'goal' ? conv?.goal : undefined;
     const goalMode = !!goal;
     const headBefore = await this.d.git.head(project.path).catch(() => undefined);
     const out = await this.runRouted(main, {
-      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal }), system: LEAD_SYSTEM,
+      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
       role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli,
       permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
@@ -559,6 +621,7 @@ export class Orchestrator {
     }
     const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
+    for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
     if (created.length) {
       this.post(conversationId, 'system', 'Delegated: ' + created.map((c, i) => `${i + 1}. ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
     }
