@@ -151,7 +151,7 @@ export function useHarbor() {
     if (!c) return false;
     setSending(s => new Set(s).add(c.id));
     let success = false;
-    await run(async () => { await api.send(c.id, text, attachments?.length ? attachments : undefined); success = true;
+    await run(async () => { await (attachments?.length ? api.send(c.id, text, attachments) : api.send(c.id, text)); success = true;
       const cs = await api.listConversations(c.projectId);
       if (current.current.projectId === c.projectId) setConversations(cs);
     });
