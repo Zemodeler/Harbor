@@ -85,8 +85,8 @@ it('merges two approved branches, re-runs idempotently, applies as a fast-forwar
   expect(integ).toMatchObject({ target: 'main', base: mainHead, branch: i.branch });
   expect(i.branch).toMatch(/^harbor\/integrate-main-[0-9a-z]{6}$/);
   expect(integ.sources).toEqual([
-    { agentId: a.id, branch: a.branch, commit: git(repo, 'rev-parse', a.branch!), state: 'merged' },
-    { agentId: b.id, branch: b.branch, commit: git(repo, 'rev-parse', b.branch!), state: 'merged' }
+    { agentId: a.id, branch: a.branch, commit: git(repo, 'rev-parse', a.branch!), state: 'merged', merge: git(repo, 'rev-parse', `${i.branch!}~1`) },
+    { agentId: b.id, branch: b.branch, commit: git(repo, 'rev-parse', b.branch!), state: 'merged', merge: git(repo, 'rev-parse', i.branch!) }
   ]);
   expect(integ.head).toBe(git(repo, 'rev-parse', i.branch!));
   expect(git(i.worktree!, 'log', '--format=%an', '-1')).toBe('Harbor');
@@ -101,12 +101,15 @@ it('merges two approved branches, re-runs idempotently, applies as a fast-forwar
 
   // A re-run skips sources already in the integration head: no new merge commits.
   const head = integ.head!;
+  const merges = integ.sources.map((s) => s.merge);
   const ic = await svc.openAgentConversation(i.id);
   await svc.send(ic.id, 'run again');
   await svc.whenIdle();
   expect(i.state).toBe('done');
   expect(i.integration!.head).toBe(head);
   expect(i.report).toContain('already included');
+  // The merges Harbor made in the first run still attribute the sources.
+  expect(i.integration!.sources.map((s) => s.merge)).toEqual(merges);
 
   const applied = await svc.applyIntegration(i.id);
   expect(applied.integration).toMatchObject({ applied: true, head });
@@ -114,7 +117,7 @@ it('merges two approved branches, re-runs idempotently, applies as a fast-forwar
   expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('A');
   // Applying again is a no-op, not an error.
   await expect(svc.applyIntegration(i.id)).resolves.toMatchObject({ integration: { applied: true } });
-});
+}, 60_000); // five helper runs, a re-run and real git: slow on a loaded Windows machine
 
 it('records a conflict, aborts the merge and keeps earlier merges', async () => {
   const { svc, repo, find, integrator, mainHead } = await setup([
