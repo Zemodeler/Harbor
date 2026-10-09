@@ -275,7 +275,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },
-    async setSettings(s) { return store.setSettings(s); },
+    async setSettings(s) {
+      const next = store.setSettings(s);
+      // A raised concurrency limit should start waiting work now, not at the next unrelated event.
+      for (const p of store.listProjects()) orchestrator.pump(p.id);
+      return next;
+    },
     async answerPermission(requestId, allow) {
       const r = pending.get(requestId);
       if (!r) return;

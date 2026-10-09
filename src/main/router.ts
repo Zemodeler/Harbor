@@ -1,4 +1,4 @@
-import type { AgentRole, CliId } from '../shared/api';
+import type { AgentRole, CliId, EffortPolicy, LowAllowancePolicy, RolePreference } from '../shared/api';
 import type { ResolvedCli } from './clis/discovery';
 import type { Effort } from './adapters/types';
 import { DEFAULT_CATALOG, TIERS, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
@@ -22,6 +22,20 @@ export interface RouteRequest {
   requireCli?: CliId;
   /** Retry of failed or rejected work: worth the highest effort. */
   retry?: boolean;
+  /** `effort` is a deliberate choice (the concierge, a user's /deep) that the effort policy must not shift. */
+  fixedEffort?: boolean;
+}
+
+/** User routing settings already resolved for the project (see effectiveSettings in store.ts). Absent fields keep the defaults. */
+export interface RoutingPolicy {
+  /** Per CLI, the catalog models that may be picked; absent or empty = all. */
+  allowedModels?: Record<CliId, string[]>;
+  /** The preference for this request's role. */
+  preference?: RolePreference;
+  effortPolicy?: EffortPolicy;
+  lowAllowance?: LowAllowancePolicy;
+  /** Percent of allowance kept free: a model at or above 100 - reserve % used is skipped. */
+  reserve?: number;
 }
 
 export interface RouteDecision { cli: CliId; model: string; effort: Effort; reason: string }
@@ -38,6 +52,7 @@ export interface RouterInput {
   verified?: (cli: CliId) => boolean;
   /** Capability catalog; defaults to the built-in one. */
   catalog?: CatalogEntry[];
+  policy?: RoutingPolicy;
 }
 
 const LEVEL_PENALTY: Record<UsageLevel, number> = { plenty: 0, limited: 10, low: 30, exhausted: 1000 };
@@ -48,6 +63,13 @@ const LEVEL_PENALTY: Record<UsageLevel, number> = { plenty: 0, limited: 10, low:
 const usagePenalty = (pct: number) => 2 * Math.floor(pct / 10);
 /** A missing strength must cost less than overspending a tier (8), or one unmet need buys the strongest model. */
 const MISSING_NEED = 4;
+/**
+ * A user preference outweighs continuity (25) and one tier step either way, so it decides between usable options;
+ * it is a bonus, never a bypass of the hard skips above.
+ */
+const PREFERRED = 30;
+/** With lowAllowance 'switch', a model at low allowance loses to any healthy option of similar fit. */
+const LOW_SWITCH_PENALTY = 40;
 
 export function tierFor(role: AgentRole, c: Complexity): Tier {
   if (role === 'planner' || c === 'high') return 'strong';
@@ -76,6 +98,14 @@ export function effortFor(role: AgentRole, c: Complexity, retry = false): Effort
 }
 
 const stepDown = (e: Effort): Effort => (e === 'high' ? 'medium' : 'low');
+const stepUp = (e: Effort): Effort => (e === 'low' ? 'medium' : 'high');
+
+/** Applies the effort policy. Conserve never weakens a retry: that is the verification a tight budget must keep. */
+export function applyEffortPolicy(e: Effort, policy: EffortPolicy | undefined, retry = false): Effort {
+  if (policy === 'conserve' && !retry) return stepDown(e);
+  if (policy === 'quality') return stepUp(e);
+  return e;
+}
 
 /** Returns undefined when nothing is eligible. Scores come from state and the editable catalog, never from code-level claims. */
 export function route(req: RouteRequest, inp: RouterInput): RouteDecision | undefined {
@@ -83,6 +113,11 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
   const catalog = inp.catalog ?? DEFAULT_CATALOG;
   const want = req.tier ?? tierFor(req.role, req.complexity);
   const cands: { cli: ResolvedCli; entry: CatalogEntry; score: number; level: UsageLevel; pct: number; projected?: number }[] = [];
+  const pol = inp.policy ?? {};
+  const reserve = pol.reserve ?? 0, pref = pol.preference;
+  const prefersCli = (id: CliId) => !!pref?.cli && pref.cli === id;
+  // A model preference without a CLI applies to that model name on any CLI.
+  const prefersModel = (id: CliId, model: string) => !!pref?.model && pref.model === model && (!pref.cli || pref.cli === id);
 
   for (const c of inp.clis) {
     if (!c.installed) { notes.push(`${c.id} skipped: not installed`); continue; }
@@ -93,15 +128,23 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
     if (req.requireCli && req.requireCli !== c.id) { notes.push(`${c.id} skipped: task needs ${req.requireCli}`); continue; }
     const entries = catalog.filter((e) => e.cli === c.id);
     // A CLI missing from the catalog is still usable with its default model.
-    const usable: CatalogEntry[] = entries.length ? entries : [{ cli: c.id, model: 'default', tier: 'standard', strengths: [] }];
+    const known: CatalogEntry[] = entries.length ? entries : [{ cli: c.id, model: 'default', tier: 'standard', strengths: [] }];
+    // Allowed models only narrow the catalog: a model the catalog does not know is never invented here.
+    const allowed = pol.allowedModels?.[c.id];
+    const usable = allowed?.length ? known.filter((e) => allowed.includes(e.model)) : known;
+    if (!usable.length) { notes.push(`${c.id} skipped: no allowed model (settings)`); continue; }
     for (const entry of usable) {
       // Per entry: Opus or Fable can be capped while Sonnet on the same account is fine.
       const p = inp.ledger.pressure(c.id, entry.model), level = p.level;
       if (level === 'exhausted') { notes.push(`${c.id}/${entry.model} skipped: allowance exhausted or rate limited`); continue; }
+      if (reserve > 0 && p.pct >= 100 - reserve) { notes.push(`${c.id}/${entry.model} skipped: ~${p.pct}% used, inside the ${reserve}% subscription reserve`); continue; }
       let score = 100 - LEVEL_PENALTY[level] - usagePenalty(p.pct) - 5 * inp.load(c.id) - tierPenalty(want, entry.tier) + needsFit(req.needs, entry) - (entry.cost ?? 0);
       if (c.authState === 'unknown') score -= 15; // sign-in unverified: usable, but prefer confirmed ones
       if (req.continuity === c.id) score += 25;
       if (inp.verified?.(c.id)) score += 2;
+      if (prefersCli(c.id)) score += PREFERRED;
+      if (prefersModel(c.id, entry.model)) score += PREFERRED;
+      if (level === 'low' && pol.lowAllowance === 'switch') score -= LOW_SWITCH_PENALTY;
       cands.push({ cli: c, entry, score, level, pct: p.pct, projected: p.projectedPct });
     }
   }
@@ -113,6 +156,14 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
   let effort = req.effort ?? effortFor(req.role, req.complexity, req.retry);
   const why = [`${best.cli.id}/${best.entry.model} (${best.entry.tier}) for ${want}${req.needs?.length ? ` [${req.needs.join(', ')}]` : ''}: ${best.cli.authState === 'signedIn' ? 'signed in' : 'sign-in unverified'}, usage ${best.level} (~${best.pct}%${best.projected !== undefined ? `, pace → ~${best.projected}% at reset` : ''})`];
   if (req.continuity === best.cli.id) why.push('continues existing session');
+  if (prefersCli(best.cli.id) || prefersModel(best.cli.id, best.entry.model)) why.push(`preferred for ${req.role} (settings)`);
+  if (!req.fixedEffort && pol.effortPolicy && pol.effortPolicy !== 'adaptive') {
+    const shifted = applyEffortPolicy(effort, pol.effortPolicy, req.retry);
+    if (shifted !== effort) why.push(`effort ${effort} → ${shifted}: ${pol.effortPolicy} policy`);
+    effort = shifted;
+  }
+  // 'switch' already steered away from low allowance in scoring; when nothing healthier exists, still spend less.
+  if (best.level === 'low' && pol.lowAllowance === 'switch') why.push('allowance low and no healthier option to switch to');
   if (best.level === 'low' && effort !== 'low') { effort = stepDown(effort); why.push('effort lowered: allowance low'); }
   why.push(`${req.role}/${req.complexity} → effort ${effort}`);
   if (notes.length) why.push(notes.join('; '));
