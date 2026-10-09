@@ -54,7 +54,7 @@ async function setup(plans: Task[][], o: Opts = {}) {
     }
     if (opts.permission === 'edit') {
       if (prompt.includes('GATED')) await o.gate;
-      const m = /WRITE (\S+) (\S+)/.exec(prompt);
+      const m = [...prompt.matchAll(/WRITE (\S+) (\S+)/g)].at(-1); // a follow-up without a native session is prefixed with the earlier assignment: the newest instruction is last
       if (m) writeFileSync(join(opts.cwd, m[1]!), m[2]!);
       return say(['Done', result({ outcome: 'done', summary: 'Written.', checks: [] })].join('\n'));
     }
