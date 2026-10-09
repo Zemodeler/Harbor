@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings } from '../shared/api';
+import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
 import type { TrackedProcess } from './proc';
 import type { AgentRecord, CoordinationEntry, FileLock, SessionLink, State, UsageEvent } from './types';
 
@@ -80,6 +80,7 @@ export class Store {
     this.state.messages = this.state.messages.filter((m) => !convIds.has(m.conversationId));
     this.state.agents = this.state.agents.filter((a) => a.projectId !== id);
     this.state.locks = this.state.locks.filter((l) => l.projectId !== id);
+    if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
     this.dirty();
   }
 
@@ -174,6 +175,24 @@ export class Store {
     this.dirty();
   }
   clearTrackedProcesses(): void { if (this.state.processes?.length) { this.state.processes = []; this.dirty(); } }
+
+  // ---- "always allow for this project" tool rules
+  listToolRules(projectId: Id): ToolRule[] { return [...(this.state.toolRules?.[projectId] ?? [])]; }
+  /** Adds a rule unless an identical one exists; returns the stored rule. */
+  addToolRule(projectId: Id, draft: ToolRuleDraft): ToolRule {
+    const rules = this.state.toolRules?.[projectId] ?? [];
+    const same = rules.find((r) => r.tool === draft.tool && r.prefix === draft.prefix);
+    if (same) return same;
+    const rule: ToolRule = { id: newId(), tool: draft.tool, ...(draft.prefix ? { prefix: draft.prefix } : {}), created: Date.now() };
+    this.state.toolRules = { ...(this.state.toolRules ?? {}), [projectId]: [...rules, rule] };
+    this.dirty(); return rule;
+  }
+  removeToolRule(projectId: Id, ruleId: Id): void {
+    const rules = this.state.toolRules?.[projectId];
+    if (!rules?.some((r) => r.id === ruleId)) return;
+    this.state.toolRules = { ...this.state.toolRules, [projectId]: rules.filter((r) => r.id !== ruleId) };
+    this.dirty();
+  }
 
   // ---- settings
   getSettings(): Settings { return this.state.settings; }
@@ -313,6 +332,76 @@ export function effectiveSettings(s: Settings, projectId?: Id): EffectiveSetting
     subscriptionReserve: p.subscriptionReserve ?? s.subscriptionReserve ?? 0
   };
 }
+
+// ---- tool permission rules (pure)
+
+/** What an "always allow" answer would store: a Bash command prefix, or an exact tool name. */
+export interface ToolRuleDraft { tool: string; prefix?: string }
+
+/**
+ * Tools that may be allowed once but never always: they write outside the workspace (the CLI only asks for those) or reach
+ * the network. Task/Agent are blocked by the adapter and never get here.
+ */
+const NEVER_ALWAYS_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch']);
+/** Chaining, substitution or redirection: the prefix would no longer describe what runs. */
+const SHELL_META = /[;&|`<>\r\n]|\$\(/;
+/**
+ * Commands that are only ever allowed once. Conservative on purpose: a false match costs one more prompt.
+ * Git history rewrites and pushes, recursive or forced deletes, privilege and process control, publishing, network
+ * transfer tools and URLs (exfiltration), and interpreters running inline code.
+ */
+const NEVER_ALWAYS_COMMANDS: RegExp[] = [
+  /\bgit\b.*\s(?:merge|rebase|cherry-pick|reset|push|clean|restore|filter-branch|filter-repo|update-ref|gc|prune|reflog)(?![\w-])/i,
+  /\bgit\b.*\sbranch\b.*\s-[a-z]*d/i,
+  /\bgit\b.*\s(?:worktree\s+remove|checkout\s+(?:.*\s)?--(?:\s|$)|stash\s+(?:drop|clear))/i,
+  /\brm\b.*\s-[a-z]*[rf]/i, /\b(?:rmdir|rd|del|erase|format|mkfs\S*|shred|dd|diskpart)\b/i,
+  /\bremove-item\b/i, /\bfind\b.*\s-(?:delete|exec)/i, /\bxargs\b/i,
+  /\b(?:sudo|su|runas|chmod|chown|icacls|takeown|kill|killall|pkill|taskkill|stop-process|shutdown|reboot|reg|setx)\b/i,
+  /\b(?:npm|pnpm|yarn)\s+(?:publish|unpublish|login|adduser|token)\b/i,
+  /\b(?:curl|wget|iwr|irm|invoke-webrequest|invoke-restmethod|start-bitstransfer|bitsadmin|certutil|scp|sftp|ssh|nc|ncat|netcat|telnet|ftp|tftp|rsync|gh|az|aws|gcloud)\b/i,
+  /\b[a-z][a-z0-9+.-]*:\/\//i,
+  /\b(?:bash|sh|zsh|dash|cmd|powershell|pwsh|node|deno|bun|python[\d.]*|py|perl|ruby|php|wsl)(?:\.exe)?\b.*\s(?:-c|-e|-p|-r|--eval|--print|-command|-encodedcommand|-enc|\/c|\/k)(?:\s|$)/i
+];
+const INTERPRETER = /^(?:bash|sh|zsh|dash|cmd|powershell|pwsh|node|deno|bun|python[\d.]*|py|perl|ruby|php|wsl|npx|env)(?:\.exe)?$/i;
+
+const bashCommand = (input: unknown): string | undefined => {
+  const c = (input as { command?: unknown } | null)?.command;
+  return typeof c === 'string' ? c.trim().replace(/\s+/g, ' ') : undefined;
+};
+
+/** True when this call may be allowed once only (never stored or matched as a project rule). */
+export function neverAlwaysAllow(tool: string, input: unknown): boolean {
+  if (NEVER_ALWAYS_TOOLS.has(tool) || !tool) return true;
+  if (tool !== 'Bash') return false;
+  const cmd = bashCommand(input);
+  return !cmd || SHELL_META.test(cmd) || NEVER_ALWAYS_COMMANDS.some((re) => re.test(cmd));
+}
+
+/**
+ * The rule "always allow" would store for this call, or undefined when it may only be allowed once. Bash rules are the
+ * first one or two plain words of the command (`npm test`, `ls`), never the bare tool: Bash itself is never always-allowed.
+ */
+export function toolRuleFor(tool: string, input: unknown): ToolRuleDraft | undefined {
+  if (neverAlwaysAllow(tool, input)) return undefined;
+  if (tool !== 'Bash') return { tool };
+  const words = bashCommand(input)!.split(' ');
+  const plain = (w: string | undefined) => !!w && /^[\w./:@=+-]+$/.test(w) && !w.startsWith('-');
+  if (!plain(words[0])) return undefined;
+  if (plain(words[1])) return { tool, prefix: `${words[0]} ${words[1]}` };
+  // A shell or interpreter alone would cover any script it is given.
+  return INTERPRETER.test(words[0]!) ? undefined : { tool, prefix: words[0] };
+}
+
+/** Whether a stored rule covers this call. The never-always checks run again, so no rule can allow a dangerous call. */
+export function matchesToolRule(rule: ToolRuleDraft, tool: string, input: unknown): boolean {
+  if (rule.tool !== tool || neverAlwaysAllow(tool, input)) return false;
+  if (tool !== 'Bash') return !rule.prefix;
+  if (!rule.prefix) return false;
+  const cmd = bashCommand(input)!;
+  return cmd === rule.prefix || cmd.startsWith(`${rule.prefix} `);
+}
+
+export const describeToolRule = (r: ToolRuleDraft): string => (r.prefix ? `${r.tool}(${r.prefix} ...)` : r.tool);
 
 export function normPath(p: string): string {
   return p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
