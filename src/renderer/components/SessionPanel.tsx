@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
 import { elapsed, sessionStatus } from '../session';
-import { SessionStatus } from './SessionStatus';
+import { ComplexityBadge, SessionStatus } from './SessionStatus';
+import { modes } from './ModePicker';
 import { CloseIcon } from './Icons';
 import s from '../Harbor.module.css';
 
@@ -29,6 +30,9 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
       <dt>Connection</dt><dd>{cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex' : cli || 'Not assigned'}</dd><dt>Model</dt><dd>{model === 'default' ? 'Connection default' : model && model !== 'auto' ? model : 'Assigned when work starts'}</dd>
       {model?.toLowerCase().includes('haiku') ? <><dt>Why this model?</dt><dd>Haiku is a lightweight Claude model. Harbor uses it for the first pass and smaller tasks.</dd></> : null}
       {latestMessage?.details?.reason ? <><dt>Routing reason</dt><dd>{latestMessage.details.reason}</dd></> : null}
+      {c.activity?.complexity ? <><dt>Complexity</dt><dd><ComplexityBadge complexity={c.activity.complexity}/></dd></> : null}
+      {c.activity?.effort ? <><dt>Effort</dt><dd>{c.activity.effort}</dd></> : null}
+      {c.mode && c.mode !== 'default' ? <><dt>Mode</dt><dd>{modes.find(m => m.id === c.mode)?.label}{c.mode === 'goal' && c.goal ? `: ${c.goal}` : ''}</dd></> : null}
       {c.activity?.started ? <><dt>{status === 'working' ? 'Run time' : 'Latest lead turn'}</dt><dd>{elapsed((status === 'working' ? now : c.activity.updated) - c.activity.started)}</dd></> : null}
       {last ? <><dt>Last activity</dt><dd>{['working', 'queued'].includes(status) ? `${elapsed(now - last)} ago` : new Date(last).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</dd></> : null}
     </dl>
