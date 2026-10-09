@@ -13,6 +13,7 @@ export { StopCircle as StopIcon } from '@phosphor-icons/react/dist/csr/StopCircl
 export { Wrench as ToolIcon } from '@phosphor-icons/react/dist/csr/Wrench';
 export { CaretRight as ChevronIcon } from '@phosphor-icons/react/dist/csr/CaretRight';
 export { Paperclip as AttachIcon } from '@phosphor-icons/react/dist/csr/Paperclip';
+export { Image as ImageIcon } from '@phosphor-icons/react/dist/csr/Image';
 export { TextAlignLeft as TemplateIcon } from '@phosphor-icons/react/dist/csr/TextAlignLeft';
 export { List as MenuIcon } from '@phosphor-icons/react/dist/csr/List';
 export { ArrowUp as SendIcon } from '@phosphor-icons/react/dist/csr/ArrowUp';
