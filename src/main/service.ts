@@ -8,6 +8,8 @@ import type { CliAdapter } from './adapters/types';
 import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
 import { loadCatalog } from './clis/capabilities';
 import { CLI_DEFINITIONS } from './clis/registry';
+import type { CheckRunner } from './checks';
+import { Journal } from './journal';
 import { EventBus } from './events';
 import { Git } from './git';
 import { Orchestrator, toAgent } from './orchestrator';
@@ -41,6 +43,9 @@ export interface ServiceOptions {
   recheckDelaysMs?: number[];
   /** Override where worktrees are created (tests). */
   worktreesRoot?: string;
+  /** Replace how post-helper checks are found and run (tests). */
+  loadChecks?: (projectPath: string) => string[];
+  runCheck?: CheckRunner;
 }
 
 /** CLIs whose headless flow has been verified against a real install in this repo's history. */
@@ -86,7 +91,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     verified: (c) => VERIFIED.has(c),
     // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog.
     catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
-    maxActivePerProject: opts.maxActivePerProject
+    maxActivePerProject: opts.maxActivePerProject,
+    journal: new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined),
+    loadChecks: opts.loadChecks, runCheck: opts.runCheck
   });
 
   // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude

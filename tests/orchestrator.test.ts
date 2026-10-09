@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
-import { createHarborService } from '../src/main/service';
+import { createHarborService, type ServiceOptions } from '../src/main/service';
 import type { HarborEvent, Message } from '../src/shared/api';
 
 const dirs: string[] = [];
@@ -40,7 +40,7 @@ const script = (r: Roles): FakeScript => (prompt, o, i) => {
   return (r.helper ?? (() => say('ok')))(prompt, o, i);
 };
 
-async function harness(scripts: Record<string, FakeScript | undefined>, opts: { git?: boolean; ids?: string[] } = {}) {
+async function harness(scripts: Record<string, FakeScript | undefined>, opts: { git?: boolean; ids?: string[]; checks?: Pick<ServiceOptions, 'loadChecks' | 'runCheck'> } = {}) {
   const adapters: Record<string, FakeAdapter> = {};
   for (const id of opts.ids ?? ['claude', 'codex']) adapters[id] = new FakeAdapter(id, scripts[id] ?? (() => say('ok')));
   const events: HarborEvent[] = [];
@@ -48,7 +48,8 @@ async function harness(scripts: Record<string, FakeScript | undefined>, opts: { 
     discover: async () => Object.keys(adapters).map(fakeCli),
     adapterFor: (id) => adapters[id],
     worktreesRoot: join(tmp(), 'wt'),
-    maxActivePerProject: 3
+    maxActivePerProject: 3,
+    ...opts.checks
   });
   svc.onEvent((e) => events.push(e));
   const repoPath = opts.git === false ? tmp() : gitRepo();
@@ -531,5 +532,108 @@ describe('questions to the user', () => {
     await h.svc.whenIdle();
     expect(h.svc.store.getAgent(agent.id)!.state).toBe('done');
     expect(h.svc.store.getAgent(agent.id)!.report).toContain('reviewed with tabs');
+  });
+});
+
+describe('self-improvement: history, evidence, journal', () => {
+  const count = (s: string, sub: string) => s.split(sub).length - 1;
+  const journal = (h: { svc: { orchestrator: { journal: { list: (id: string) => Array<{ kind: string; text: string }> } } }; project: { id: string } }) =>
+    h.svc.orchestrator.journal.list(h.project.id);
+
+  it('gives the lead the conversation before the triggering message: the prompt once, the ack kept', async () => {
+    const h = await harness({ claude: script({ concierge: () => escalate('medium', 'On it.'), lead: (p) => say(p.includes('other one') ? 'Second done.' : 'Fixed.') }) }, { ids: ['claude'] });
+    await h.svc.send(h.conv.id, 'fix the typo in the readme');
+    await h.svc.whenIdle();
+    const first = h.calls(isLead)[0]!.prompt;
+    expect(count(first, 'fix the typo in the readme')).toBe(1);
+    expect(first).not.toMatch(/earlier session/);
+    // Without a resumable session the history carries the earlier exchange, including the front desk's ack.
+    h.svc.store.clearSession(`lead:${h.conv.id}`);
+    await h.svc.send(h.conv.id, 'and the other one');
+    await h.svc.whenIdle();
+    const second = h.calls(isLead)[1]!.prompt;
+    expect(second).toContain('Conversation so far:\nUser: fix the typo in the readme\nAssistant: On it.\nAssistant: Fixed.');
+    expect(count(second, 'and the other one')).toBe(1);
+    expect(second).not.toMatch(/earlier session/);
+  });
+
+  it('runs the project checks on the helper branch head, reports them as evidence, and gives reviewers the spec verbatim', async () => {
+    const ran: Array<{ cmd: string; cwd: string }> = [];
+    const loadedFrom: string[] = [];
+    const claude = script({
+      lead: (p) => p.includes('Helper reports') ? say('reviewed') : delegate('go',
+        { ref: 'i', title: 'Add a', role: 'implementer', instructions: 'SPEC-XYZ: create a.txt', complexity: 'low', files: ['a.txt'] },
+        { ref: 'r', title: 'Review a', role: 'reviewer', instructions: 'review it', complexity: 'low', dependsOn: ['i'] }),
+      helper: (_p, o) => {
+        if (o.systemPrompt?.includes('REVIEWER')) return say('Looks fine.\nHARBOR_RESULT: {"outcome":"done","summary":"Approved.","verdict":"approve","checks":[]}');
+        writeFileSync(join(o.cwd, 'a.txt'), 'x');
+        return say('Created a.txt.\nHARBOR_RESULT: {"outcome":"done","summary":"Added a.txt.","checks":[{"cmd":"npm test","ok":true}]}');
+      }
+    });
+    const h = await harness({ claude }, {
+      ids: ['claude'],
+      checks: {
+        loadChecks: (p) => { loadedFrom.push(p); return ['npm test', 'npm run build']; },
+        runCheck: async (cmd, cwd) => { ran.push({ cmd, cwd }); return cmd === 'npm test' ? { ok: true, exitCode: 0, durationMs: 1, output: '' } : { ok: false, exitCode: 2, durationMs: 1, output: 'build broke' }; }
+      }
+    });
+    await h.svc.send(h.conv.id, 'add a.txt and review it');
+    await h.svc.whenIdle();
+    const impl = helpers(h).find((a) => a.role === 'implementer')!;
+    expect(loadedFrom).toEqual([h.repoPath]); // the main checkout's config, never the helper's copy
+    expect(ran).toEqual([{ cmd: 'npm test', cwd: impl.worktree }, { cmd: 'npm run build', cwd: impl.worktree }]);
+    expect(impl.testedCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(impl.testedCommit).toBe(impl.headCommit);
+    expect(impl.summary).toBe('Added a.txt.');
+    expect(impl.result).toMatchObject({ outcome: 'done', checks: [{ cmd: 'npm test', ok: true }] });
+    expect(impl.report).toContain('npm run build: FAIL (exit 2)');
+    const reviewerPrompt = h.calls(isHelper).find((c) => c.opts.systemPrompt?.includes('REVIEWER'))!.prompt;
+    expect(reviewerPrompt).toContain('Specification it was built against (verbatim):\nSPEC-XYZ: create a.txt');
+    expect(reviewerPrompt).toContain(`commit ${impl.headCommit}`);
+    const report = h.calls(isLead).at(-1)!.prompt;
+    expect(report).toContain('Checks Harbor ran on');
+    expect(report).toContain('npm run build FAIL (exit 2)');
+    expect(report).toContain('self-reported checks: npm test pass');
+    expect(journal(h).map((e) => e.kind)).toContain('checks-failed');
+  });
+
+  it('tells the lead about its malformed protocol lines next turn and journals them', async () => {
+    const h = await harness({ claude: script({ lead: (p) => say(p.includes('again') ? 'ok' : 'Delegating.\nHARBOR_DELEGATE: {"ref":"a", broken') }) }, { ids: ['claude'] });
+    await h.svc.send(h.conv.id, 'split this up');
+    await h.svc.whenIdle();
+    expect(helpers(h)).toHaveLength(0);
+    await h.svc.send(h.conv.id, 'again');
+    await h.svc.whenIdle();
+    expect(h.calls(isLead)[1]!.prompt).toMatch(/Harbor ignored 1 malformed protocol line/);
+    expect(journal(h)).toEqual([expect.objectContaining({ kind: 'protocol', text: expect.stringContaining('HARBOR_DELEGATE') })]);
+  });
+
+  it('journals triage: a guarded front-desk answer and a /deep after an answer; /journal shows a digest without a model call', async () => {
+    const h = await harness({ claude: script({ concierge: () => answer('Sure thing.'), lead: () => say('real work') }) }, { ids: ['claude'] });
+    await h.svc.send(h.conv.id, 'what is the capital of France?');
+    await h.svc.whenIdle();
+    await h.svc.send(h.conv.id, '/deep no, look properly');
+    await h.svc.send(h.conv.id, 'fix src/app.ts please');
+    await h.svc.whenIdle();
+    expect(journal(h).map((e) => e.text)).toEqual([
+      expect.stringContaining('re-asked with /deep after a front-desk answer'),
+      expect.stringContaining('escalated instead')
+    ]);
+    const before = h.adapters.claude!.calls.length;
+    await h.svc.send(h.conv.id, '/journal');
+    await h.svc.whenIdle();
+    expect(h.adapters.claude!.calls).toHaveLength(before);
+    expect((await h.texts()).at(-1)).toMatch(/Run journal: 2 entries[\s\S]*By kind: triage 2/);
+  });
+
+  it('/journal review hands the digest to a lead and asks for backlog items, not code', async () => {
+    const h = await harness({ claude: script({ concierge: () => answer('SHOULD NOT RUN'), lead: () => say('Proposed items.') }) }, { ids: ['claude'] });
+    h.svc.orchestrator.journal.add({ kind: 'helper-failed', projectId: h.project.id, text: 'implementer "X" on codex/default: boom' });
+    await h.svc.send(h.conv.id, '/journal review');
+    await h.svc.whenIdle();
+    expect(h.calls(isConcierge)).toHaveLength(0);
+    const p = h.calls(isLead)[0]!.prompt;
+    expect(p).toContain('BACKLOG.md item');
+    expect(p).toContain('[helper-failed] implementer "X" on codex/default: boom');
   });
 });
