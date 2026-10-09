@@ -42,6 +42,7 @@ export interface HarborApi {
  getGitDiff(projectId: Id, path: string, target?: GitTarget): Promise<string>;
  listMessages(conversationId: Id): Promise<Message[]>; send(conversationId: Id, text: string): Promise<void>;
  listAgents(projectId: Id): Promise<Agent[]>; openAgentConversation(agentId: Id): Promise<Conversation>; stopAgent(agentId: Id): Promise<void>;
+ resumeAgent(agentId: Id): Promise<void>;   // continue a stopped helper in its saved CLI session (rejects when it is not stopped or has no session)
  getUsage(): Promise<UsageWindow[]>;
  getSettings(): Promise<Settings>; setSettings(s: Partial<Settings>): Promise<Settings>;
  answerPermission(requestId: Id, allow: boolean): Promise<void>;

@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Conversation, Id, Message, Project, Settings } from '../shared/api';
+import type { TrackedProcess } from './proc';
 import type { AgentRecord, CoordinationEntry, FileLock, SessionLink, State, UsageEvent } from './types';
+
+/** State plus fields added after version 1; `processes` is optional so older files still load. */
+type Persisted = State & { processes?: TrackedProcess[] };
 
 export const DEFAULT_SETTINGS: Settings = { routing: 'auto', cliOverrides: {}, allowFreeReset: 'ask' };
 
@@ -19,7 +23,7 @@ export const newId = (): Id => randomUUID();
  * of the app depends on, so it can be swapped later.
  */
 export class Store {
-  private state: State;
+  private state: Persisted;
   private file: string | undefined;
   private timer: NodeJS.Timeout | undefined;
 
@@ -29,7 +33,7 @@ export class Store {
     this.state = this.load();
   }
 
-  private load(): State {
+  private load(): Persisted {
     if (!this.file || !existsSync(this.file)) return emptyState();
     try {
       const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<State>;
@@ -152,6 +156,16 @@ export class Store {
   listCoordination(projectId: Id): CoordinationEntry[] { return this.state.coordination.filter((c) => c.projectId === projectId); }
   get locks(): FileLock[] { return this.state.locks; }
   setLocks(l: FileLock[]): void { this.state.locks = l; this.dirty(); }
+
+  // ---- CLI processes Harbor started (so a later run can kill orphans)
+  listTrackedProcesses(): TrackedProcess[] { return [...(this.state.processes ?? [])]; }
+  trackProcess(p: TrackedProcess): void { this.state.processes = [...(this.state.processes ?? []).filter((x) => x.pid !== p.pid), p]; this.dirty(); }
+  untrackProcess(pid: number): void {
+    if (!this.state.processes?.some((x) => x.pid === pid)) return;
+    this.state.processes = this.state.processes.filter((x) => x.pid !== pid);
+    this.dirty();
+  }
+  clearTrackedProcesses(): void { if (this.state.processes?.length) { this.state.processes = []; this.dirty(); } }
 
   // ---- settings
   getSettings(): Settings { return this.state.settings; }

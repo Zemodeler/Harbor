@@ -18,7 +18,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 9. **Settings that the docs promise** (M): allowed models, role preferences, effort policy (adaptive / conserve / quality), low-allowance policy, concurrency limit, subscription reserve, per-project overrides. Store them in `Settings` as optional fields (changelog!).
 10. **Real allowance signals** (M, partly done). Codex limits are read from `~/.codex/sessions` (`codexLimits.ts`) and Claude's from `rate_limit_event` in its stream (persisted on usage events); `usage.ts` prefers them (`source: 'reported'`) and falls back to the 5h/40-run and weekly/300-run estimates. Remaining: Claude limits are only seen when Harbor itself runs Claude (no status command is read), so they can be stale; other CLIs have none.
 11. **Dependency-aware reuse of idle workers** (M). Main agent can reuse a finished compatible agent for follow-ups (resume its session) instead of creating a new one.
-12. **Recovery depth** (M). On restart, `recover()` only marks working agents stopped. Add: detect and kill orphaned CLI processes, offer "resume from session" per agent, never replay completed external actions.
+12. **Recovery depth** (M, done in core). Harbor persists the PID/name/start time of every CLI it spawns (`proc.ts` observer -> `Store.trackProcess`); on startup `recover()` kills leftover trees (taskkill) only for recorded PIDs whose live process still matches name and start time, and `resumeAgent(agentId)` (contract 0.1.9) continues a stopped helper in its saved session with a no-replay prompt. Remaining: surface the sweep result to the user; the lead agent itself is resumed by sending a message.
 13. **Task-scoped rollback** (L). Record per-task baseline and patch (`git diff base..HEAD`), implement preview + selective reversal on the integration branch (`docs/project-agents.md`).
 14. **Verification tied to versions** (M). Reviewer/tester reports must record the exact commit tested; mark checks outdated when a branch moves. Store `testedCommit` on reports and compare with branch head.
 15. **Instruction changes mid-run** (M). Revision bump currently only counts direct prompts. Implement the hold/ack protocol: pause dependents, notify affected siblings, resume after acknowledgement.
@@ -61,6 +61,7 @@ Behavior the core already provides that the UI should surface or respect:
 10. **Change review**: a `harbor/<slug>` branch and worktree path are on `Agent.worktree`; branch diffs are available through the Git view methods (item 12).
 11. Take `gpt/ui`'s version of `src/renderer/**` wholesale when merging; `claude/core` ships only a 2-file placeholder there.
 12. **Git view** (contract 0.1.8): done in `components/GitPanel.tsx` (header button "Git", also in quick actions). It shows branches, helper branches with their agent, worktrees, a commit graph (`gitGraph.ts`) and changes with inline diffs, and it is read-only. Open UI follow-ups: a visual pass in the real app, keyboard navigation through commit rows, and virtualising very long histories (it pages 300 commits at a time).
+13. **Resume action** (contract 0.1.9): for an agent with `state: 'stopped'` (not `main`) show a "Resume" button calling `resumeAgent(agentId)`. It rejects when the agent has no saved session; show the error text and suggest sending a message instead.
 
 ## API requests (from UI)
 
