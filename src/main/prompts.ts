@@ -47,7 +47,7 @@ export const MAX_TASKS_PER_TURN = 8;
 // ---------------------------------------------------------------- concierge (cheap front door)
 
 /** `effort` overrides the effort derived from complexity (only "/deep" sets it). */
-export interface Escalation { complexity: Complexity; needs: Need[]; ack: string; effort?: Effort }
+export interface Escalation { complexity: Complexity; needs: Need[]; ack: string; effort?: Effort; /** CLI the user asked for by name ("use codex"). */ preferCli?: CliId }
 export type ConciergeDecision = { kind: 'answer'; text: string } | { kind: 'escalate'; escalation: Escalation; parsed: boolean };
 
 export const CONCIERGE_SYSTEM = `You are the front desk of Harbor, an assistant that works on one software project. You are fast and cheap. You do not use tools and you cannot read or change files.
@@ -85,6 +85,18 @@ const SMALL_TALK = /^\s*(thanks|thank you|thx|ok(ay)?|great|cool|nice|hi|hello|h
 
 // Go-ahead words only: a bare "ok" or "thanks" is small talk the front desk answers cheaply.
 const APPROVAL = /^\s*(ok(ay)?[,!.]?\s+)?(yes|yep|yeah|sure|go ahead|go for it|do it|proceed|continue|carry on|please do|approved?|lgtm|ship it|build it|make it|start|implement it)\b[\s\w,'!.]{0,40}$/i;
+
+const CLI_REQUEST = /(?<neg>\b(?:don'?t|do not|never|without|not)\s+)?\b(?:use|using|run(?:\s+(?:this|it))?\s+(?:on|with)|switch\s+to|prefer|go\s+with)\s+(?:the\s+)?(?<cli>codex|claude(?:\s+code)?|gemini)\b/gi;
+
+/** A CLI the user asked for by name ("use codex for this"). Only explicit phrasing counts; a bare mention of "Claude" does not. */
+export function requestedCli(text: string): CliId | undefined {
+  let found: CliId | undefined;
+  for (const m of text.matchAll(CLI_REQUEST)) {
+    if (m.groups?.neg) continue;
+    found = m.groups!.cli.toLowerCase().startsWith('claude') ? 'claude' : m.groups!.cli.toLowerCase();
+  }
+  return found;
+}
 
 /** A short go-ahead ("yes, build it") continues the previous request; re-triaging it would only guess its size anew. */
 export function isApproval(text: string): boolean {
