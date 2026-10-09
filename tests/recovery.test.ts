@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FakeAdapter } from '../src/main/adapters/fake';
 import type { ResolvedCli } from '../src/main/clis/discovery';
-import { matchesTracked, type ProcessKiller, type TrackedProcess } from '../src/main/proc';
+import { matchesTracked, reapTrackedProcesses, type ProcessKiller, type TrackedProcess } from '../src/main/proc';
 import { createHarborService } from '../src/main/service';
 import { Store } from '../src/main/store';
 import type { AgentRecord } from '../src/main/types';
@@ -37,6 +37,56 @@ const ghost = (projectId: string, conversationId: string, state: AgentRecord['st
 });
 
 describe('orphan sweep', () => {
+  it('preserves records belonging to a live owner without inspecting or killing its CLI', async () => {
+    const store = new Store();
+    const entry = { pid: 11, name: 'claude', started: 1000, owner: { pid: 50, started: 500 } };
+    store.trackProcess(entry);
+    const owners: unknown[] = [];
+    const killer: ProcessKiller = {
+      ownerAlive: async owner => { owners.push(owner); return true; },
+      inspect: async () => { throw new Error('must not inspect a live owner\'s CLI'); },
+      kill: async () => { throw new Error('must not kill'); }
+    };
+    expect(await reapTrackedProcesses(store.listTrackedProcesses(), store, killer)).toEqual({ killed: [], skipped: [11] });
+    expect(owners).toEqual([entry.owner]);
+    expect(store.listTrackedProcesses()).toEqual([entry]);
+  });
+
+  it('kills dead owners\' matching CLIs while preserving the name and start-time reuse guards', async () => {
+    const store = new Store();
+    for (const pid of [11, 12, 13]) store.trackProcess({ pid, name: 'claude', started: 1000, owner: { pid: 50, started: 500 } });
+    const { killer, killed } = fakeKiller({
+      11: { name: 'claude', started: 1000 },
+      12: { name: 'notepad', started: 1000 },
+      13: { name: 'claude', started: 500000 }
+    });
+    killer.ownerAlive = async () => false;
+    expect(await reapTrackedProcesses(store.listTrackedProcesses(), store, killer)).toEqual({ killed: [11], skipped: [12, 13] });
+    expect(killed).toEqual([11]);
+    expect(store.listTrackedProcesses()).toEqual([]);
+  });
+
+  it('keeps a reused PID when an earlier spawn exits', () => {
+    const store = new Store();
+    store.trackProcess({ pid: 7, name: 'codex', started: 5 });
+    store.trackProcess({ pid: 7, name: 'codex', started: 6 });
+    store.untrackProcess(7, 5);
+    store.untrackProcess(7);
+    expect(store.listTrackedProcesses()).toEqual([{ pid: 7, name: 'codex', started: 6 }]);
+    store.untrackProcess(7, 6);
+    expect(store.listTrackedProcesses()).toEqual([]);
+  });
+
+  it('persists a tracked spawn immediately without flushing ordinary writes', () => {
+    const dir = tmp();
+    const store = new Store(dir);
+    const entry = { pid: 7, name: 'codex', started: 5, owner: { pid: 50, started: 2 } };
+    store.trackProcess(entry);
+    expect(new Store(dir).listTrackedProcesses()).toEqual([entry]);
+    store.setSettings({ desktopNotifications: true });
+    expect(new Store(dir).getSettings().desktopNotifications).toBeUndefined();
+    store.flush();
+  });
   it('matchesTracked needs the same name and a start time near the recorded one', () => {
     const t: TrackedProcess = { pid: 5, name: 'claude', started: 100_000 };
     expect(matchesTracked(t, { name: 'claude', started: 101_000 })).toBe(true);
@@ -77,7 +127,7 @@ describe('orphan sweep', () => {
     const a = new Store(dir);
     a.trackProcess({ pid: 7, name: 'codex', started: 5 });
     a.trackProcess({ pid: 8, name: 'cmd', started: 6 });
-    a.untrackProcess(8);
+    a.untrackProcess(8, 6);
     a.flush();
     expect(new Store(dir).listTrackedProcesses()).toEqual([{ pid: 7, name: 'codex', started: 5 }]);
   });
