@@ -22,6 +22,7 @@ export interface AgentResult { outcome: 'done'|'partial'|'blocked'; summary: str
 export interface CheckOutcome { cmd: string; ok: boolean; exitCode: number|null; timedOut?: boolean; durationMs: number }   // a .harbor/checks.json command Harbor ran itself (evidence)
 export interface Attachment { name: string; mime: string; path?: string }   // path = absolute file under Harbor's data folder, set by main
 export interface Message { id: Id; conversationId: Id; role: 'user'|'assistant'|'system'|'tool'; text: string; time: number; agentId?: Id; details?: { cli: CliId; model: string; effort: string; reason: string }; attachments?: Attachment[] }
+export interface ToolRule { id: Id; tool: string; prefix?: string; created: number }   // a tool call allowed without asking in one project: prefix = Bash command prefix (whole words); absent = any call of that exact tool
 export interface UsageWindow { cli: CliId; label: string; usedPct: number; resetsAt?: number; freeResetAvailable?: boolean; period?: 'session'|'weekly'; source?: 'reported'|'estimated'; model?: string; projectedPct?: number }
 export interface Settings { routing: 'auto'|'manual'; cliOverrides: Record<CliId,{enabled:boolean}>; allowFreeReset: 'ask'|'never'; desktopNotifications?: boolean; keepRunningInBackground?: boolean; concurrencyLimit?: number; allowedModels?: Record<CliId,string[]>; rolePreferences?: Partial<Record<Exclude<AgentRole,'main'>,RolePreference>>; effortPolicy?: EffortPolicy; lowAllowancePolicy?: LowAllowancePolicy; subscriptionReserve?: number; projectOverrides?: Record<Id,ProjectSettings> }   // routing fields: absent = built-in default (CHANGELOG 0.1.12); keepRunningInBackground: absent/false = close quits
 export type EffortPolicy = 'adaptive'|'conserve'|'quality';   // adaptive = by role and complexity; conserve = one effort step lower (never for retries); quality = one step higher
@@ -35,7 +36,7 @@ export type HarborEvent =
  | { type:'conversation'; conversation: Conversation }
  | { type:'usage'; windows: UsageWindow[] }
  | { type:'cli'; cli: CliStatus }
- | { type:'permission'; requestId: Id; kind:'freeReset'|'tool'|'conflict'; prompt: string; agentId?: Id }
+ | { type:'permission'; requestId: Id; kind:'freeReset'|'tool'|'conflict'; prompt: string; agentId?: Id; conversationId?: Id; tool?: string; alwaysAllow?: boolean; expiresAt?: number }   // kind 'tool': conversationId = where the asking agent runs; tool = tool name; alwaysAllow = "always allow for this project" may be offered; expiresAt = denied automatically after this time
  | { type:'question'; requestId: Id; conversationId: Id; prompt: string; options?: string[]; allowText?: boolean; agentId?: Id };   // an agent needs a decision; answer with answerQuestion
 export interface HarborApi {
  listClis(): Promise<CliStatus[]>; refreshClis(): Promise<CliStatus[]>; openLogin(cli: CliId): Promise<void>;
@@ -61,7 +62,8 @@ export interface HarborApi {
  getChanges(agentId: Id): Promise<GitFileChange[]>;   // committed files changed on a helper's branch (since its base) or an integration (base..head); [] when the agent has no branch
  getUsage(): Promise<UsageWindow[]>;
  getSettings(): Promise<Settings>; setSettings(s: Partial<Settings>): Promise<Settings>;
- answerPermission(requestId: Id, allow: boolean): Promise<void>;
+ answerPermission(requestId: Id, allow: boolean, opts?: { always?: boolean }): Promise<void>;   // always = (tool requests with alwaysAllow) also store a project rule; ignored elsewhere
+ listToolRules(projectId: Id): Promise<ToolRule[]>; removeToolRule(projectId: Id, ruleId: Id): Promise<ToolRule[]>;   // "always allow for this project" rules; remove returns the remaining rules
  answerQuestion(requestId: Id, answer: string): Promise<void>;   // delivered into the asking agent's conversation as the user's message
  onEvent(cb: (e: HarborEvent) => void): () => void;   // returns unsubscribe
 }

@@ -1,11 +1,11 @@
 import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, Project, SessionActivity } from '../shared/api';
-import type { Chunk, CliAdapter, Effort } from './adapters/types';
+import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
 import type { ResolvedCli } from './clis/discovery';
 import type { Git } from './git';
 import { breakCycles } from './graph';
-import { Journal, journalDigest, type JournalEntry } from './journal';
+import { Journal, journalDigest, type JournalEntry, type JournalKind } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
   CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
@@ -13,7 +13,7 @@ import {
 } from './prompts';
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
-import { DEFAULT_CONCURRENCY, effectiveSettings, newId, normPath, type Store } from './store';
+import { DEFAULT_CONCURRENCY, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type Store, type ToolRuleDraft } from './store';
 import type { AgentRecord, CheckRun } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
@@ -43,7 +43,25 @@ export interface OrchestratorDeps {
   runCheck?: CheckRunner;
   /** Finds and kills leftover CLI processes at startup; injected so tests never touch real processes. */
   killer?: ProcessKiller;
+  /** How long a tool permission request waits for the user before it is denied (default TOOL_PERMISSION_TIMEOUT_MS). */
+  toolPermissionTimeoutMs?: number;
+  /** Starts a timer and returns its cancel function; injected so tests control time. */
+  setTimer?: (fn: () => void, ms: number) => () => void;
 }
+
+/** An unanswered tool permission request is denied after this long, so it can never hold a run (and its queue slot) forever. */
+export const TOOL_PERMISSION_TIMEOUT_MS = 5 * 60_000;
+// JournalKind (journal.ts, outside this module's ownership) has no 'permission' member yet; the journal stores any kind string.
+const PERMISSION_KIND = 'permission' as string as JournalKind;
+
+const defaultTimer = (fn: () => void, ms: number): (() => void) => {
+  const t = setTimeout(fn, ms);
+  t.unref?.();
+  return () => clearTimeout(t);
+};
+
+/** A tool call waiting for the user's answer. In memory only: a restart ends the run that asked. */
+interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; settle(d: ToolPermissionDecision): void }
 
 export interface OrphanSweep { killed: number[]; skipped: number[] }
 
@@ -122,6 +140,9 @@ export class Orchestrator {
   private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
   private sessionGeneration = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
+  /** Pending tool permission requests by request id. */
+  private toolAsks = new Map<Id, ToolAsk>();
+  private runSeq = 0;
 
   private startedAt = Date.now();
   /** Settles when the orphan sweep started by recover() is done. */
@@ -159,6 +180,7 @@ export class Orchestrator {
     if (!c) throw new Error('This conversation is no longer available.');
     this.stoppedSessions.add(id);
     this.sessionGeneration.set(id, (this.sessionGeneration.get(id) ?? 0) + 1);
+    this.denyToolAsks((p) => p.conversationId === id, 'the conversation was stopped');
     this.leads.get(id)?.ctl.abort();
     for (const a of this.d.store.listAgentRecords(c.projectId)) {
       if (a.role !== 'main' && (a.parentConversationId === id || a.id === c.agentId)) this.stop(a.id);
@@ -342,9 +364,11 @@ export class Orchestrator {
       for (const s of this.d.store.listAgentRecords(a.projectId)) {
         if (s.role !== 'main' && (!convs.size || convs.has(s.parentConversationId))) this.stop(s.id);
       }
+      this.denyToolAsks((p) => p.agentId === a.id && convs.has(p.conversationId), 'the lead was stopped');
       for (const [, l] of active) l.ctl.abort();
       return;
     }
+    this.denyToolAsks((p) => p.agentId === a.id, 'the agent was stopped');
     this.controllers.get(a.id)?.abort();
     if (!this.running.has(a.id) && !TERMINAL.includes(a.state)) {
       this.setState(a, 'stopped', { error: 'Stopped by the user before it started.' });
@@ -1201,6 +1225,89 @@ export class Orchestrator {
     await this.userMessage(q.conversationId, answer.trim());
   }
 
+  // ------------------------------------------------------------ tool permissions
+
+  /**
+   * A running CLI asks whether it may run a tool call outside its allowlist. A project rule answers at once; otherwise the
+   * user is asked through a `permission` event. Only this run waits: other agents and the queue go on, and an unanswered
+   * request is denied after the timeout (or when the run stops), with a message the agent sees.
+   */
+  private askTool(agent: AgentRecord, conversationId: Id, run: number, req: ToolPermissionRequest, signal: AbortSignal): Promise<ToolPermissionDecision> {
+    const projectId = agent.projectId;
+    const tool = req.tool || 'unknown tool';
+    // The journal gets the tool name only: inputs can hold paths, commands or secrets.
+    const journal = (text: string) => this.log({ kind: PERMISSION_KIND, projectId, conversationId, agentId: agent.id, text: `${tool}: ${text}` });
+    if (this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input))) {
+      journal('allowed by a project rule');
+      return Promise.resolve({ allow: true });
+    }
+    if (signal.aborted) {
+      journal('denied: the run had already stopped');
+      return Promise.resolve({ allow: false, message: 'Harbor denied this tool call because the run was stopping.' });
+    }
+    const requestId = newId();
+    const rule = toolRuleFor(req.tool, req.input);
+    const timeoutMs = this.d.toolPermissionTimeoutMs ?? TOOL_PERMISSION_TIMEOUT_MS;
+    const n = timeoutMs >= 60_000 ? Math.round(timeoutMs / 60_000) : Math.max(1, Math.round(timeoutMs / 1000));
+    const minutes = `${n} ${timeoutMs >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`;
+    const who = agent.role === 'main' ? 'The lead agent' : `"${agent.title}"`;
+    const what = toolSummary(req);
+    return new Promise<ToolPermissionDecision>((resolve) => {
+      let cancelTimer = (): void => {};
+      const onAbort = (): void => { this.finishToolAsk(requestId, { allow: false, message: 'Harbor cancelled this permission request because the run stopped.' }, 'cancelled: the run stopped'); };
+      this.toolAsks.set(requestId, {
+        agentId: agent.id, projectId, conversationId, run, tool, rule,
+        settle: (d) => { cancelTimer(); signal.removeEventListener('abort', onAbort); resolve(d); }
+      });
+      signal.addEventListener('abort', onAbort, { once: true });
+      cancelTimer = (this.d.setTimer ?? defaultTimer)(() => {
+        this.finishToolAsk(requestId,
+          { allow: false, message: `Denied: the user did not answer this permission request within ${minutes}. Continue without this tool call; if you cannot, say what you need in your report.` },
+          'denied: no answer in time', `No answer within ${minutes}: denied ${tool}. The agent was told to continue without it.`);
+      }, timeoutMs);
+      const choices = rule ? 'allow once, always allow for this project, or deny' : 'allow once or deny (this call cannot be always-allowed)';
+      const prompt = `${who} asks to run ${tool}${what ? `: ${what}` : ''}`;
+      this.post(conversationId, 'system', `${prompt}\nWaiting for your answer (${choices}). Denied automatically after ${minutes}.`, { agentId: agent.id });
+      journal('asked the user');
+      this.emit({ type: 'permission', requestId, kind: 'tool', prompt, agentId: agent.id, conversationId, tool, alwaysAllow: !!rule, expiresAt: Date.now() + timeoutMs });
+    });
+  }
+
+  /** The user's answer to a tool permission request; false when the id is not a pending tool request. */
+  answerToolPermission(requestId: Id, allow: boolean, always = false): boolean {
+    const p = this.toolAsks.get(requestId);
+    if (!p) return false;
+    if (!allow) {
+      return this.finishToolAsk(requestId, { allow: false, message: 'The user denied this tool call. Continue without it, or explain in your report what you need.' }, 'denied by the user', `Denied ${p.tool}.`);
+    }
+    if (always && p.rule) {
+      this.d.store.addToolRule(p.projectId, p.rule);
+      return this.finishToolAsk(requestId, { allow: true }, 'always allowed for this project (rule added)', `Allowed. Always allowed in this project from now on: ${describeToolRule(p.rule)}.`);
+    }
+    return this.finishToolAsk(requestId, { allow: true },
+      always ? 'allowed once (always-allow is not available for this call)' : 'allowed once',
+      always ? `Allowed ${p.tool} once. This kind of call cannot be always-allowed, so Harbor will ask again next time.` : `Allowed ${p.tool} once.`);
+  }
+
+  /** Request ids of pending tool permission requests (tests and diagnostics). */
+  pendingToolAsks(): Id[] { return [...this.toolAsks.keys()]; }
+
+  private denyToolAsks(match: (p: ToolAsk) => boolean, why: string): void {
+    for (const [id, p] of [...this.toolAsks]) {
+      if (match(p)) this.finishToolAsk(id, { allow: false, message: `Harbor denied this tool call: ${why}.` }, `cancelled: ${why}`, `Permission request for ${p.tool} cancelled: ${why}.`);
+    }
+  }
+
+  private finishToolAsk(id: Id, d: ToolPermissionDecision, journalText: string, chat?: string): boolean {
+    const p = this.toolAsks.get(id);
+    if (!p) return false;
+    this.toolAsks.delete(id);
+    this.log({ kind: PERMISSION_KIND, projectId: p.projectId, conversationId: p.conversationId, agentId: p.agentId, text: `${p.tool}: ${journalText}` });
+    if (chat) this.post(p.conversationId, 'system', chat, { agentId: p.agentId });
+    p.settle(d);
+    return true;
+  }
+
   // ------------------------------------------------------------ help requests
 
   private helpRequested(a: AgentRecord, h: HelpRequest): void {
@@ -1212,6 +1319,21 @@ export class Orchestrator {
   // ------------------------------------------------------------ routed execution with fallback
 
   private async runRouted(agent: AgentRecord, o: RoutedOptions): Promise<RoutedRun> {
+    // Edit runs (the lead and edit helpers outside plan/auto mode) ask the user before a tool outside the CLI's allowlist.
+    // Read-only and full runs get no handler, so nothing changes for them.
+    const run = ++this.runSeq;
+    const onToolPermission = o.permission === 'edit'
+      ? (req: ToolPermissionRequest, signal: AbortSignal) => this.askTool(agent, o.conversationId, run, req, signal)
+      : undefined;
+    try {
+      return await this.runAttempts(agent, o, onToolPermission);
+    } finally {
+      this.denyToolAsks((p) => p.run === run, 'the run ended');
+    }
+  }
+
+  private async runAttempts(agent: AgentRecord, o: RoutedOptions,
+    onToolPermission: ((req: ToolPermissionRequest, signal: AbortSignal) => Promise<ToolPermissionDecision>) | undefined): Promise<RoutedRun> {
     const { store, ledger } = this.d;
     const exclude: CliId[] = [];
     let pinned = o.requireCli;
@@ -1260,7 +1382,7 @@ export class Orchestrator {
       const details = { cli: decision.cli, model: decision.model, effort: decision.effort, reason: decision.reason };
       const t0 = Date.now();
       try {
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, signal: o.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, onToolPermission, signal: o.signal }) as AsyncIterable<Chunk>) {
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now() });
           else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
@@ -1300,6 +1422,14 @@ export class Orchestrator {
 
 export function toAgent(a: AgentRecord): Agent {
   return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+}
+
+/** What the user sees about a tool call: the command, path or URL it acts on, clipped. */
+function toolSummary(req: ToolPermissionRequest): string {
+  const i = (req.input ?? {}) as Record<string, unknown>;
+  const v = [i['command'], i['file_path'], i['notebook_path'], i['url'], i['path'], i['pattern'], i['query']].find((x) => typeof x === 'string' && x.trim());
+  const parts = [typeof v === 'string' ? clip(v.trim(), 300) : '', req.description ? clip(req.description, 200) : ''].filter(Boolean);
+  return parts.join(' (') + (parts.length > 1 ? ')' : '');
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();
