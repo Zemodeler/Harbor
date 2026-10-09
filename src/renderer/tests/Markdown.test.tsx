@@ -112,3 +112,42 @@ describe('Markdown code and safety', () => {
     expect(screen.getAllByRole('cell')[0].textContent).toBe('<img src=x onerror=alert(1)>');
   });
 });
+
+describe('Markdown review regressions', () => {
+  it('parses Windows CRLF and lone-CR roadmap tables and lists', () => {
+    for (const eol of ['\r\n', '\r']) {
+      const { container, unmount } = render(<Markdown text={[roadmap, '', '1. one', '2. two'].join(eol)}/>);
+      expect(within(screen.getByRole('table')).getAllByRole('row')).toHaveLength(3);
+      expect(container.querySelectorAll('ol li')).toHaveLength(2);
+      expect(container.textContent).not.toContain('\r');
+      unmount();
+    }
+  });
+  it('keeps fenced code contents byte-for-byte under CRLF', () => {
+    const { container } = render(<Markdown text={'Intro\r\n\r\n```txt\r\n| a | b |\r\n|---|---|\r\n```\r\n\r\nAfter'}/>);
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(container.querySelector('pre code')?.textContent).toBe('| a | b |\r\n|---|---|\r');
+  });
+  it('leaves prose ending in a pipe before a bare rule as prose', () => {
+    const { container } = render(<Markdown text={'Choose one of a | b |\n---\nNext'}/>);
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(container.textContent).toContain('Choose one of a | b |');
+  });
+  it('still renders a single-column piped table', () => {
+    render(<Markdown text={'| a |\n|---|\n| 1 |'}/>);
+    expect(screen.getAllByRole('columnheader').map(h => h.textContent)).toEqual(['a']);
+  });
+  it('does not let an unmatched backtick swallow later cells', () => {
+    render(<Markdown text={'| a | b | c |\n|---|---|---|\n| it`s | x | y |\n| `p\\|q` | `r|s` | z |'}/>);
+    const cells = screen.getAllByRole('cell').map(c => c.textContent);
+    expect(cells).toEqual(['it`s', 'x', 'y', 'p|q', 'r|s', 'z']);
+  });
+  it('treats an escaped backtick as literal and keeps trailing cells', () => {
+    render(<Markdown text={'| a | b |\n|---|---|\n| \\`x | y |'}/>);
+    expect(screen.getAllByRole('cell').map(c => c.textContent)).toEqual(['\\`x', 'y']);
+  });
+  it('keeps a trailing escaped pipe as cell content', () => {
+    render(<Markdown text={'| a | b |\n|---|---|\n| x | y \\|'}/>);
+    expect(screen.getAllByRole('cell').map(c => c.textContent)).toEqual(['x', 'y |']);
+  });
+});
