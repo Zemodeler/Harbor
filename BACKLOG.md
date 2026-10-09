@@ -75,6 +75,7 @@ Behavior the core already provides that the UI should surface or respect:
 13. **Resume action** (contract 0.1.9): for an agent with `state: 'stopped'` (not `main`) show a "Resume" button calling `resumeAgentSession(agentId)`. It rejects when the agent has no saved session; show the error text and suggest sending a message instead.
 
 13. **Outdated verification** (contract 0.1.9): `Agent.testedCommit` is the commit a reviewer examined and `Agent.outdated === true` means the reviewed branch has moved since. Show an "outdated" badge on that reviewer's verdict and do not present it as covering the current branch head.
+14. **Background-on-close toggle** (optional `Settings.keepRunningInBackground`, default false): add a Settings switch. When on, closing the window hides Harbor to the tray and running agents keep working; tray menu has Open Harbor and Quit. Explain that Quit from the tray really stops Harbor.
 
 ## API requests (from UI)
 
