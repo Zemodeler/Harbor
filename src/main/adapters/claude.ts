@@ -13,7 +13,16 @@ import { streamLines, type StreamedLine, type StreamResult } from './stream';
  * The prompt goes through stdin so it never touches the command line.
  * NOT VERIFIED (`claude --help` could not be run when these were added): --add-dir (images) and
  * --permission-mode bypassPermissions (auto mode). Both are documented Claude Code options.
+ *
+ * Git-write deny rules (`denyGitWrites`, lead runs): `Bash(git merge *)` etc. appended to the variadic --disallowedTools list.
+ * NOT VERIFIED here (`claude` could not be run in the session that added this): the exact `Bash(prefix *)` rule syntax,
+ * and that a deny rule wins over the `Bash(git *)` allow rule. Claude Code's permission docs state deny rules are evaluated
+ * first and take precedence over allow rules, but that was not confirmed against the installed CLI. Also not covered:
+ * `git -C x merge`, aliases, or merging through a shell wrapper; the post-turn check in orchestrator.ts is the backstop.
+ * In `full` (bypassPermissions) mode deny rules still apply in Claude Code (also unconfirmed).
  */
+const GIT_WRITE_DENY = ['merge', 'rebase', 'cherry-pick', 'reset', 'push'].map((c) => `Bash(git ${c} *)`);
+
 export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
   if (o.model && o.model !== 'default') a.push('--model', o.model);
@@ -32,6 +41,7 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   if (dirs.length) a.push('--add-dir', ...dirs);
   // Subagents must not spawn agents (docs/project-agents.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');
+  if (o.denyGitWrites) a.push(...GIT_WRITE_DENY);
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
   if (systemPromptFile) a.push('--append-system-prompt-file', systemPromptFile);
   return a;
