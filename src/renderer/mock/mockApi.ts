@@ -1,5 +1,18 @@
-import type { HarborApi, HarborEvent, Agent, Message, Settings } from '../../shared/api';
+import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, Settings } from '../../shared/api';
 import { seed } from './seed';
+
+const demoBranch = 'harbor/implement-account-page-1a2b3c';
+const demoCommits: GitCommit[] = [
+  { hash: 'c3a9e1f0b2d4c6e8a0f1b3d5c7e9a1b3c5d7e9f1', parents: ['a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'], subject: 'Add account page form', author: 'Harbor', time: Date.now() - 1800000, refs: [demoBranch] },
+  { hash: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678', parents: ['9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', '1234567890abcdef1234567890abcdef12345678'], subject: 'Merge checkout polish', author: 'Sample author', time: Date.now() - 7200000, refs: ['HEAD -> main'] },
+  { hash: '1234567890abcdef1234567890abcdef12345678', parents: ['9f8e7d6c5b4a39281706f5e4d3c2b1a098765432'], subject: 'Polish checkout spacing', author: 'Sample author', time: Date.now() - 86400000, refs: [] },
+  { hash: '9f8e7d6c5b4a39281706f5e4d3c2b1a098765432', parents: [], subject: 'Initial storefront', author: 'Sample author', time: Date.now() - 172800000, refs: [] }
+];
+const demoChanges: GitFileChange[] = [
+  { path: 'src/account.tsx', status: 'modified', additions: 2, deletions: 1 },
+  { path: 'src/address.tsx', status: 'added', additions: 24, deletions: 0 },
+  { path: '.env.local', status: 'untracked', hidden: true }
+];
 
 export function createMockApi(options: { empty?: boolean; delay?: number } = {}): HarborApi {
   const data = seed(options.empty);
@@ -71,6 +84,25 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
     },
     async getReview(conversationId) { requireConversation(conversationId); return { conversationId, capturedAt: Date.now(), files: [], notes: ['Demo only. No project files have been changed.', 'Verification has not been tied to this snapshot.'] }; },
     async openProjectFolder() { throw new Error('Opening folders is available in the desktop app.'); },
+    async getGitOverview(projectId) {
+      const p = data.projects.find(x => x.id === projectId);
+      if (!p) throw new Error(`Unknown project ${projectId}`);
+      if (projectId !== 'store') return { projectId, branches: [], worktrees: [], notes: ['This project folder is not a Git repository.'] };
+      const helper = data.agents.find(a => a.id === 'implement');
+      return { projectId, base: 'main', current: 'main', notes: ['Demo only. This history is sample data.'], branches: [
+        { name: 'main', head: demoCommits[1].hash, subject: demoCommits[1].subject, updated: demoCommits[1].time, current: true },
+        { name: demoBranch, head: demoCommits[0].hash, subject: demoCommits[0].subject, updated: demoCommits[0].time, ahead: 1, behind: 0, worktree: 'C:\\Harbor\\worktrees\\store\\implement-account-page-1a2b3c', ...(helper ? { agentId: helper.id, agentTitle: helper.title, agentState: helper.state } : {}) }
+      ], worktrees: [
+        { path: p.path, head: demoCommits[1].hash, branch: 'main', changed: 1, main: true },
+        { path: 'C:\\Harbor\\worktrees\\store\\implement-account-page-1a2b3c', head: demoCommits[0].hash, branch: demoBranch, changed: 0 }
+      ] };
+    },
+    async getGitLog(projectId, opts) { if (projectId !== 'store') throw new Error('This project folder is not a Git repository.'); return copy(opts?.branch === 'main' ? demoCommits.slice(1) : demoCommits); },
+    async getGitChanges(projectId, target) { if (projectId !== 'store') throw new Error('This project folder is not a Git repository.'); return copy(target?.branch || target?.commit ? demoChanges : [{ path: 'README.md', status: 'modified' as const, additions: 1, deletions: 0 }]); },
+    async getGitDiff(projectId, path) {
+      if (projectId !== 'store') throw new Error('This project folder is not a Git repository.');
+      return path === 'src/account.tsx' ? 'diff --git a/src/account.tsx b/src/account.tsx\n@@ -1,3 +1,4 @@\n export function Account() {\n-  return null;\n+  // Sample change; no project files were edited.\n+  return <AccountForm/>;\n }' : `diff --git a/${path} b/${path}\n@@ -1 +1,2 @@\n Sample file\n+Sample change`;
+    },
     async newConversation(projectId) {
       if (!data.projects.some(p => p.id === projectId)) throw new Error('Open a project first.');
       const c = { id: id(), projectId, title: 'New conversation', updated: Date.now(), agentId: `main-${projectId}` };
