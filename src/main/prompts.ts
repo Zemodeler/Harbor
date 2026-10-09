@@ -28,6 +28,8 @@ export interface PlannedTask {
   retryOf?: Id;
   /** Pin to one CLI (e.g. a task that only suits Codex). Harbor falls back to normal routing when it is unavailable. */
   cli?: CliId;
+  /** `"role":"integrator"`: Harbor merges these tasks' (refs or agent ids) approved branches itself; no CLI runs. */
+  integrate?: { sources: string[]; target?: string };
 }
 
 export interface ImageBrief { subject: string; style: string; prompt: string; notes: string }
@@ -269,11 +271,21 @@ export function toAsk(v: unknown): AskRequest | undefined {
 }
 
 function toTask(raw: Record<string, unknown>, i: number, seen: Set<string>): PlannedTask | undefined {
-  const instructions = str(raw['instructions']).trim();
+  const sources = raw['role'] === 'integrator' ? [...new Set(strs(raw['sources']).map((s) => s.trim()).filter(Boolean))] : [];
+  if (raw['role'] === 'integrator' && !sources.length) return undefined;
+  const instructions = str(raw['instructions']).trim() || (sources.length ? `Merge the approved branches of ${sources.join(', ')}.` : '');
   if (!instructions) return undefined;
   let ref = str(raw['ref'], `t${i + 1}`) || `t${i + 1}`;
   while (seen.has(ref)) ref += '_';
   seen.add(ref);
+  if (sources.length) {
+    // An integrator is not a new role: it is an edit helper ("other") that Harbor runs itself.
+    const target = str(raw['target']).trim() || undefined;
+    return {
+      ref, role: 'other', access: 'edit', instructions, title: str(raw['title'], `Integrate ${sources.length} branch${sources.length > 1 ? 'es' : ''}`).slice(0, 80),
+      complexity: 'low', needs: [], dependsOn: strs(raw['dependsOn']), files: [], integrate: { sources, target }
+    };
+  }
   const role = ROLES.has(str(raw['role'])) ? (raw['role'] as PlannedTask['role']) : 'other';
   // Planners and reviewers never edit, whatever the line says.
   const access = role === 'planner' || role === 'reviewer' || raw['access'] === 'read' ? 'read' : 'edit';
