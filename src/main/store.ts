@@ -11,13 +11,16 @@ import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionL
  */
 type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1 };
 
-/** One helper result, as captured when its report was queued for the lead. */
-export type ReportMark = Pick<AgentRecord, 'id' | 'revision' | 'state'>;
+/** One helper result, as captured when its report was queued for the lead. `gen` is its `AgentRecord.reportGen`. */
+export type ReportMark = Pick<AgentRecord, 'id' | 'revision' | 'state'> & { gen?: number };
+/** The result an agent holds now, as a mark. */
+export const currentResult = (a: AgentRecord): ReportMark => ({ id: a.id, revision: a.revision, state: a.state, gen: a.reportGen ?? 0 });
 
 const TERMINAL_STATES = ['done', 'failed', 'stopped'];
 /** A mark never moves to a weaker status for the same result. */
 const DELIVERY_RANK: Record<ReportDelivery['status'], number> = { unknown: 0, attempted: 1, skipped: 2, confirmed: 3 };
-const sameResult = (d: ReportDelivery | undefined, m: ReportMark): boolean => !!d && d.revision === m.revision && d.state === m.state;
+const sameResult = (d: ReportDelivery | undefined, m: ReportMark): boolean =>
+  !!d && d.revision === m.revision && d.state === m.state && (d.gen ?? 0) === (m.gen ?? 0);
 
 export const DEFAULT_SETTINGS: Settings = { routing: 'auto', cliOverrides: {}, allowFreeReset: 'ask' };
 
@@ -158,16 +161,17 @@ export class Store {
   /**
    * Records how far these results got towards the lead. Written to disk at once: a crash must not lose an `attempted` mark
    * (the report would come back as never sent) or a `confirmed` one (it would come back as uncertain). A mark never moves
-   * to a weaker status for the same result, and a mark for a stale result never replaces the mark of the current one.
+   * to a weaker status for the same result. Only the agent's current result is marked: a late mark for an older revision or
+   * an earlier incarnation (`gen`, a resumed helper that ended the same way) must neither replace its mark nor look like one.
    */
   markReports(marks: ReportMark[], status: ReportDelivery['status']): void {
     const time = Date.now();
     for (const m of marks) {
       const a = this.getAgent(m.id);
-      const cur = a?.reportDelivery;
-      if (!a) continue;
-      if (sameResult(cur, m) ? DELIVERY_RANK[cur!.status] >= DELIVERY_RANK[status] : cur && (cur.revision > m.revision || sameResult(cur, a))) continue;
-      a.reportDelivery = { v: 1, revision: m.revision, state: m.state, status, time };
+      if (!a || !sameResult({ v: 1, ...currentResult(a), status, time }, m)) continue;
+      const cur = a.reportDelivery;
+      if (sameResult(cur, m) && DELIVERY_RANK[cur!.status] >= DELIVERY_RANK[status]) continue;
+      a.reportDelivery = { v: 1, revision: m.revision, gen: m.gen ?? 0, state: m.state, status, time };
     }
     this.flush();
   }
@@ -189,10 +193,16 @@ export class Store {
     }
     this.dirty();
   }
-  /** A stopped agent resumed in place keeps its revision: its old mark must not hide the outcome of the resumed run. */
+  /**
+   * A stopped agent resumed in place keeps its revision: its old mark must not hide the outcome of the resumed run, and a
+   * turn still carrying the old result must not mark the new one. A new delivery generation separates the two.
+   */
   clearReportDelivery(id: Id): void {
     const a = this.getAgent(id);
-    if (a?.reportDelivery) { delete a.reportDelivery; this.dirty(); }
+    if (!a) return;
+    delete a.reportDelivery;
+    a.reportGen = (a.reportGen ?? 0) + 1;
+    this.dirty();
   }
 
   // ---- sessions (native CLI session ids)

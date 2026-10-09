@@ -54,13 +54,19 @@ export interface AgentRecord extends Agent {
   snapshots?: TaskSnapshot[];
   /** What Harbor knows about handing this helper's latest result to the lead; absent for the current result means pending. */
   reportDelivery?: ReportDelivery;
+  /**
+   * Delivery generation of the current result (absent = 0). Bumped when a stopped helper is resumed in place: the resumed
+   * run keeps its revision and may end in the same state, so a late mark from a turn carrying the old result must not count.
+   */
+  reportGen?: number;
 }
 type Id = string;
 
 /**
- * Delivery of one helper result (revision + terminal state) to the lead. A mark for another revision or state says nothing
+ * Delivery of one helper result (revision + delivery generation + terminal state) to the lead. A mark for another result says nothing
  * about the current result, which is then pending. Statuses:
- * - `attempted`: a lead turn carrying it reached a CLI but was not seen to finish (stopped, failed, or Harbor restarted).
+ * - `attempted`: a lead turn carrying it handed its prompt to a CLI but was not seen to finish (stopped, failed after output,
+ *   or Harbor restarted).
  *   Uncertain: the lead may or may not have read it. No CLI acknowledges receipt, so this is never upgraded by guessing.
  * - `confirmed`: a lead turn carrying it finished successfully.
  * - `skipped`: deliberately not sent (a batch of only stopped helpers, so a stop-all does not start lead turns).
@@ -69,6 +75,8 @@ type Id = string;
 export interface ReportDelivery {
   v: 1;
   revision: number;
+  /** `AgentRecord.reportGen` of the result (absent = 0). */
+  gen?: number;
   state: AgentState;
   status: 'attempted' | 'confirmed' | 'skipped' | 'unknown';
   time: number;
