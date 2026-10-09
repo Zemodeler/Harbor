@@ -36,6 +36,7 @@ class FakeTray extends EventEmitter {
 }
 
 const app = Object.assign(new EventEmitter(), {
+  requestSingleInstanceLock: vi.fn(() => true),
   whenReady: () => Promise.resolve(), isPackaged: false,
   getAppPath: () => '/harbor', getPath: () => '/data', setAppUserModelId: vi.fn(),
   quit: vi.fn(() => { app.emit('before-quit'); })
@@ -63,6 +64,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   app.removeAllListeners();
   state.windows = []; state.trays = []; state.store = new Store(); state.emptyIcon = false;
+  state.service = undefined;
+  app.requestSingleInstanceLock.mockReturnValue(true);
 });
 
 const start = async (enabled?: boolean) => {
@@ -76,6 +79,26 @@ const close = () => {
 };
 
 describe('Electron tray lifecycle (mocked)', () => {
+  it('quits a duplicate launch before creating the service or a window', async () => {
+    app.requestSingleInstanceLock.mockReturnValue(false);
+    await start();
+    expect(app.quit).toHaveBeenCalledOnce();
+    expect(state.service).toBeUndefined();
+    expect(state.windows).toHaveLength(0);
+    expect(state.shutdown).not.toHaveBeenCalled();
+  });
+
+  it('restores and focuses the existing hidden window on a second launch', async () => {
+    await start(true);
+    close();
+    state.windows[0].minimized = true;
+    app.emit('second-instance');
+    expect(state.windows).toHaveLength(1);
+    expect(state.windows[0].visible).toBe(true);
+    expect(state.windows[0].restore).toHaveBeenCalledOnce();
+    expect(state.windows[0].focus).toHaveBeenCalledOnce();
+    expect(state.shutdown).not.toHaveBeenCalled();
+  });
   it('preserves normal close/quit when the preference is absent', async () => {
     await start();
     expect(close().preventDefault).not.toHaveBeenCalled();

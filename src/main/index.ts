@@ -3,7 +3,7 @@ import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, shell, Tra
 import { registerIpc } from './ipc';
 import { readCodexLimits } from './codexLimits';
 import { createHarborService } from './service';
-import { shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
+import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
 
 let win: BrowserWindow | undefined;
 let quitting = false;
@@ -33,7 +33,12 @@ function createWindow(hideOnClose: () => boolean): void {
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
 }
 
-app.whenReady().then(() => {
+const startupAction = instanceStartupAction(app.requestSingleInstanceLock());
+if (startupAction === 'quit') app.quit();
+let openExistingWindow: (() => void) | undefined;
+// Registered before readiness; startup itself opens the window if the second launch arrives earlier.
+if (startupAction === 'start') app.on('second-instance', () => openExistingWindow?.());
+if (startupAction === 'start') app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
   const service = createHarborService({
     dataDir: join(app.getPath('appData'), 'Harbor'),
@@ -53,6 +58,7 @@ app.whenReady().then(() => {
     win?.show();
     win?.focus();
   };
+  openExistingWindow = openWindow;
   const syncTray = (): void => {
     if (quitting) return;
     if (service.store.getSettings().keepRunningInBackground === true) {
@@ -114,4 +120,4 @@ app.whenReady().then(() => {
   app.on('activate', openWindow);
 });
 
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+if (startupAction === 'start') app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
