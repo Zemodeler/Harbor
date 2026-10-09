@@ -13,7 +13,7 @@ import {
   CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
-import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
+import { reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { DEFAULT_CONCURRENCY, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type Store, type ToolRuleDraft } from './store';
@@ -163,7 +163,7 @@ export class Orchestrator {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
     this.journal = d.journal ?? new Journal();
     // Every CLI process this run starts is persisted, so a crash cannot leave one that the next run cannot identify.
-    setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid) => d.store.untrackProcess(pid) });
+    setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid, started) => d.store.untrackProcess(pid, started) });
   }
 
   /** Resolves with what the startup orphan sweep did (tests and diagnostics). */
@@ -288,14 +288,8 @@ export class Orchestrator {
     const killer = this.d.killer ?? systemKiller;
     // Snapshot before anything else: processes this run spawns (discovery, agents) are recorded too and must be left alone.
     const old = store.listTrackedProcesses().filter((t) => t.started < this.startedAt);
-    for (const t of old) store.untrackProcess(t.pid);
-    const out: OrphanSweep = { killed: [], skipped: [] };
-    for (const t of old) {
-      try {
-        if (matchesTracked(t, await killer.inspect(t.pid))) { await killer.kill(t.pid); out.killed.push(t.pid); } else out.skipped.push(t.pid);
-      } catch { out.skipped.push(t.pid); }
-    }
-    return out;
+    // Records owned by a Harbor that is still running are kept and skipped (a second window must not kill the first's CLIs).
+    return await reapTrackedProcesses(old, store, killer);
   }
 
   /**
