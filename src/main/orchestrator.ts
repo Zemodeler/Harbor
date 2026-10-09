@@ -13,6 +13,7 @@ import {
   CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type SessionPeer
 } from './prompts';
+import { buildHandoff, type HandoffEvidence } from './handoff';
 import { reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
@@ -584,6 +585,33 @@ export class Orchestrator {
     return d.escalation;
   }
 
+  /**
+   * Harbor's own record of this conversation for a session that cannot resume (see handoff.ts): decisions, unfinished work and
+   * what verification still covers. Evidence is compared with each branch's head now, so a later commit shows as stale.
+   */
+  private async handoffFor(project: Project, conversationId: Id): Promise<string> {
+    const { store, git } = this.d;
+    const conv = store.getConversation(conversationId);
+    const agents = this.registerFor(project.id, conversationId);
+    const evidence: HandoffEvidence[] = [];
+    for (const a of agents) {
+      if (a.integration || a.rollback || !a.branch || a.role === 'reviewer') continue;
+      const head = await git.branchHead(project.path, a.branch).catch(() => undefined);
+      const reviews = this.reviewersOf(project.id, a).filter((r) => r.state === 'done' && r.testedCommit && r.result?.verdict);
+      const review = reviews.sort((x, y) => y.created - x.created)[0];
+      if (review) evidence.push({ title: a.title, branch: a.branch, verdict: review.result!.verdict, tested: review.testedCommit, head });
+      if (a.checks?.length) evidence.push({ title: `${a.title} (Harbor checks)`, branch: a.branch, checks: a.checks.map((c) => ({ cmd: c.cmd, ok: c.ok })), tested: a.testedCommit, head });
+      if (!review && !a.checks?.length) evidence.push({ title: a.title, branch: a.branch, head });
+    }
+    return buildHandoff({
+      mode: conv?.mode, goal: conv?.goal,
+      decisions: store.listCoordination(project.id).filter((c) => c.kind === 'decision').map((c) => c.text),
+      work: agents.filter((a) => !a.integration && !a.rollback).map((a) => ({ title: a.title, role: a.role, state: a.state, branch: a.branch, note: a.state === 'done' ? undefined : a.error ?? a.summary })),
+      evidence,
+      applied: agents.filter((a) => (a.integration?.applied || a.rollback?.applied)).map((a) => `${a.title} → ${a.integration?.target ?? a.rollback?.target ?? 'target'}`)
+    });
+  }
+
   /** The working agent: reads, edits, runs commands, and delegates through HARBOR_DELEGATE lines when that pays off. */
   private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal): Promise<void> {
     const notes = this.notes.get(conversationId) ?? [];
@@ -597,9 +625,11 @@ export class Orchestrator {
     const goal = mode === 'goal' ? conv?.goal : undefined;
     const goalMode = !!goal;
     const headBefore = await this.d.git.head(project.path).catch(() => undefined);
+    // Only used when the lead's native session cannot be resumed (new conversation, lost session, or another CLI took over).
+    const handoff = await this.handoffFor(project, conversationId).catch(() => '');
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox }), system: LEAD_SYSTEM,
-      contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
+      contextIfNoResume: [handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n') || undefined,
       role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli,
       permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
       images: trigger.kind === 'user' ? trigger.images : undefined,
@@ -622,6 +652,7 @@ export class Orchestrator {
         this.post(conversationId, 'system', `Plan mode: ignored ${edits.length} edit helper(s) (${edits.map((t) => t.title).join(', ')}). Approve the plan to let the lead carry it out.`);
       }
     }
+    for (const text of proto.decision) this.d.store.addCoordination({ projectId: project.id, kind: 'decision', from: main.id, text });
     const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
@@ -912,8 +943,17 @@ export class Orchestrator {
       prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
       requireCli: a.pinnedCli,
       permission: mode === 'plan' || !this.canEdit(a) ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: o.cwd, signal: ctl.signal,
-      resume: o.resume, conversationId: this.convFor(a), stream: true
+      resume: o.resume, conversationId: this.convFor(a), stream: true,
+      contextIfNoResume: o.resume ? this.helperContext(a) : undefined
     });
+  }
+
+  /** A follow-up whose native session is gone (or on another CLI) still knows its assignment and what it reported. */
+  private helperContext(a: AgentRecord): string {
+    const parts = [`Your earlier session is not available. Your assignment was: ${clip(a.task, 1500)}`];
+    if (a.report) parts.push(`Your last report:\n${clip(a.report, 1500)}`);
+    parts.push('Inspect the current state (git status and git log in your worktree) before acting, and do not repeat steps that already completed. Earlier checks or reviews cover only the commits they ran on.');
+    return parts.join('\n\n');
   }
 
   /** Flag verification of a branch as outdated once its head differs from the commit that was tested. */
