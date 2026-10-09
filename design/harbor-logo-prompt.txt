@@ -1,0 +1,4 @@
+Generation method: built-in image generation tool.
+Asset: harbor-icon.png
+
+Use case: logo-brand. Create one polished app icon for Harbor, a Windows desktop coding assistant. Primary symbol: a bold, beautifully proportioned anchor, familiar and reassuring, geometric with slightly softened corners, balanced symmetrical flukes and a circular eye. The anchor is warm white against a deep ocean teal rounded-square tile. A tiny restrained aqua accent may appear within the anchor. Flat vector-like precision, confident simple silhouette, excellent legibility at Windows taskbar sizes. Center the tile in the square canvas, occupy about 90 percent with generous internal padding for the anchor. Actual transparent background outside the rounded-square tile. No text, no letters, no other objects, no mockup, no shadows outside tile, no decorative nautical ropes, no fine detail. Deliver the single icon alone.

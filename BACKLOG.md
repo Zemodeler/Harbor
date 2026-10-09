@@ -58,8 +58,9 @@ Behavior the core already provides that the UI should surface or respect:
 7. **Usage**: `getUsage()` percentages are Harbor-observed estimates (label says so; `freeResetAvailable` is only set when a supported entitlement source exists, currently never). Do not present them as provider quota; show the label and `resetsAt` honestly.
 8. **Agent states**: `queued` also means "waiting for a dependency, file, or free slot" (the reason is in `Agent.summary` while the agent is queued, waiting, failed or stopped); `waiting` means blocked on a sibling requested via the main agent.
 9. **Stop**: `stopAgent(mainAgentId)` stops every running subagent of that project; `stopAgent(subagentId)` stops one.
-10. **Change review**: a `harbor/<slug>` branch and worktree path are on `Agent.worktree`; there is no diff API yet (core backlog item 4).
+10. **Change review**: a `harbor/<slug>` branch and worktree path are on `Agent.worktree`; branch diffs are available through the Git view methods (item 12).
 11. Take `gpt/ui`'s version of `src/renderer/**` wholesale when merging; `claude/core` ships only a 2-file placeholder there.
+12. **Git view** (contract 0.1.8): done in `components/GitPanel.tsx` (header button "Git", also in quick actions). It shows branches, helper branches with their agent, worktrees, a commit graph (`gitGraph.ts`) and changes with inline diffs, and it is read-only. Open UI follow-ups: a visual pass in the real app, keyboard navigation through commit rows, and virtualising very long histories (it pages 300 commits at a time).
 
 ## API requests (from UI)
 

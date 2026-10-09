@@ -6,7 +6,13 @@ export interface Conversation { id: Id; projectId: Id; title: string; updated: n
 export interface SessionActivity { state: 'queued'|'working'|'waiting'|'done'|'failed'|'stopped'; started?: number; updated: number; detail?: string; cli?: CliId; model?: string }
 export interface SearchHit { conversation: Conversation; projectName: string; excerpt?: string }
 export interface ReviewSnapshot { conversationId: Id; capturedAt: number; files: Array<{ path: string; patch: string; source: string; untracked?: boolean }>; notes: string[] }
-export type AgentRole = 'main' | 'planner' | 'implementer' | 'reviewer' | 'other';
+export interface GitBranch { name: string; head: string; subject: string; updated: number; current?: boolean; upstream?: string; ahead?: number; behind?: number; worktree?: string; agentId?: Id; agentTitle?: string; agentState?: AgentState }   // ahead/behind = against GitOverview.base; agent* = the Harbor helper that owns a harbor/* branch
+export interface GitWorktree { path: string; head: string; branch?: string; changed: number; main?: boolean }   // changed = uncommitted files; main = the project folder itself
+export interface GitOverview { projectId: Id; base?: string; current?: string; branches: GitBranch[]; worktrees: GitWorktree[]; notes: string[] }
+export interface GitCommit { hash: string; parents: string[]; subject: string; author: string; time: number; refs: string[] }
+export interface GitFileChange { path: string; status: 'added'|'modified'|'deleted'|'renamed'|'untracked'|'other'; oldPath?: string; additions?: number; deletions?: number; hidden?: boolean }   // hidden = credential file, diff never shown
+export interface GitTarget { branch?: string; commit?: string }   // neither = uncommitted changes in the project folder
+export type AgentRole ='main' | 'planner' | 'implementer' | 'reviewer' | 'other';
 export type AgentState = 'queued' | 'working' | 'waiting' | 'done' | 'failed' | 'stopped';
 export interface Agent { id: Id; projectId: Id; parentId?: Id; role: AgentRole; title: string; state: AgentState; cli: CliId; model: string; effort: 'low'|'medium'|'high'; worktree?: string; summary?: string; conversationId?: Id }   // conversationId = the main-agent conversation that created this subagent
 export interface Message { id: Id; conversationId: Id; role: 'user'|'assistant'|'system'|'tool'; text: string; time: number; agentId?: Id; details?: { cli: CliId; model: string; effort: string; reason: string } }
@@ -30,6 +36,10 @@ export interface HarborApi {
  stopConversation(id: Id): Promise<void>;
  getReview(id: Id): Promise<ReviewSnapshot>;
  openProjectFolder(id: Id): Promise<void>;
+ getGitOverview(projectId: Id): Promise<GitOverview>;
+ getGitLog(projectId: Id, opts?: { branch?: string; limit?: number }): Promise<GitCommit[]>;   // no branch = all local branches, newest first, topological
+ getGitChanges(projectId: Id, target?: GitTarget): Promise<GitFileChange[]>;   // branch = since its merge-base with base, plus its worktree's uncommitted work
+ getGitDiff(projectId: Id, path: string, target?: GitTarget): Promise<string>;
  listMessages(conversationId: Id): Promise<Message[]>; send(conversationId: Id, text: string): Promise<void>;
  listAgents(projectId: Id): Promise<Agent[]>; openAgentConversation(agentId: Id): Promise<Conversation>; stopAgent(agentId: Id): Promise<void>;
  getUsage(): Promise<UsageWindow[]>;

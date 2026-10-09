@@ -8,6 +8,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listProjects', 'addProject', 'removeProject', 'setProjectImage',
   'listConversations', 'newConversation', 'deleteConversation',
   'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder',
+  'getGitOverview', 'getGitLog', 'getGitChanges', 'getGitDiff',
   'listMessages', 'send',
   'listAgents', 'openAgentConversation', 'stopAgent',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'answerQuestion'
