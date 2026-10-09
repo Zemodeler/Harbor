@@ -264,6 +264,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return store.addConversation({ id: newId(), projectId: a.projectId, title: `${a.role}: ${a.title}`, updated: Date.now(), agentId });
     },
     async stopAgent(agentId) { orchestrator.stop(agentId); },
+    async setAgentPriority(agentId, priority) { orchestrator.setPriority(agentId, priority); },
+    async pauseAgent(agentId) { orchestrator.pause(agentId); },
+    async resumeAgent(agentId) { orchestrator.resume(agentId); },
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },
