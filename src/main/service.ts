@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { CliId, HarborApi, HarborEvent, Id, Project } from '../shared/api';
+import type { Attachment, CliId, ConversationMode, HarborApi, HarborEvent, Id, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -44,6 +44,33 @@ export interface ServiceOptions {
   worktreesRoot?: string;
 }
 
+const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
+const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+export const MAX_ATTACHMENTS = 6;
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/** Validate every image first, then write them as `<dir>/<id>.<ext>`. Nothing is written when any one is rejected. */
+export function saveAttachments(dir: string, input: { name: string; mime: string; dataBase64: string }[]): Attachment[] {
+  if (input.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${MAX_ATTACHMENTS} images per message.`);
+  const decoded = input.map((a) => {
+    const ext = IMAGE_EXT[a.mime];
+    const name = basename(String(a.name ?? '')).slice(0, 120) || 'image';
+    if (!ext) throw new Error(`"${name}" is not a supported image type (use PNG, JPEG, GIF or WebP).`);
+    // Check the encoded length before decoding so an oversized payload is never allocated.
+    if (typeof a.dataBase64 !== 'string' || a.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4) throw new Error(`"${name}" is larger than 10 MB.`);
+    const data = Buffer.from(a.dataBase64, 'base64');
+    if (!data.length) throw new Error(`"${name}" is empty.`);
+    if (data.length > MAX_ATTACHMENT_BYTES) throw new Error(`"${name}" is larger than 10 MB.`);
+    return { name, mime: a.mime, ext, data };
+  });
+  if (decoded.length) mkdirSync(dir, { recursive: true });
+  return decoded.map((d) => {
+    const path = join(dir, `${newId()}.${d.ext}`);
+    writeFileSync(path, d.data);
+    return { name: d.name, mime: d.mime, path };
+  });
+}
+
 /** CLIs whose headless flow has been verified against a real install in this repo's history (codex: 0.160.0, see adapters/codex.ts). */
 const VERIFIED = new Set<CliId>(['claude', 'codex']);
 
@@ -52,7 +79,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const bus = new EventBus();
   const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), ...opts.ledger });
   const git = opts.git ?? new Git();
-  const worktreesRoot = opts.worktreesRoot ?? join(opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test'), 'worktrees');
+  const dataRoot = opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test');
+  const worktreesRoot = opts.worktreesRoot ?? join(dataRoot, 'worktrees');
   let clis: ResolvedCli[] = [];
 
   const defaultAdapter = (id: CliId, r?: ResolvedCli): CliAdapter | undefined => {
@@ -222,12 +250,25 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!c) return;
       if (c.activity && ['working', 'queued', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['working', 'queued', 'waiting'].includes(a.state))) throw new Error('Stop the running session and answer pending requests before deleting this conversation.');
       store.removeConversation(id);
+      try { rmSync(join(dataRoot, 'attachments', id), { recursive: true, force: true }); } catch { /* best effort: only Harbor's own copies */ }
       for (const k of [`lead:${id}`, `concierge:${id}`]) store.clearSession(k);
     },
-    async send(conversationId, text) {
+    async send(conversationId, text, attachments) {
       await ready;
-      if (!text.trim()) return;
-      await orchestrator.userMessage(conversationId, text);
+      if (!text.trim() && !attachments?.length) return;
+      if (!store.getConversation(conversationId)) throw new Error('This conversation is no longer available.');
+      const saved = attachments?.length ? saveAttachments(join(dataRoot, 'attachments', conversationId), attachments) : [];
+      await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved);
+    },
+    async setConversationMode(conversationId, mode, goal) {
+      const c = store.getConversation(conversationId);
+      if (!c) throw new Error('This conversation is no longer available.');
+      if (!CONVERSATION_MODES.includes(mode)) throw new Error('Unknown conversation mode.');
+      const text = goal?.trim();
+      if (mode === 'goal' && !text) throw new Error('Goal mode needs a goal: say what should be true when the lead is done.');
+      store.patchConversation(conversationId, { mode, goal: mode === 'goal' ? text!.slice(0, 2000) : undefined });
+      bus.emit({ type: 'conversation', conversation: { ...c } });
+      return { ...c };
     },
 
     async listAgents(projectId) { return store.listAgentRecords(projectId).map(toAgent); },

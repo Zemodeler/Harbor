@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines, type StreamedLine, type StreamResult } from './stream';
@@ -11,17 +11,25 @@ import { streamLines, type StreamedLine, type StreamResult } from './stream';
  * -p, --output-format stream-json (needs --verbose), --model, --effort, --resume,
  * --permission-mode, --allowedTools, --disallowedTools, --append-system-prompt.
  * The prompt goes through stdin so it never touches the command line.
+ * NOT VERIFIED (`claude --help` could not be run when these were added): --add-dir (images) and
+ * --permission-mode bypassPermissions (auto mode). Both are documented Claude Code options.
  */
 export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
   if (o.model && o.model !== 'default') a.push('--model', o.model);
   a.push('--effort', o.effort);
   if (o.resumeId) a.push('--resume', o.resumeId);
-  if (o.permission === 'edit') {
+  if (o.permission === 'full') {
+    a.push('--permission-mode', 'bypassPermissions');
+  } else if (o.permission === 'edit') {
     a.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)');
   } else {
     a.push('--permission-mode', 'plan');
   }
+  // Attached images live outside the project: the agent may only Read them if their folder is added. Variadic flag, so it
+  // must be followed by another flag (--disallowedTools below).
+  const dirs = [...new Set((o.images ?? []).map((p) => dirname(p)))];
+  if (dirs.length) a.push('--add-dir', ...dirs);
   // Subagents must not spawn agents (docs/project-agents.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
@@ -73,6 +81,7 @@ export class ClaudeAdapter implements CliAdapter {
   constructor(private exe: string) {}
 
   async *run(prompt: string, o: RunOptions): AsyncGenerator<Chunk> {
+    if (o.images?.length) prompt = `${prompt}\n\nThe user attached image file(s) to this message. Read each one with the Read tool to see it:\n${o.images.map((p) => `- ${p}`).join('\n')}`;
     let done = false;
     let spFile: string | undefined;
     if (o.systemPrompt) {

@@ -17,6 +17,8 @@ export interface AgentRecord extends Agent {
   complexity?: Complexity;
   /** What the lead said this work needs; the router matches it against the capability catalog. */
   needs?: Need[];
+  /** CLI the lead pinned this helper to (HARBOR_DELEGATE "cli"); routing falls back when it is unavailable. */
+  pinnedCli?: CliId;
   /** Never edits files (research, review), whatever the role. */
   readOnly?: boolean;
   /** Conversation the agent reports to (the one the user asked in). */
