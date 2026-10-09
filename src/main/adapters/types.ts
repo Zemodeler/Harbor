@@ -14,6 +14,8 @@ export interface RunOptions {
   images?: string[];
   /** Extra system-level instructions (role contract). Appended, never replaces CLI defaults. */
   systemPrompt?: string;
+  /** Lead runs: forbid git merge/rebase/cherry-pick/reset/push where the CLI can enforce it (the integrator lands branches). */
+  denyGitWrites?: boolean;
   signal?: AbortSignal;
 }
 
