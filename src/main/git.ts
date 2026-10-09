@@ -150,6 +150,62 @@ export class Git {
     if (r.code !== 0) throw new Error(`git update-ref failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
   }
 
+  // ---- rollback records and preview. Read-only except for unreferenced objects (merge-tree, commit-tree): no ref, index or file changes.
+
+  /** Binary diff `base..head`, run in `cwd`, with the given paths excluded (credential files). Undefined when git fails. */
+  async diffBinary(cwd: string, base: string, head: string, exclude: string[] = []): Promise<string | undefined> {
+    const r = await this.git(cwd, ['diff', '--binary', '--no-ext-diff', '--no-textconv', base, head, '--', ':(top)', ...exclude.map((p) => `:(top,exclude,literal)${p}`)]);
+    return r.code === 0 ? r.stdout : undefined;
+  }
+
+  /** Merge commits reachable from `head` but not from any of `exclude`, newest first (topological), with their parents. */
+  async mergeCommits(repo: string, head: string, exclude: string[]): Promise<Array<{ commit: string; parents: string[] }>> {
+    const r = await this.git(repo, ['rev-list', '--merges', '--parents', '--topo-order', head, ...exclude.map((x) => `^${x}`)]);
+    if (r.code !== 0) return [];
+    return r.stdout.split(/\r?\n/).filter(Boolean).map((l) => { const [commit, ...parents] = l.trim().split(/\s+/); return { commit: commit!, parents }; });
+  }
+
+  async parents(repo: string, commit: string): Promise<string[]> {
+    const r = await this.git(repo, ['rev-list', '--parents', '-n', '1', commit]);
+    return r.code === 0 ? r.stdout.trim().split(/\s+/).slice(1) : [];
+  }
+
+  /**
+   * In-memory three-way merge (`git merge-tree --write-tree`): writes only objects, never a ref or the working tree.
+   * `unsupported` covers git versions without --write-tree/--merge-base and any other failure.
+   */
+  async mergeTree(repo: string, base: string, ours: string, theirs: string): Promise<{ status: 'clean'; tree: string } | { status: 'conflict'; paths: string[] } | { status: 'unsupported'; message: string }> {
+    const r = await this.git(repo, ['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', `--merge-base=${base}`, ours, theirs]);
+    const [tree, ...rest] = r.stdout.split('\0');
+    if (r.code === 0 && tree?.trim()) return { status: 'clean', tree: tree.trim() };
+    if (r.code === 1) return { status: 'conflict', paths: [...new Set(rest.filter(Boolean))] };
+    return { status: 'unsupported', message: (r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? `exit ${r.code}` };
+  }
+
+  /** An unreferenced commit object for `tree` on top of `parent` (used to chain simulated reverts). */
+  async commitTree(repo: string, tree: string, parent: string, message: string): Promise<string | undefined> {
+    const r = await this.git(repo, ['-c', 'user.name=Harbor', '-c', 'user.email=harbor@localhost', 'commit-tree', tree, '-p', parent, '-m', message]);
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  /** Non-merge commits reachable from `head` and not from `exclude` that touch any of `paths`, newest first. */
+  async commitsTouching(repo: string, head: string, exclude: string[], paths: string[], limit = 50): Promise<Array<{ hash: string; subject: string; files: string[] }>> {
+    if (!paths.length) return [];
+    const r = await this.git(repo, ['-c', 'core.quotepath=off', 'log', '--no-merges', '--format=%x1e%H%x1f%s', '--name-only', '-n', String(limit), head, ...exclude.map((x) => `^${x}`), '--', ...paths.map((p) => `:(top,literal)${p}`)]);
+    if (r.code !== 0) return [];
+    return r.stdout.split('\x1e').filter((b) => b.trim()).map((b) => {
+      const [first, ...files] = b.split(/\r?\n/);
+      const [hash, subject] = (first ?? '').split('\x1f');
+      return { hash: (hash ?? '').trim(), subject: subject ?? '', files: files.map((f) => f.trim()).filter(Boolean) };
+    }).filter((c) => c.hash);
+  }
+
+  /** Local branches under `prefix` (e.g. `harbor/`) that contain `commit`. */
+  async branchesContaining(repo: string, commit: string, prefix = ''): Promise<string[]> {
+    const r = await this.git(repo, ['for-each-ref', '--contains', commit, '--format=%(refname:short)', `refs/heads/${prefix}`]);
+    return r.code === 0 ? r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
+  }
+
   /** Remove a worktree that Harbor created. Refuses anything outside the given Harbor root. */
   async removeWorktree(repo: string, worktreesRoot: string, path: string, branch?: string): Promise<void> {
     const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();

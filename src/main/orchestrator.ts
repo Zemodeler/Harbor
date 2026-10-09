@@ -1,3 +1,5 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
@@ -14,7 +16,7 @@ import {
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { DEFAULT_CONCURRENCY, effectiveSettings, newId, normPath, type Store } from './store';
-import type { AgentRecord, CheckRun } from './types';
+import type { AgentRecord, CheckRun, TaskSnapshot } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
 
@@ -43,7 +45,11 @@ export interface OrchestratorDeps {
   runCheck?: CheckRunner;
   /** Finds and kills leftover CLI processes at startup; injected so tests never touch real processes. */
   killer?: ProcessKiller;
+  /** Where per-run patches of helper branches are kept as rollback evidence; without it snapshots record files only. */
+  patchesRoot?: string;
 }
+
+const MAX_SNAPSHOTS = 5;
 
 export interface OrphanSweep { killed: number[]; skipped: number[] }
 
@@ -819,6 +825,7 @@ export class Orchestrator {
       if (stat) report += `\n\nChanges on ${a.branch}${cp.committed ? ' (uncommitted work was checkpointed by Harbor)' : ''}:\n${stat}`;
       else report += `\n\nNo changes were committed on ${a.branch}.`;
       if (cp.head) { a.headCommit = cp.head; this.markOutdated(a.projectId, a.worktree, cp.head); }
+      if (cp.head && cp.head !== a.baseCommit && !a.integration) await this.recordSnapshot(a, a.worktree, a.baseCommit, cp.head);
       const claimed = (a.files ?? []).map((f) => f.replace(/\\/g, '/').toLowerCase());
       const outside = claimed.length ? files.filter((f) => !claimed.some((c) => f.toLowerCase() === c || f.toLowerCase().startsWith(c.replace(/\/?$/, '/')))) : [];
       if (outside.length) {
@@ -886,6 +893,32 @@ export class Orchestrator {
     }
     const lines = runs.map((r) => `- ${r.cmd}: ${r.ok ? 'PASS' : `FAIL (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`})`}${r.ok ? '' : `\n${clip(r.output.split(/\r?\n/).slice(-15).join('\n'), 1500)}`}`);
     return `\n\nChecks Harbor ran on ${head.slice(0, 10)}:\n${lines.join('\n')}`;
+  }
+
+  /**
+   * Record what the helper's branch holds after this run (newest 5 kept). The patch is evidence only, written without
+   * credential files; a rollback always reverses git objects. Failures never affect the run.
+   */
+  private async recordSnapshot(a: AgentRecord, worktree: string, base: string, head: string): Promise<void> {
+    if (a.snapshots?.at(-1)?.head === head) return;
+    try {
+      const files = await this.d.git.changes(worktree, base, head);
+      const snap: TaskSnapshot = { revision: a.revision, base, head, time: Date.now(), files };
+      if (this.d.patchesRoot) {
+        const hidden = files.filter((f) => f.hidden).flatMap((f) => [f.path, ...(f.oldPath ? [f.oldPath] : [])]);
+        const patch = await this.d.git.diffBinary(worktree, base, head, hidden);
+        if (patch !== undefined) {
+          const dir = join(this.d.patchesRoot, a.projectId.slice(0, 8), a.id);
+          mkdirSync(dir, { recursive: true });
+          snap.patchPath = join(dir, `${a.revision}-${head.slice(0, 7)}.patch`);
+          writeFileSync(snap.patchPath, patch);
+        }
+      }
+      const all = [...(a.snapshots ?? []), snap];
+      for (const old of all.slice(0, -MAX_SNAPSHOTS)) if (old.patchPath && old.patchPath !== snap.patchPath) rmSync(old.patchPath, { force: true });
+      a.snapshots = all.slice(-MAX_SNAPSHOTS);
+      this.d.store.upsertAgent(a);
+    } catch { /* no snapshot this run: rollback falls back to the branch and merge history */ }
   }
 
   private finished(a: AgentRecord): void {
@@ -1047,7 +1080,9 @@ export class Orchestrator {
     integ.base = base;
     integ.conflicts = undefined;
     integ.applied = undefined;
-    items.forEach((x, i) => Object.assign(x.s, { branch: x.agent!.branch, commit: (gates[i] as { head: string }).head, state: 'pending' }));
+    // A merge recorded by an earlier run stays valid while the pinned commit is the same and the merge is still on this branch.
+    const earlier = new Map(items.map((x) => [x.s, { commit: x.s.commit, merge: x.s.merge }]));
+    items.forEach((x, i) => Object.assign(x.s, { branch: x.agent!.branch, commit: (gates[i] as { head: string }).head, state: 'pending', merge: undefined }));
     this.setState(a, 'working');
 
     // 3. The integration worktree, on harbor/integrate-<target>-<id6>, from base.
@@ -1068,9 +1103,14 @@ export class Orchestrator {
     for (const x of this.integrationOrder(items as Array<{ s: IntegrationSource; agent: AgentRecord }>)) {
       if (signal?.aborted) break;
       const label = `${x.s.branch} ("${x.agent.title}") @ ${x.s.commit!.slice(0, 10)}`;
-      if (await git.isAncestor(wt, x.s.commit!, 'HEAD')) { x.s.state = 'merged'; lines.push(`- ${label}: already included`); continue; }
+      if (await git.isAncestor(wt, x.s.commit!, 'HEAD')) {
+        const prev = earlier.get(x.s);
+        if (prev?.merge && prev.commit === x.s.commit && await git.isAncestor(wt, prev.merge, 'HEAD')) x.s.merge = prev.merge;
+        x.s.state = 'merged'; lines.push(`- ${label}: already included`); continue;
+      }
       const r = await git.merge(wt, x.s.commit!);
-      if (r.ok) { x.s.state = 'merged'; lines.push(`- ${label}: merged`); continue; }
+      // The merge commit attributes this source's changes for a later rollback.
+      if (r.ok) { x.s.state = 'merged'; x.s.merge = await git.head(wt); lines.push(`- ${label}: merged`); continue; }
       const paths = await git.unmergedPaths(wt);
       await git.abortMerge(wt);
       x.s.state = 'conflict';
