@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Attachment, CliId, ConversationMode, HarborApi, HarborEvent, Id, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
@@ -48,7 +48,26 @@ export interface ServiceOptions {
 }
 
 const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
-const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+// A Map, not an object: a mime such as "constructor" or "__proto__" must never match an inherited property.
+const IMAGE_EXT = new Map<string, string>([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'], ['image/webp', 'webp']]);
+const CONVERSATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** Canonical base64 only: right alphabet and padding, and decoding then re-encoding gives the input back (no stray bits). */
+export function decodeStrictBase64(s: string): Buffer | undefined {
+  if (s.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return undefined;
+  const data = Buffer.from(s, 'base64');
+  return data.toString('base64') === s ? data : undefined;
+}
+
+/** `<data>/attachments/<conversationId>`; refuses ids that are not plain tokens and paths that would leave the attachments folder. */
+export function attachmentDir(dataRoot: string, conversationId: string): string {
+  if (typeof conversationId !== 'string' || !CONVERSATION_ID.test(conversationId)) throw new Error('Invalid conversation id.');
+  const root = resolve(dataRoot, 'attachments');
+  const dir = resolve(root, conversationId);
+  const rel = relative(root, dir);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Invalid conversation id.');
+  return dir;
+}
 export const MAX_ATTACHMENTS = 6;
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
@@ -56,12 +75,13 @@ export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export function saveAttachments(dir: string, input: { name: string; mime: string; dataBase64: string }[]): Attachment[] {
   if (input.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${MAX_ATTACHMENTS} images per message.`);
   const decoded = input.map((a) => {
-    const ext = IMAGE_EXT[a.mime];
+    const ext = IMAGE_EXT.get(a.mime);
     const name = basename(String(a.name ?? '')).slice(0, 120) || 'image';
     if (!ext) throw new Error(`"${name}" is not a supported image type (use PNG, JPEG, GIF or WebP).`);
     // Check the encoded length before decoding so an oversized payload is never allocated.
     if (typeof a.dataBase64 !== 'string' || a.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4) throw new Error(`"${name}" is larger than 10 MB.`);
-    const data = Buffer.from(a.dataBase64, 'base64');
+    const data = decodeStrictBase64(a.dataBase64);
+    if (!data) throw new Error(`"${name}" is not valid image data.`);
     if (!data.length) throw new Error(`"${name}" is empty.`);
     if (data.length > MAX_ATTACHMENT_BYTES) throw new Error(`"${name}" is larger than 10 MB.`);
     return { name, mime: a.mime, ext, data };
@@ -278,14 +298,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!c) return;
       if (c.activity && ['working', 'queued', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['working', 'queued', 'waiting'].includes(a.state))) throw new Error('Stop the running session and answer pending requests before deleting this conversation.');
       store.removeConversation(id);
-      try { rmSync(join(dataRoot, 'attachments', id), { recursive: true, force: true }); } catch { /* best effort: only Harbor's own copies */ }
+      try { rmSync(attachmentDir(dataRoot, id),{ recursive: true, force: true }); } catch { /* best effort: only Harbor's own copies */ }
       for (const k of [`lead:${id}`, `concierge:${id}`]) store.clearSession(k);
     },
     async send(conversationId, text, attachments) {
       await ready;
       if (!text.trim() && !attachments?.length) return;
       if (!store.getConversation(conversationId)) throw new Error('This conversation is no longer available.');
-      const saved = attachments?.length ? saveAttachments(join(dataRoot, 'attachments', conversationId), attachments) : [];
+      const saved = attachments?.length ? saveAttachments(attachmentDir(dataRoot, conversationId), attachments) : [];
       await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved);
     },
     async setConversationMode(conversationId, mode, goal) {
@@ -294,7 +314,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!CONVERSATION_MODES.includes(mode)) throw new Error('Unknown conversation mode.');
       const text = goal?.trim();
       if (mode === 'goal' && !text) throw new Error('Goal mode needs a goal: say what should be true when the lead is done.');
+      const previous = c.mode ?? 'default';
       store.patchConversation(conversationId, { mode, goal: mode === 'goal' ? text!.slice(0, 2000) : undefined });
+      orchestrator.modeChanged(conversationId, previous, mode);
       bus.emit({ type: 'conversation', conversation: { ...c } });
       return { ...c };
     },

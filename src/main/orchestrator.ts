@@ -1,4 +1,4 @@
-import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
@@ -114,6 +114,8 @@ export class Orchestrator {
   /** Conversations where the lead asked a question: the next user message answers it and skips the concierge. */
   private leadAsked = new Set<Id>();
   private conflictAsked = new Set<Id>();
+  /** Edit helpers already told they are held back by plan mode (one note each). */
+  private planHeldNoted = new Set<Id>();
   /** Open questions to the user. In memory only: after a restart the question text is still in the chat to answer by typing. */
   private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
   private sessionGeneration = new Map<Id, number>();
@@ -285,10 +287,13 @@ export class Orchestrator {
     if (conv.mode === 'plan' && isApproval(text)) {
       this.d.store.patchConversation(conversationId, { mode: 'default' });
       this.goAhead.add(conversationId);
+      this.planHeldNoted.clear();
+      this.pump(agent.projectId); // helpers held back by plan mode may start now
       this.post(conversationId, 'system', 'Plan approved: switching this conversation back to the default mode. The lead will carry out the plan.');
       this.emit({ type: 'conversation', conversation: { ...this.d.store.getConversation(conversationId)! } });
     }
     this.goalTurns.set(conversationId, 0);
+    this.d.store.setGoalPaused(conversationId, false); // a new message clears a goal pause
     for (const [id, q] of this.questions) if (q.conversationId === conversationId) this.questions.delete(id);
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
@@ -298,6 +303,27 @@ export class Orchestrator {
     } else {
       this.direct(agent, text, conversationId);
     }
+  }
+
+  /**
+   * The user switched a conversation's mode. Running helpers are never killed or re-permissioned: a mode only governs
+   * runs that start afterwards (plan also holds queued edit helpers back until the mode changes again).
+   */
+  modeChanged(conversationId: Id, from: ConversationMode, to: ConversationMode): void {
+    const conv = this.d.store.getConversation(conversationId);
+    if (!conv || from === to) return;
+    const helpers = this.d.store.listAgentRecords(conv.projectId).filter((x) => x.role !== 'main' && x.parentConversationId === conversationId);
+    const running = helpers.filter((x) => this.running.has(x.id)).length;
+    if (to === 'plan') {
+      this.post(conversationId, 'system', running
+        ? `Plan mode: ${running} running helper(s) continue with the permissions they started with. Helpers that start from now on are read-only, and queued edit helpers wait until you leave plan mode.`
+        : 'Plan mode: helpers that start from now on are read-only, and queued edit helpers wait until you leave plan mode.');
+    } else if (to === 'auto') {
+      this.post(conversationId, 'system', 'Auto mode applies to runs that start from now on; helpers already running keep their current permissions.');
+    }
+    if (from === 'plan') this.planHeldNoted.clear();
+    if (to === 'goal') this.d.store.setGoalPaused(conversationId, false);
+    this.pump(conv.projectId);
   }
 
   stop(agentId: Id): void {
@@ -473,7 +499,8 @@ export class Orchestrator {
     if (!out.ok) {
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
       this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The lead agent could not run: ${out.error}`, { agentId: main.id });
-      if (goalMode) this.post(conversationId, 'system', out.stopped ? 'Goal mode paused: you stopped the session. Send a message to continue toward the goal.' : 'Goal mode paused: the lead\'s turn failed.');
+      if (goalMode) this.d.store.setGoalPaused(conversationId, true);
+      if (goalMode) this.post(conversationId, 'system', out.stopped ?'Goal mode paused: you stopped the session. Send a message to continue toward the goal.' : 'Goal mode paused: the lead\'s turn failed.');
       return;
     }
     const proto = parseProtocol(out.allText ?? out.text);
@@ -501,14 +528,21 @@ export class Orchestrator {
       this.followUp(trigger.from, `The lead did not assign another helper for your request. Response: ${stripProtocol(out.text) || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
     }
     this.pump(project.id);
-    if (goalMode) this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking, created.length > 0);
+    if (goalMode) this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking);
   }
 
-  /** Goal mode: resume the lead until it reports the goal done, asks, delegates (reports resume it), or the cap is hit. */
-  private goalStep(projectId: Id, conversationId: Id, doneSummary: string | undefined, asked: boolean, delegated: boolean): void {
+  /** True while any helper of the conversation (not only this turn's) is queued, running or waiting. */
+  private helpersActive(projectId: Id, conversationId: Id): boolean {
+    return this.registerFor(projectId, conversationId).some((x) => x.state === 'queued' || x.state === 'working' || x.state === 'waiting');
+  }
+
+  /** Goal mode: resume the lead until it reports the goal done, asks, fails, waits for helpers (reports resume it), or the cap is hit. */
+  private goalStep(projectId: Id, conversationId: Id, doneSummary: string | undefined, asked: boolean): void {
+    const { store } = this.d;
     if (doneSummary !== undefined) { this.post(conversationId, 'system', `Goal reached: ${doneSummary || 'the lead reports the goal is done.'}`); return; }
-    if (asked) { this.post(conversationId, 'system', 'Goal mode paused: the lead is waiting for your answer.'); return; }
-    if (delegated) return; // helper reports resume the lead, and that turn comes back here
+    if (asked) { store.setGoalPaused(conversationId, true); this.post(conversationId, 'system', 'Goal mode paused: the lead is waiting for your answer.'); return; }
+    if (store.isGoalPaused(conversationId)) return; // a report or failure resumed the lead once; only the user restarts the loop
+    if (this.helpersActive(projectId, conversationId)) return; // the last helper's report resumes the lead, and that turn comes back here
     const n = this.goalTurns.get(conversationId) ?? 0;
     if (n >= GOAL_MAX_CONTINUATIONS) { this.post(conversationId, 'system', `Goal mode paused after ${GOAL_MAX_CONTINUATIONS} automatic continuations. Send a message to continue toward the goal.`); return; }
     this.goalTurns.set(conversationId, n + 1);
@@ -593,6 +627,13 @@ export class Orchestrator {
       }
       const pending = deps.find((x) => x.state !== 'done');
       if (pending) { if (a.state !== 'queued' || a.error !== `Waiting for "${pending.title}"`) this.setState(a, 'queued', { error: `Waiting for "${pending.title}"` }); continue; }
+      if (this.canEdit(a) && this.d.store.getConversation(a.parentConversationId)?.mode === 'plan') {
+        // Plan mode is read-only: an edit helper queued before (or despite) it waits for the mode to change.
+        const why = 'Waiting: plan mode is on (edit helpers start after you approve the plan)';
+        if (a.error !== why) this.setState(a, 'queued', { error: why });
+        if (!this.planHeldNoted.has(a.id)) { this.planHeldNoted.add(a.id); this.post(a.parentConversationId, 'system', `Plan mode: "${a.title}" stays queued until you leave plan mode.`, { agentId: a.id }); }
+        continue;
+      }
       if (this.activeCount(projectId) >= max) continue;
       if (!this.claim(a)) continue;
       this.begin(a.id);
@@ -688,11 +729,12 @@ export class Orchestrator {
   private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean }): Promise<RoutedRun> {
     const ctl = this.controllers.get(a.id) ?? new AbortController();
     // Auto mode lifts prompts and the sandbox for edit helpers only; reviewers and read-only helpers stay read-only.
-    const auto = this.d.store.getConversation(a.parentConversationId)?.mode === 'auto';
+    // Plan mode wins over everything: every helper that starts (or resumes) in it is read-only.
+    const mode = this.d.store.getConversation(a.parentConversationId)?.mode;
     return this.runRouted(a, {
       prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
       requireCli: a.pinnedCli,
-      permission: this.canEdit(a) ? (auto ? 'full' : 'edit') : 'read-only', cwd: o.cwd, signal: ctl.signal,
+      permission: mode === 'plan' || !this.canEdit(a) ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true
     });
   }
@@ -769,6 +811,7 @@ export class Orchestrator {
       const req = store.getAgent(a.helpFor);
       if (req && req.state === 'waiting') this.followUp(req, `Your requested helper "${a.title}" finished. Its report:\n${clip(a.report ?? '', 5000)}\n\nContinue your assignment.`);
     }
+    if (a.state === 'failed' && this.d.store.getConversation(parent)?.mode === 'goal') this.d.store.setGoalPaused(parent, true);
 
     this.pump(a.projectId);
     this.maybeReportToMain(a);
