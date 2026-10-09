@@ -7,11 +7,17 @@ import { streamLines } from './stream';
  * Verified against codex-cli 0.160.0: run, session id capture and event shapes. `exec resume` rejects `-s`,
  * so the sandbox is set with `-c sandbox_mode=...` for both modes.
  * Prompt is read from stdin via the `-` argument.
+ * NOT VERIFIED (`codex exec --help` could not be run when these were added): `--image` (`-i`, also on `exec resume`),
+ * `-c approval_policy="never"` and `sandbox_mode="danger-full-access"` for auto mode.
  */
 export function codexArgs(o: RunOptions): string[] {
   const a = ['exec'];
   if (o.resumeId) a.push('resume', o.resumeId);
-  a.push('--json', '--skip-git-repo-check', '-c', `sandbox_mode="${o.permission === 'edit' ? 'workspace-write' : 'read-only'}"`);
+  // `-i/--image` takes a list, so each use must be followed by another flag (never by the `-` prompt argument).
+  for (const img of o.images ?? []) a.push('--image', img);
+  const sandbox = o.permission === 'full' ? 'danger-full-access' : o.permission === 'edit' ? 'workspace-write' : 'read-only';
+  a.push('--json', '--skip-git-repo-check', '-c', `sandbox_mode="${sandbox}"`);
+  if (o.permission === 'full') a.push('-c', 'approval_policy="never"');
   if (o.model && o.model !== 'default') a.push('-m', o.model);
   a.push('-c', `model_reasoning_effort=${o.effort}`);
   a.push('-');

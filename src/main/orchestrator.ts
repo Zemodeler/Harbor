@@ -1,4 +1,4 @@
-import type { Agent, AgentRole, AgentState, CliId, Conversation, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
@@ -46,6 +46,7 @@ const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
 const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
 const TERMINAL: AgentState[] = ['done', 'failed', 'stopped'];
 const DEFAULT_TITLE = 'New conversation';
+const GOAL_MAX_CONTINUATIONS = 8;
 
 interface RoutedRun {
   ok: boolean;
@@ -68,7 +69,11 @@ interface RoutedOptions {
   needs?: Need[];
   effort?: Effort;
   retry?: boolean;
-  permission: 'read-only' | 'edit';
+  permission: 'read-only' | 'edit' | 'full';
+  /** Absolute paths of images for this turn only. */
+  images?: string[];
+  /** Pin to one CLI; routing falls back (with a note) when it is unavailable. */
+  requireCli?: CliId;
   cwd: string;
   signal: AbortSignal;
   resume: boolean;
@@ -88,6 +93,10 @@ export class Orchestrator {
   // Keyed by conversation: the main agent is shared by a project's conversations, but its context must not be.
   private notes = new Map<Id, string[]>();
   private autoTurns = new Map<Id, number>();
+  /** Automatic goal-mode continuations since the user's last message. */
+  private goalTurns = new Map<Id, number>();
+  /** Conversations whose plan the user just approved: that message continues the plan, so it skips the concierge. */
+  private goAhead = new Set<Id>();
   /** Running lead turns by conversation, so Stop can reach them and conversations never block each other. */
   private leads = new Map<Id, { ctl: AbortController; projectId: Id }>();
   private leadActive = new Map<Id, number>();
@@ -209,18 +218,28 @@ export class Orchestrator {
 
   // ------------------------------------------------------------ user input
 
-  async userMessage(conversationId: Id, text: string): Promise<void> {
+  /** `attachments` are already validated and written to disk by the service (each has a `path`). */
+  async userMessage(conversationId: Id, text: string, attachments: Attachment[] = []): Promise<void> {
     const conv = this.d.store.getConversation(conversationId);
     if (!conv) throw new Error('Unknown conversation');
     const agent = this.d.store.getAgent(conv.agentId);
     if (!agent) throw new Error('Conversation has no agent');
     if (conv.archived) throw new Error('Restore this conversation before sending a message.');
-    this.post(conversationId, 'user', text, { agentId: agent.id });
+    this.post(conversationId, 'user', text, { agentId: agent.id, ...(attachments.length ? { attachments } : {}) });
+    // A go-ahead after a plan ends plan mode: the lead now executes what it proposed.
+    if (conv.mode === 'plan' && isApproval(text)) {
+      this.d.store.patchConversation(conversationId, { mode: 'default' });
+      this.goAhead.add(conversationId);
+      this.post(conversationId, 'system', 'Plan approved: switching this conversation back to the default mode. The lead will carry out the plan.');
+      this.emit({ type: 'conversation', conversation: { ...this.d.store.getConversation(conversationId)! } });
+    }
+    this.goalTurns.set(conversationId, 0);
     for (const [id, q] of this.questions) if (q.conversationId === conversationId) this.questions.delete(id);
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
-      this.enqueueMain(agent.projectId, { kind: 'user', text }, conversationId);
+      const images = attachments.map((a) => a.path).filter((p): p is string => !!p);
+      this.enqueueMain(agent.projectId, { kind: 'user', text, ...(images.length ? { images } : {}) }, conversationId);
     } else {
       this.direct(agent, text, conversationId);
     }
@@ -284,8 +303,11 @@ export class Orchestrator {
         if (deep) {
           // "/deep" skips the front desk and gives the lead a strong model.
           plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high' };
-          trigger = { kind: 'user', text: trigger.text.slice(deep[0].length) || trigger.text };
-        } else if (this.plans.has(conversationId) && isApproval(trigger.text)) {
+          trigger = { ...trigger, text: trigger.text.slice(deep[0].length) || trigger.text };
+        } else if (trigger.images?.length) {
+          // The front desk cannot see images, so it never triages them: straight to a lead that can.
+          plan = { complexity: 'medium', needs: ['code'], ack: '' };
+        } else if ((this.plans.has(conversationId) || this.goAhead.has(conversationId)) && isApproval(trigger.text)) {
           // A go-ahead continues the last request at its size: no front-desk call, no fresh guess. A one-off "/deep" is not inherited.
           plan = { ...plan, effort: undefined };
         } else if (!this.leadAsked.has(conversationId)) {
@@ -294,7 +316,10 @@ export class Orchestrator {
           plan = c;
         } // else: this message answers the lead's own question, so there is nothing to triage
         this.plans.set(conversationId, plan);
+        // Vision is a need of this turn only; later go-ahead turns must not inherit it.
+        if (trigger.images?.length && !plan.needs.includes('vision')) plan = { ...plan, needs: [...plan.needs, 'vision'] };
       }
+      this.goAhead.delete(conversationId);
       this.leadAsked.delete(conversationId);
       await this.leadTurn(project, main, trigger, conversationId, plan, ctl.signal);
     } finally {
@@ -343,19 +368,34 @@ export class Orchestrator {
     this.notes.delete(conversationId);
     const history = this.chatHistory(conversationId, trigger.kind === 'user');
     const tier: Tier = plan.complexity === 'high' ? 'strong' : plan.complexity === 'low' ? 'cheap' : 'standard';
+    const conv = this.d.store.getConversation(conversationId);
+    const mode = conv?.mode ?? 'default';
+    const goal = mode === 'goal' ? conv?.goal : undefined;
+    const goalMode = !!goal;
     const out = await this.runRouted(main, {
-      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes }), system: LEAD_SYSTEM,
+      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
-      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), needs: plan.needs, permission: 'edit', cwd: project.path,
+      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), needs: plan.needs,
+      permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
+      images: trigger.kind === 'user' ? trigger.images : undefined,
       signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
     });
     if (!out.ok) {
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
       this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The lead agent could not run: ${out.error}`, { agentId: main.id });
+      if (goalMode) this.post(conversationId, 'system', out.stopped ? 'Goal mode paused: you stopped the session. Send a message to continue toward the goal.' : 'Goal mode paused: the lead\'s turn failed.');
       return;
     }
     const proto = parseProtocol(out.allText ?? out.text);
-    const created = this.createTasks(project, proto.delegate, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
+    let delegations = proto.delegate;
+    if (mode === 'plan') {
+      const edits = delegations.filter((t) => t.access === 'edit');
+      if (edits.length) {
+        delegations = delegations.filter((t) => t.access !== 'edit');
+        this.post(conversationId, 'system', `Plan mode: ignored ${edits.length} edit helper(s) (${edits.map((t) => t.title).join(', ')}). Approve the plan to let the lead carry it out.`);
+      }
+    }
+    const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     if (created.length) {
       this.post(conversationId, 'system', 'Delegated: ' + created.map((c, i) => `${i + 1}. ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
@@ -371,6 +411,18 @@ export class Orchestrator {
       this.followUp(trigger.from, `The lead did not assign another helper for your request. Response: ${stripProtocol(out.text) || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
     }
     this.pump(project.id);
+    if (goalMode) this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking, created.length > 0);
+  }
+
+  /** Goal mode: resume the lead until it reports the goal done, asks, delegates (reports resume it), or the cap is hit. */
+  private goalStep(projectId: Id, conversationId: Id, doneSummary: string | undefined, asked: boolean, delegated: boolean): void {
+    if (doneSummary !== undefined) { this.post(conversationId, 'system', `Goal reached: ${doneSummary || 'the lead reports the goal is done.'}`); return; }
+    if (asked) { this.post(conversationId, 'system', 'Goal mode paused: the lead is waiting for your answer.'); return; }
+    if (delegated) return; // helper reports resume the lead, and that turn comes back here
+    const n = this.goalTurns.get(conversationId) ?? 0;
+    if (n >= GOAL_MAX_CONTINUATIONS) { this.post(conversationId, 'system', `Goal mode paused after ${GOAL_MAX_CONTINUATIONS} automatic continuations. Send a message to continue toward the goal.`); return; }
+    this.goalTurns.set(conversationId, n + 1);
+    this.enqueueMain(projectId, { kind: 'goal', continuation: n + 1, max: GOAL_MAX_CONTINUATIONS }, conversationId);
   }
 
   private createTasks(project: Project, tasks: PlannedTask[], conversationId: Id, requester?: Id): AgentRecord[] {
@@ -404,7 +456,7 @@ export class Orchestrator {
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
         effort: effortFor(t.role, complexity, !!rejected), retry: rejected ? true : undefined, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
-        needs: t.needs, readOnly: t.access === 'read',
+        needs: t.needs, readOnly: t.access === 'read', pinnedCli: t.cli,
         helpFor: t.helpFor ?? requester, revision: 1, complexity,
         parentConversationId: conversationId, attempts: 0, created: Date.now(),
         // A clear edit goes straight to one implementer; its instructions are the spec.
@@ -538,9 +590,12 @@ export class Orchestrator {
   /** One CLI run for a helper (initial or follow-up), streaming into its conversation. */
   private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean }): Promise<RoutedRun> {
     const ctl = this.controllers.get(a.id) ?? new AbortController();
+    // Auto mode lifts prompts and the sandbox for edit helpers only; reviewers and read-only helpers stay read-only.
+    const auto = this.d.store.getConversation(a.parentConversationId)?.mode === 'auto';
     return this.runRouted(a, {
       prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
-      permission: this.canEdit(a) ? 'edit' : 'read-only', cwd: o.cwd, signal: ctl.signal,
+      requireCli: a.pinnedCli,
+      permission: this.canEdit(a) ? (auto ? 'full' : 'edit') : 'read-only', cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true
     });
   }
@@ -694,6 +749,7 @@ export class Orchestrator {
   private async runRouted(agent: AgentRecord, o: RoutedOptions): Promise<RoutedRun> {
     const { store, ledger } = this.d;
     const exclude: CliId[] = [];
+    let pinned = o.requireCli;
     const key = o.sessionKey ?? agent.id;
     let lastError = 'No eligible CLI is available. Open Settings to install or sign in to a supported CLI.';
     // A rate limit now cools down one model, not the CLI, so a CLI may be tried again with a cheaper model before another CLI.
@@ -701,11 +757,18 @@ export class Orchestrator {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const link = store.getSession(key);
-      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude }, {
+      const routeWith = (requireCli?: CliId) => route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude, requireCli }, {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
         verified: this.d.verified, catalog: this.d.catalog
       });
+      let decision = routeWith(pinned);
+      if (!decision && pinned) {
+        // A pin is a preference, not a requirement: never leave the helper without a model because one CLI is missing or exhausted.
+        this.post(o.conversationId, 'system', `${agent.title}: pinned CLI ${pinned} is unavailable, using normal routing.`, { agentId: agent.id });
+        pinned = undefined;
+        decision = routeWith();
+      }
       if (!decision) return { ok: false, text: '', error: attempt === 0 ? lastError : `${lastError} (no remaining CLI to fall back to)` };
       const adapter = this.d.adapterFor(decision.cli)!;
       const resumeId = o.resume && link?.cli === decision.cli ? link.sessionId : undefined;
@@ -713,7 +776,7 @@ export class Orchestrator {
       this.setState(agent, agent.state, { cli: decision.cli, model: decision.model, effort: decision.effort, attempts: attempt });
       if (agent.role === 'main') {
         const c = store.getConversation(o.conversationId);
-        if (c?.activity) store.patchConversation(c.id, { activity: { ...c.activity, cli: decision.cli, model: decision.model } });
+        if (c?.activity) store.patchConversation(c.id, { activity: { ...c.activity, cli: decision.cli, model: decision.model, complexity: o.complexity, effort: decision.effort } });
         this.sessionState(o.conversationId, 'working', o.sessionKey?.startsWith('concierge:') ? 'First pass: checking your request.' : 'Lead agent: working on your request.');
       }
       if (attempt > 0) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
@@ -726,7 +789,7 @@ export class Orchestrator {
       const details = { cli: decision.cli, model: decision.model, effort: decision.effort, reason: decision.reason };
       const t0 = Date.now();
       try {
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, systemPrompt: o.system, signal: o.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, signal: o.signal }) as AsyncIterable<Chunk>) {
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now() });
           else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
