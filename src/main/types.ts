@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, CliId, Conversation, Message, Project, Settings } from '../shared/api';
+import type { Agent, AgentResult, CliId, Conversation, GitFileChange, Message, Project, Settings } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Complexity } from './router';
 
@@ -50,8 +50,21 @@ export interface AgentRecord extends Agent {
   testedWorktree?: string;
   /** Integrator started by the user (integrateBranches): its outcome is shown to the user, not reported to the lead. */
   byUser?: boolean;
+  /** What each run committed on the helper's branch (newest last, at most 5). Evidence for rollback; reversal always uses git objects. */
+  snapshots?: TaskSnapshot[];
 }
 type Id = string;
+
+/** One recorded state of a helper branch after Harbor's checkpoint: `base..head` and the files it changed. */
+export interface TaskSnapshot {
+  revision: number;
+  base: string;
+  head: string;
+  time: number;
+  files: GitFileChange[];
+  /** `git diff --binary base head` (credential files excluded) under Harbor's data folder; evidence only. */
+  patchPath?: string;
+}
 
 export interface CheckRun { cmd: string; ok: boolean; exitCode: number | null; timedOut?: boolean; durationMs: number; /** Tail of the combined output. */ output: string }
 
