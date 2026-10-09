@@ -14,6 +14,7 @@ import { GitView } from './gitView';
 import { Orchestrator, toAgent } from './orchestrator';
 import type { ProcessKiller } from './proc';
 import { newId, Store } from './store';
+import { Journal } from './journal';
 import { reviewDirectory } from './review';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
@@ -154,8 +155,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     allow: () => store.getSettings().allowFreeReset
   });
 
+  // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
+  const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
   const orchestrator = new Orchestrator({
-    store, bus, ledger, git, worktreesRoot, ask, freeReset,
+    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal,
     getClis: () => clis,
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
