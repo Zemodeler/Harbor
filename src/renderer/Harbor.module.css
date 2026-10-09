@@ -551,7 +551,7 @@
 .mdList li::marker { color: var(--muted); }
 .mdTableWrap { overflow-x: auto; margin: 16px 0; border: 1px solid var(--line); border-radius: 8px; max-width: 100%; }
 .mdTable { border-collapse: collapse; width: 100%; font-size: .9em; line-height: 1.5; }
-.mdTable th, .mdTable td { padding: 8px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); min-width: 5.5em; }
+.mdTable th, .mdTable td { padding: 8px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); min-width: 7.5em; overflow-wrap: normal; }
 .mdTable tbody tr:last-child td { border-bottom: 0; }
 .mdTable th { background: var(--surface); font-weight: 600; white-space: nowrap; }
 .mdTable [data-align=center] { text-align: center; }

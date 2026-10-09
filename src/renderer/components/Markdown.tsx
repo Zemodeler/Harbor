@@ -14,28 +14,45 @@ function Code({ language, text }: { language: string; text: string }) {
   return <div className={s.code}><div><span>{language || 'Code'}</span><button onClick={() => void copy()} aria-label="Copy code">{status}</button></div><pre tabIndex={0}><code>{text}</code></pre></div>;
 }
 
-// Splits one table row into cells. `\|` and pipes inside `code` spans do not split; `\|` loses its backslash.
+// Splits one table row into cells. `\|` and pipes inside matched `code` spans do not split; `\|` loses its backslash.
+// A backtick only opens a code span when a closing run of the same length follows, so a stray one cannot swallow later cells.
 export function splitRow(line: string): string[] {
   const cells: string[] = [];
   let cell = '';
-  let code = false;
   const body = line.trim();
+  const framedEnd = body.endsWith('|');
   for (let i = 0; i < body.length; i++) {
     const c = body[i];
     if (c === '\\' && body[i + 1] === '|') { cell += '|'; i++; }
-    else if (c === '`') { code = !code; cell += c; }
-    else if (c === '|' && !code) { cells.push(cell); cell = ''; }
+    else if (c === '\\' && body[i + 1] === '`') { cell += '\\`'; i++; }
+    else if (c === '`') {
+      let n = 1;
+      while (body[i + n] === '`') n++;
+      const ticks = '`'.repeat(n);
+      let close = -1;
+      for (let j = body.indexOf(ticks, i + n); j >= 0; j = body.indexOf(ticks, j + 1)) {
+        let run = 0;
+        while (body[j + run] === '`') run++;
+        if (run === n && body[j - 1] !== '\\') { close = j; break; }
+        j += run - 1;
+      }
+      if (close < 0) { cell += ticks; i += n - 1; continue; }
+      cell += body.slice(i, close + n).replace(/\\\|/g, '|');
+      i = close + n - 1;
+    }
+    else if (c === '|') { cells.push(cell); cell = ''; }
     else cell += c;
   }
   cells.push(cell);
-  // A leading or trailing pipe only frames the row.
+  // A leading or trailing pipe only frames the row (a trailing escaped pipe is cell content).
   if (body.startsWith('|')) cells.shift();
-  if (body.endsWith('|') && !body.endsWith('\\|') && cells.length) cells.pop();
+  if (framedEnd && !/(^|[^\\])(\\\\)*\\\|$/.test(body) && cells.length) cells.pop();
   return cells.map(c => c.trim());
 }
 type Align = 'left' | 'center' | 'right' | undefined;
 function alignments(line: string): Align[] | null {
-  if (!line.includes('|') && !/^\s*:?-{3,}:?\s*$/.test(line)) return null;
+  // Only a piped separator counts: a bare `---` after prose is a rule, not a table.
+  if (!line.includes('|')) return null;
   const cells = splitRow(line);
   if (!cells.length || !cells.every(c => /^:?-+:?$/.test(c))) return null;
   return cells.map(c => c.startsWith(':') ? (c.endsWith(':') ? 'center' : 'left') : c.endsWith(':') ? 'right' : undefined);
@@ -48,7 +65,8 @@ type Block = { kind: 'p' | 'h'; text: string } | { kind: 'ul'; items: string[] }
   | { kind: 'table'; head: string[]; align: Align[]; rows: string[][] };
 
 export function parseBlocks(text: string): Block[] {
-  const lines = text.split('\n');
+  // Windows output arrives as CRLF (or a lone CR); fenced code is split off before this and keeps its bytes.
+  const lines = text.split(/\r\n?|\n/);
   const blocks: Block[] = [];
   let para: string[] = [];
   const flush = () => { if (para.length) blocks.push({ kind: 'p', text: para.join('\n') }); para = []; };
