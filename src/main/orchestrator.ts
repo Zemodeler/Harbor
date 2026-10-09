@@ -10,14 +10,14 @@ import { breakCycles } from './graph';
 import { Journal, journalDigest, type JournalEntry, type JournalKind } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
-  type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type SessionPeer
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
+  type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type SessionPeer
 } from './prompts';
 import { buildHandoff, type HandoffEvidence } from './handoff';
 import { reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
-import { DEFAULT_CONCURRENCY, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
+import { DEFAULT_CONCURRENCY, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
 import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
@@ -95,13 +95,18 @@ interface RoutedRun {
   error?: string;
   stopped?: boolean;
   decision?: RouteDecision;
-  /** Some attempt produced output, so a CLI took the prompt (even if the run then failed). */
+  /**
+   * A CLI may have taken the prompt: some attempt produced output, or was stopped after the prompt was handed over (a stop
+   * says nothing about how far the CLI got). Only a failure without any output counts as not started: adapters report a CLI
+   * that could not be spawned that way, but cannot tell it apart from one that read its stdin and died silently.
+   */
   started?: boolean;
 }
 
 /**
- * Helper results carried by one queued lead turn. `marks` and the trigger's items are snapshots taken when queued, so a
- * newer revision of a helper is never settled by this batch. `prev` is each result's mark at that time.
+ * Helper results carried by one lead turn: a reports trigger's items (snapshots taken when queued), plus held reports added
+ * when the turn starts. A newer revision or incarnation of a helper is never settled by this batch. `prev` is each
+ * result's mark when it joined.
  */
 interface ReportBatch {
   marks: ReportMark[];
@@ -307,7 +312,10 @@ export class Orchestrator {
     for (const p of this.d.store.listProjects()) this.pump(p.id);
   }
 
-  /** Tells each conversation once which helper reports may not have reached its lead (an interrupted turn, or an upgraded file). */
+  /**
+   * Tells each conversation once which helper reports may not have reached its lead (an interrupted turn, or an upgraded
+   * file). Nothing starts here: the reports wait for the lead's next turn, whatever starts it.
+   */
   private noticeUncertainReports(): void {
     const byConv = new Map<Id, AgentRecord[]>();
     for (const a of this.d.store.allAgentRecords()) {
@@ -316,7 +324,7 @@ export class Orchestrator {
       byConv.set(a.parentConversationId, [...(byConv.get(a.parentConversationId) ?? []), a]);
     }
     for (const [conv, items] of byConv) {
-      this.post(conv, 'system', `Harbor cannot tell whether the lead received ${items.length} helper report(s): ${reportRefs(items)}. Each report is kept and goes to the lead with its next helper report, marked as possibly seen already. Nothing is re-run.`);
+      this.post(conv, 'system', `Harbor cannot tell whether the lead received ${items.length} helper report(s): ${reportRefs(items)}. Each report is kept and goes to the lead with its next turn (your next message to it, or its next helper report), marked as possibly seen already. Nothing is re-run.`);
       this.d.store.noticeReports(items);
     }
   }
@@ -669,17 +677,29 @@ export class Orchestrator {
     const headBefore = await this.d.git.head(project.path).catch(() => undefined);
     // Only used when the lead's native session cannot be resumed (new conversation, lost session, or another CLI took over).
     const handoff = await this.handoffFor(project, conversationId).catch(() => '');
-    const out = await this.runRouted(main, {
-      prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox }), system: LEAD_SYSTEM,
-      contextIfNoResume: [handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n') || undefined,
-      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli,
-      permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
-      images: trigger.kind === 'user' ? trigger.images : undefined,
-      signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true,
-      onAttempt: batch && (() => this.reportsAttempted(batch))
-    });
-    // Only a turn that finished is evidence the lead read its reports; one that produced output and then ended is not.
-    if (batch) this.settleReports(batch, out.ok ? 'confirmed' : out.started ? 'interrupted' : 'notStarted', conversationId);
+    // Whatever started this turn (a user message, a goal step, a report, a help request, a peer), it also carries the
+    // reports Harbor still holds for this conversation, settled with the turn like a reports trigger's own.
+    const pick = this.heldReports(project.id, conversationId);
+    const turn: ReportBatch = batch ?? { marks: [], prev: new Map(), started: false, settled: false };
+    pick.items.forEach((x) => this.reported.add(reportKey(x)));
+    joinBatch(turn, pick.items);
+    const held: HeldReports = { items: pick.items.map(reportSnapshot), omitted: { count: pick.omitted.length, refs: pick.omitted.slice(0, MAX_HELD_REFS).map(resultRef) } };
+    let out: RoutedRun;
+    try {
+      out = await this.runRouted(main, {
+        prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held }), system: LEAD_SYSTEM,
+        contextIfNoResume: [handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n') || undefined,
+        role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli,
+        permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
+        images: trigger.kind === 'user' ? trigger.images : undefined,
+        signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true,
+        onAttempt: turn.marks.length ? () => this.reportsAttempted(turn) : undefined
+      });
+      // Only a turn that finished is evidence the lead read its reports; one that took the prompt and then ended is not.
+      this.settleReports(turn, out.ok ? 'confirmed' : out.started ? 'interrupted' : 'notStarted', conversationId, !out.ok && !out.stopped);
+    } finally {
+      if (!turn.settled) this.settleReports(turn, turn.started ? 'interrupted' : 'notStarted', conversationId);
+    }
     await this.detectLeadMerge(project, main, conversationId, headBefore);
     if (!out.ok) {
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
@@ -1164,13 +1184,25 @@ export class Orchestrator {
       this.post(a.parentConversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
       return;
     }
-    const items = open.filter((x) => { const d = deliveryOf(x); return !d || UNCERTAIN.includes(d.status); });
-    items.forEach((x) => this.reported.add(reportKey(x)));
-    const batch: ReportBatch = {
-      marks: items.map(({ id, revision, state }) => ({ id, revision, state })),
-      prev: new Map(items.map((x) => [x.id, x.reportDelivery && structuredClone(x.reportDelivery)])), started: false, settled: false
-    };
-    this.enqueueMain(a.projectId, { kind: 'reports', items: items.map(reportSnapshot) }, a.parentConversationId, batch);
+    // Uncertain results join when the turn starts (`heldReports`), within the same bound as any other turn.
+    fresh.forEach((x) => this.reported.add(reportKey(x)));
+    const batch: ReportBatch = { marks: [], prev: new Map(), started: false, settled: false };
+    joinBatch(batch, fresh);
+    this.enqueueMain(a.projectId, { kind: 'reports', items: fresh.map(reportSnapshot) }, a.parentConversationId, batch);
+  }
+
+  /**
+   * Reports of this conversation that a lead turn should still carry: never delivered (a turn that could not start, a
+   * dropped turn, paused coordination, a helper that finished while others ran) or uncertain (an interrupted turn, an
+   * upgraded file). Stopped results never sent are left out, as a stop-all batch is: the register lists them. Ones already
+   * travelling with a queued or running turn are left out too. Bounded; the rest stay held for a later turn.
+   */
+  private heldReports(projectId: Id, conversationId: Id): { items: AgentRecord[]; omitted: AgentRecord[] } {
+    return pickHeld(this.registerFor(projectId, conversationId).filter((x) => {
+      if (x.byUser || !TERMINAL.includes(x.state) || this.reported.has(reportKey(x))) return false;
+      const d = deliveryOf(x);
+      return d ? UNCERTAIN.includes(d.status) : x.state !== 'stopped';
+    }));
   }
 
   /** Before each attempt of the turn: from here a crash leaves these results uncertain, never silently delivered or lost. */
@@ -1181,22 +1213,27 @@ export class Orchestrator {
   }
 
   /**
-   * How a reports turn ended. `confirmed`: it finished. `notStarted`: no CLI took the prompt (no eligible CLI, spawn failure,
-   * dropped turn), so the results are pending again exactly as before. `interrupted`: a CLI took it but the turn did not
-   * finish; the results stay `attempted`, go with the next batch flagged as possibly seen, and the user is told.
+   * How a turn carrying reports ended. `confirmed`: it finished. `notStarted`: no CLI took the prompt (no eligible CLI,
+   * spawn failure, dropped turn), so the results are pending again exactly as before; `tell` says so to the user.
+   * `interrupted`: a CLI may have taken it (output, or a stop after hand-over) but the turn did not finish; the results stay
+   * `attempted` and the user is told. Either way they are held for the lead's next turn, whatever starts it.
    */
-  private settleReports(batch: ReportBatch, outcome: 'confirmed' | 'notStarted' | 'interrupted', conversationId: Id): void {
+  private settleReports(batch: ReportBatch, outcome: 'confirmed' | 'notStarted' | 'interrupted', conversationId: Id, tell = false): void {
     if (batch.settled) return;
     batch.settled = true;
+    if (!batch.marks.length) return;
     const { store } = this.d;
     if (outcome === 'confirmed') { store.markReports(batch.marks, 'confirmed'); return; }
     for (const m of batch.marks) this.reported.delete(reportKey(m));
+    const refs = markRefs(batch.marks, (id) => store.getAgent(id)?.title);
+    const next = "the lead's next turn (your next message to it, or its next helper report)";
     if (outcome === 'notStarted') {
       if (batch.started) store.restoreReports(batch.marks.map((mark) => ({ mark, prev: batch.prev.get(mark.id) })));
+      // A dropped turn (the user stopped the session) needs no notice; a turn that could not run does.
+      if (tell) this.post(conversationId, 'system', `${batch.marks.length} helper report(s) did not reach the lead: ${refs}. Harbor keeps them and sends them with ${next}.`);
       return;
     }
-    const refs = batch.marks.map((m) => `${store.getAgent(m.id)?.title ?? 'helper'} (id=${m.id}, ${m.state})`).join(', ');
-    this.post(conversationId, 'system', `The lead's turn ended before it finished with ${batch.marks.length} helper report(s): ${refs}. Harbor cannot tell whether the lead read them, so they go to it again with its next helper report, marked as possibly seen. Nothing is re-run.`);
+    this.post(conversationId, 'system', `The lead's turn ended before it finished with ${batch.marks.length} helper report(s): ${refs}. Harbor cannot tell whether the lead read them, so it sends them again with ${next}, marked as possibly seen. Nothing is re-run.`);
     store.noticeReports(batch.marks);
   }
 
@@ -1865,7 +1902,8 @@ export class Orchestrator {
       this.emit({ type: 'usage', windows: ledger.windows(this.d.getClis().map((c) => c.id)) });
       if (rateLimited) void this.d.freeReset?.maybePropose(decision.cli).catch(() => {});
       if (ok) return { ok: true, text: final || text, allText: text, decision, started: true };
-      if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped', started };
+      // The prompt was already handed to the adapter: a stop, even a silent one, may have come after the CLI read it.
+      if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped', started: true };
       lastError = `${decision.cli} failed${rateLimited ? ' (rate limit)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
       // A rate limit is held against the model in the ledger (it may be a per-model cap); anything else is a CLI-level failure.
       if (!rateLimited) exclude.push(decision.cli);
@@ -1877,13 +1915,54 @@ export class Orchestrator {
 
 // ---------------------------------------------------------------- helpers
 
-const reportKey = (a: ReportMark): string => `${a.id}:${a.revision}:${a.state}`;
-/** The delivery mark of exactly this result (revision and state), if any. */
-const deliveryOf = (a: AgentRecord): ReportDelivery | undefined =>
-  a.reportDelivery?.revision === a.revision && a.reportDelivery.state === a.state ? a.reportDelivery : undefined;
+const reportKey = (a: ReportMark | AgentRecord): string => {
+  const m = 'role' in a ? currentResult(a) : a;
+  return `${m.id}:${m.revision}:${m.gen ?? 0}:${m.state}`;
+};
+/** The delivery mark of exactly this result (revision, delivery generation and state), if any. */
+const deliveryOf = (a: AgentRecord): ReportDelivery | undefined => {
+  const d = a.reportDelivery;
+  return d && d.revision === a.revision && d.state === a.state && (d.gen ?? 0) === (a.reportGen ?? 0) ? d : undefined;
+};
 /** The lead may or may not have read these. */
 const UNCERTAIN: ReportDelivery['status'][] = ['attempted', 'unknown'];
-const reportRefs = (items: AgentRecord[]): string => items.map((a) => `${a.title} (id=${a.id}, ${a.state})`).join(', ');
+const resultRef = (a: AgentRecord): string => `${a.title} (id=${a.id}, ${a.state})`;
+/** References in notices are bounded too: a long backlog must not flood the transcript. */
+const MAX_HELD_REFS = 10;
+const reportRefs = (items: AgentRecord[]): string =>
+  items.slice(0, MAX_HELD_REFS).map(resultRef).join(', ') + (items.length > MAX_HELD_REFS ? `, and ${items.length - MAX_HELD_REFS} more` : '');
+const markRefs = (marks: ReportMark[], title: (id: Id) => string | undefined): string =>
+  marks.slice(0, MAX_HELD_REFS).map((m) => `${title(m.id) ?? 'helper'} (id=${m.id}, ${m.state})`).join(', ') + (marks.length > MAX_HELD_REFS ? `, and ${marks.length - MAX_HELD_REFS} more` : '');
+
+/** Results join a batch with their current mark, so a turn that never reaches a CLI can put it back. */
+function joinBatch(batch: ReportBatch, items: AgentRecord[]): void {
+  for (const x of items) {
+    batch.marks.push(currentResult(x));
+    batch.prev.set(x.id, x.reportDelivery && structuredClone(x.reportDelivery));
+  }
+}
+
+/** Held reports one turn carries at most, by count and by report text (each report is clipped to REPORT_CHARS anyway). */
+export const MAX_HELD_REPORTS = 4;
+export const MAX_HELD_CHARS = 16000;
+
+/**
+ * Which held reports go now: never-delivered ones first, then interrupted, then upgraded-file ones, oldest first, within
+ * the bounds (the first always fits). The rest stay held, so later turns drain the backlog.
+ */
+export function pickHeld(held: AgentRecord[]): { items: AgentRecord[]; omitted: AgentRecord[] } {
+  const rank = (a: AgentRecord) => { const s = deliveryOf(a)?.status; return !s ? 0 : s === 'attempted' ? 1 : 2; };
+  const sorted = [...held].sort((x, y) => rank(x) - rank(y) || x.created - y.created);
+  const items: AgentRecord[] = [], omitted: AgentRecord[] = [];
+  let chars = 0;
+  for (const a of sorted) {
+    const size = Math.min((a.report ?? a.error ?? '').length, REPORT_CHARS);
+    if (items.length && (items.length >= MAX_HELD_REPORTS || chars + size > MAX_HELD_CHARS)) { omitted.push(a); continue; }
+    items.push(a);
+    chars += size;
+  }
+  return { items, omitted };
+}
 
 /** The result as queued: later changes to the helper must not change what this turn reports. Uncertain ones say so. */
 function reportSnapshot(a: AgentRecord): AgentRecord {
