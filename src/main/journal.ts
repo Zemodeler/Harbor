@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Id } from '../shared/api';
 
@@ -11,26 +11,50 @@ export type JournalKind = 'protocol' | 'helper-failed' | 'lead-failed' | 'fallba
 export interface JournalEntry { time: number; kind: JournalKind; projectId: Id; conversationId?: Id; agentId?: Id; text: string }
 
 const KEEP = 1000;
+/** When the file grows past this, it moves to `<file>.1` (replacing the previous rotation) and a new file starts. */
+export const JOURNAL_MAX_BYTES = 512 * 1024;
+const TEXT_MAX = 500;
+
+/** A line from disk is trusted only if it has the fields list() and the digest read; anything else is skipped. */
+function parseEntry(line: string): JournalEntry | undefined {
+  try {
+    const v = JSON.parse(line) as Partial<JournalEntry> | null;
+    if (!v || typeof v !== 'object') return undefined;
+    if (typeof v.time !== 'number' || typeof v.kind !== 'string' || typeof v.projectId !== 'string' || typeof v.text !== 'string') return undefined;
+    return v as JournalEntry;
+  } catch { return undefined; }
+}
 
 export class Journal {
   private entries: JournalEntry[] = [];
+  /** A torn write from a crash leaves a partial last line; start the next entry on a fresh line so it is not lost with it. */
+  private needsNewline = false;
 
   /** file undefined => in memory only (tests). */
-  constructor(private file?: string) {
+  constructor(private file?: string, private maxBytes = JOURNAL_MAX_BYTES) {
     if (!file || !existsSync(file)) return;
     try {
-      this.entries = readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-KEEP).flatMap((l) => {
-        try { return [JSON.parse(l) as JournalEntry]; } catch { return []; }
+      const raw = readFileSync(file, 'utf8');
+      this.needsNewline = raw.length > 0 && !raw.endsWith('\n');
+      this.entries = raw.split(/\r?\n/).filter(Boolean).slice(-KEEP).flatMap((l) => {
+        const e = parseEntry(l);
+        return e ? [e] : [];
       });
     } catch { /* unreadable journal: start fresh in memory, keep the file */ }
   }
 
   add(e: Omit<JournalEntry, 'time'>): void {
-    const entry: JournalEntry = { time: Date.now(), ...e, text: e.text.slice(0, 500) };
+    const entry: JournalEntry = { time: Date.now(), ...e, text: e.text.slice(0, TEXT_MAX) };
     this.entries.push(entry);
     if (this.entries.length > KEEP) this.entries.splice(0, this.entries.length - KEEP);
     if (!this.file) return;
-    try { mkdirSync(dirname(this.file), { recursive: true }); appendFileSync(this.file, JSON.stringify(entry) + '\n'); } catch { /* journaling must never break a run */ }
+    try {
+      mkdirSync(dirname(this.file), { recursive: true });
+      // renameSync replaces an existing `<file>.1` on Windows, so one rotation is kept.
+      if (existsSync(this.file) && statSync(this.file).size > this.maxBytes) renameSync(this.file, `${this.file}.1`);
+      appendFileSync(this.file, (this.needsNewline ? '\n' : '') + JSON.stringify(entry) + '\n');
+      this.needsNewline = false;
+    } catch { /* journaling must never break a run */ }
   }
 
   list(projectId: Id): JournalEntry[] { return this.entries.filter((e) => e.projectId === projectId); }
