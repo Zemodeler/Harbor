@@ -65,6 +65,8 @@ Behavior the core already provides that the UI should surface or respect:
 12. **Git view** (contract 0.1.8): done in `components/GitPanel.tsx` (header button "Git", also in quick actions). It shows branches, helper branches with their agent, worktrees, a commit graph (`gitGraph.ts`) and changes with inline diffs, and it is read-only. Open UI follow-ups: a visual pass in the real app, keyboard navigation through commit rows, and virtualising very long histories (it pages 300 commits at a time).
 13. **Resume action** (contract 0.1.9): for an agent with `state: 'stopped'` (not `main`) show a "Resume" button calling `resumeAgentSession(agentId)`. It rejects when the agent has no saved session; show the error text and suggest sending a message instead.
 
+13. **Outdated verification** (contract 0.1.9): `Agent.testedCommit` is the commit a reviewer examined and `Agent.outdated === true` means the reviewed branch has moved since. Show an "outdated" badge on that reviewer's verdict and do not present it as covering the current branch head.
+
 ## API requests (from UI)
 
 - Add assignment/conversation ownership to Agent (or a conversation-scoped listAgents API). The current contract identifies parent agents but cannot distinguish assignments belonging to different main-agent conversations in one project. The UI currently shows all children of the selected main agent.
