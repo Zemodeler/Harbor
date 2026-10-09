@@ -14,7 +14,7 @@ export interface GitFileChange { path: string; status: 'added'|'modified'|'delet
 export interface GitTarget { branch?: string; commit?: string }   // neither = uncommitted changes in the project folder
 export type AgentRole ='main' | 'planner' | 'implementer' | 'reviewer' | 'other';
 export type AgentState = 'queued' | 'working' | 'waiting' | 'done' | 'failed' | 'stopped';
-export interface Agent { id: Id; projectId: Id; parentId?: Id; role: AgentRole; title: string; state: AgentState; cli: CliId; model: string; effort: 'low'|'medium'|'high'; worktree?: string; summary?: string; conversationId?: Id }   // conversationId = the main-agent conversation that created this subagent
+export interface Agent { id: Id; projectId: Id; parentId?: Id; role: AgentRole; title: string; state: AgentState; cli: CliId; model: string; effort: 'low'|'medium'|'high'; worktree?: string; summary?: string; conversationId?: Id; priority?: number; paused?: boolean }   // conversationId = the main-agent conversation that created this subagent; priority = higher starts first (absent = 0); paused = will not start while queued
 export interface Message { id: Id; conversationId: Id; role: 'user'|'assistant'|'system'|'tool'; text: string; time: number; agentId?: Id; details?: { cli: CliId; model: string; effort: string; reason: string } }
 export interface UsageWindow { cli: CliId; label: string; usedPct: number; resetsAt?: number; freeResetAvailable?: boolean; period?: 'session'|'weekly'; source?: 'reported'|'estimated'; model?: string; projectedPct?: number }
 export interface Settings { routing: 'auto'|'manual'; cliOverrides: Record<CliId,{enabled:boolean}>; allowFreeReset: 'ask'|'never'; desktopNotifications?: boolean }
@@ -41,7 +41,8 @@ export interface HarborApi {
  getGitChanges(projectId: Id, target?: GitTarget): Promise<GitFileChange[]>;   // branch = since its merge-base with base, plus its worktree's uncommitted work
  getGitDiff(projectId: Id, path: string, target?: GitTarget): Promise<string>;
  listMessages(conversationId: Id): Promise<Message[]>; send(conversationId: Id, text: string): Promise<void>;
- listAgents(projectId: Id): Promise<Agent[]>; openAgentConversation(agentId: Id): Promise<Conversation>; stopAgent(agentId: Id): Promise<void>;
+ listAgents(projectId: Id): Promise<Agent[]>; openAgentConversation(agentId: Id): Promise<Conversation>; stopAgent(agentId: Id): Promise<void>;   // also cancels a queued assignment
+ setAgentPriority(agentId: Id, priority: number): Promise<void>; pauseAgent(agentId: Id): Promise<void>; resumeAgent(agentId: Id): Promise<void>;   // pause only holds queued work back; a running agent keeps running
  getUsage(): Promise<UsageWindow[]>;
  getSettings(): Promise<Settings>; setSettings(s: Partial<Settings>): Promise<Settings>;
  answerPermission(requestId: Id, allow: boolean): Promise<void>;

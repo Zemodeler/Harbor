@@ -46,6 +46,8 @@ Next:
 
 ## UI requests (src/renderer — owned by the UI engineer)
 
+- Queue controls (contract 0.1.9): per queued agent show Pause/Resume (`pauseAgent`/`resumeAgent`, `Agent.paused`), a priority control or "do this next" (`setAgentPriority`, `Agent.priority`, higher first), and Cancel (existing `stopAgent`). Add them to `mockApi.ts` too.
+
 Behavior the core already provides that the UI should surface or respect:
 
 1. **Add project**: call `addProject()` with no argument; the main process shows the native folder dialog and returns `null` on cancel.
