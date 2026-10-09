@@ -1,21 +1,34 @@
 import { join } from 'node:path';
-import { app, BrowserWindow, dialog, Notification, shell } from 'electron';
+import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, shell, Tray } from 'electron';
 import { registerIpc } from './ipc';
 import { readCodexLimits } from './codexLimits';
 import { createHarborService } from './service';
+import { shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
 
 let win: BrowserWindow | undefined;
+let quitting = false;
 
-function createWindow(): void {
+function iconPath(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico');
+}
+
+function createWindow(hideOnClose: () => boolean): void {
   win = new BrowserWindow({
     width: 1280, height: 820, minWidth: 420, minHeight: 480,
     title: 'Harbor',
-    icon: app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico'),
+    icon: iconPath(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: false
     }
   });
+  const window = win;
+  window.on('close', event => {
+    if (!hideOnClose()) return;
+    event.preventDefault();
+    window.hide();
+  });
+  window.on('closed', () => { if (win === window) win = undefined; });
   if (process.env['ELECTRON_RENDERER_URL']) void win.loadURL(process.env['ELECTRON_RENDERER_URL']);
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
 }
@@ -33,9 +46,47 @@ app.whenReady().then(() => {
       return r.canceled ? undefined : r.filePaths[0];
     }
   });
+  let tray: Tray | undefined;
+  const openWindow = (): void => {
+    if (!win) createWindow(hideOnClose);
+    if (win?.isMinimized()) win.restore();
+    win?.show();
+    win?.focus();
+  };
+  const syncTray = (): void => {
+    if (quitting) return;
+    if (service.store.getSettings().keepRunningInBackground === true) {
+      if (!tray) {
+        const icon = nativeImage.createFromPath(iconPath());
+        tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+        tray.setContextMenu(Menu.buildFromTemplate(trayMenuModel().map(item => ({
+          label: item.label, click: item.action === 'open' ? openWindow : () => app.quit()
+        }))));
+        tray.on('double-click', openWindow);
+      }
+      tray.setToolTip(trayTooltip(service.store.allAgentRecords()));
+    } else if (tray) {
+      // Removing the only way back to a hidden window would strand the user.
+      if (win && !win.isVisible()) openWindow();
+      tray.destroy();
+      tray = undefined;
+    }
+  };
+  const hideOnClose = (): boolean => {
+    if (!shouldHideOnClose(service.store.getSettings(), quitting)) return false;
+    syncTray();
+    return true;
+  };
+  const setSettings = service.setSettings;
+  service.setSettings = async patch => {
+    const settings = await setSettings(patch);
+    syncTray();
+    return settings;
+  };
   registerIpc(service, () => win?.webContents);
   // A question must not wait unseen behind other windows: bring Harbor forward (the pop-up itself is in the renderer).
   service.onEvent((e) => {
+    if (e.type === 'agent' || e.type === 'conversation') syncTray();
     if (!win) return;
     if (service.store.getSettings().desktopNotifications && !win.isFocused() && Notification.isSupported()) {
       const conversation = e.type === 'conversation' ? e.conversation : undefined;
@@ -52,9 +103,15 @@ app.whenReady().then(() => {
     if (win.isMinimized()) win.restore();
     if (!win.isFocused()) { win.show(); win.flashFrame(true); win.once('focus', () => win?.flashFrame(false)); }
   });
-  app.on('before-quit', () => service.shutdown());
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  app.on('before-quit', () => {
+    quitting = true;
+    service.shutdown();
+    tray?.destroy();
+    tray = undefined;
+  });
+  createWindow(hideOnClose);
+  syncTray();
+  app.on('activate', openWindow);
 });
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
