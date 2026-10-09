@@ -72,7 +72,10 @@ const MAX_SNAPSHOTS = 5;
 
 export interface OrphanSweep { killed: number[]; skipped: number[] }
 
-const RESUME_PROMPT = 'Harbor was interrupted while you were working and has restarted. Continue your assignment from your session. First check the current state (git status and git log in your worktree, and any files you were changing). Do not repeat steps that already completed, in particular commits, pushes, installs, or any other action with external effects; do only what is still missing, then report.';
+/** The error of an agent `recover()` stopped; persisted, so it also marks restart-stopped agents after a later restart. */
+const RESTART_ERROR = 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.';
+
+const RESUME_PROMPT ='Harbor was interrupted while you were working and has restarted. Continue your assignment from your session. First check the current state (git status and git log in your worktree, and any files you were changing). Do not repeat steps that already completed, in particular commits, pushes, installs, or any other action with external effects; do only what is still missing, then report.';
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
 const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
@@ -262,14 +265,18 @@ export class Orchestrator {
     for (const p of this.d.store.listProjects()) for (const c of this.d.store.listConversations(p.id)) {
       if (c.activity && ['working', 'queued'].includes(c.activity.state)) this.sessionState(c.id, 'stopped', 'Harbor restarted. Send a message to continue.');
     }
+    // The pump below must not fail dependents of these agents (or start a lead turn): they wait until the user resumes or stops.
     for (const a of this.d.store.allAgentRecords()) {
-      if (a.state === 'working') {
-        this.setState(a, 'stopped', { error: 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.' });
-      }
+      if (a.state === 'working') this.setState(a, 'stopped', { error: RESTART_ERROR });
       if (a.role === 'main') this.setState(a, 'waiting');
     }
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     for (const p of this.d.store.listProjects()) this.pump(p.id);
+  }
+
+  /** Stopped by a restart (not by the user), and not resumed since: its dependents keep waiting instead of failing. */
+  private restartStopped(a: AgentRecord): boolean {
+    return a.state === 'stopped' && a.error === RESTART_ERROR;
   }
 
   /**
@@ -595,9 +602,12 @@ export class Orchestrator {
     } catch { /* detection must never break a lead turn */ }
   }
 
-  /** True while any helper of the conversation (not only this turn's) is queued, running or waiting. */
+  /**
+   * True while any helper of the conversation (not only this turn's) is queued, running or waiting. Integrations and
+   * rollbacks the user started are not the lead's work and never report to it, so they do not count.
+   */
   private helpersActive(projectId: Id, conversationId: Id): boolean {
-    return this.registerFor(projectId, conversationId).some((x) => x.state === 'queued' || x.state === 'working' || x.state === 'waiting');
+    return this.registerFor(projectId, conversationId).some((x) => !x.byUser && (x.state === 'queued' || x.state === 'working' || x.state === 'waiting'));
   }
 
   /** Goal mode: resume the lead until it reports the goal done, asks, fails, waits for helpers (reports resume it), or the cap is hit. */
@@ -633,7 +643,7 @@ export class Orchestrator {
         for (const s of sources) {
           deps.add(s);
           for (const u of tasks) if (u.role === 'reviewer' && u.dependsOn.map(resolve).includes(s)) deps.add(refToId.get(u.ref)!);
-          for (const r of store.listAgentRecords(project.id)) if (r.role === 'reviewer' && r.dependsOn.includes(s)) deps.add(r.id);
+          for (const r of store.listAgentRecords(project.id)) if (r.role === 'reviewer' && r.dependsOn.includes(s) && !TERMINAL.includes(r.state)) deps.add(r.id);
         }
         deps.delete(id);
       }
@@ -699,14 +709,23 @@ export class Orchestrator {
       if (this.running.has(a.id)) continue;
       if (a.paused) continue;
       const deps = a.dependsOn.map((id) => byId.get(id)).filter((x): x is AgentRecord => !!x);
-      const bad = deps.find((x) => x.state === 'failed' || x.state === 'stopped');
+      // An integrator waits for reviewers only so its gate sees final verdicts: a failed or stopped review is settled, and the
+      // gate (latest verdict on the current head) decides. Work stopped by a restart is not settled: it waits to be resumed.
+      const settled = (x: AgentRecord) => !!a.integration && x.role === 'reviewer' && TERMINAL.includes(x.state) && !this.restartStopped(x);
+      const bad = deps.find((x) => (x.state === 'failed' || x.state === 'stopped') && !settled(x) && !this.restartStopped(x));
       if (bad) {
         this.setState(a, 'failed', { error: `Blocked: dependency "${bad.title}" ${bad.state}. Nothing was run.` });
         this.finished(a);
         continue;
       }
-      const pending = deps.find((x) => x.state !== 'done');
-      if (pending) { if (a.state !== 'queued' || a.error !== `Waiting for "${pending.title}"`) this.setState(a, 'queued', { error: `Waiting for "${pending.title}"` }); continue; }
+      const pending = deps.find((x) => x.state !== 'done' && !settled(x));
+      if (pending) {
+        const why = this.restartStopped(pending)
+          ? `Waiting for "${pending.title}", which stopped when Harbor restarted: resume it, or stop this agent`
+          : `Waiting for "${pending.title}"`;
+        if (a.state !== 'queued' || a.error !== why) this.setState(a, 'queued', { error: why });
+        continue;
+      }
       if (this.canEdit(a) && this.d.store.getConversation(a.parentConversationId)?.mode === 'plan') {
         // Plan mode is read-only: an edit helper queued before (or despite) it waits for the mode to change.
         const why = 'Waiting: plan mode is on (edit helpers start after you approve the plan)';
@@ -826,7 +845,7 @@ export class Orchestrator {
   /** Flag verification of a branch as outdated once its head differs from the commit that was tested. */
   private markOutdated(projectId: Id, worktree: string, head: string): void {
     for (const x of this.d.store.listAgentRecords(projectId)) {
-      if (x.testedWorktree !== worktree || !x.testedCommit) continue;
+      if (!x.testedWorktree || normPath(x.testedWorktree) !== normPath(worktree) || !x.testedCommit) continue;
       const outdated = x.testedCommit !== head;
       if (x.outdated === outdated) continue;
       x.outdated = outdated;
@@ -968,7 +987,8 @@ export class Orchestrator {
   /** Resume the lead only when its judgement is needed: planner done, any failure, or all work finished. */
   private maybeReportToMain(a: AgentRecord): void {
     const { store } = this.d;
-    const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main' && x.parentConversationId === a.parentConversationId);
+    // User-started integrations and rollbacks are left out: they never report, so they must not hold back the lead's report either.
+    const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main' && !x.byUser && x.parentConversationId === a.parentConversationId);
     const active = agents.some((x) => x.state === 'queued' || x.state === 'working' || x.state === 'waiting');
     const needsMain = a.role === 'planner' || a.state === 'failed' || !active;
     if (!needsMain) return;
@@ -1007,7 +1027,8 @@ export class Orchestrator {
       return s;
     });
     const deps = new Set<Id>();
-    for (const s of sources) { deps.add(s.id); for (const r of this.reviewersOf(projectId, s)) deps.add(r.id); }
+    // Only reviews still in progress are waited for; finished ones (and old failed ones) are judged by the gate at run time.
+    for (const s of sources) { deps.add(s.id); for (const r of this.reviewersOf(projectId, s)) if (!TERMINAL.includes(r.state)) deps.add(r.id); }
     const title = `Integrate ${sources.length === 1 ? `"${clip(sources[0]!.title, 40)}"` : `${sources.length} branches`}`;
     const rec: AgentRecord = {
       id: newId(), projectId, parentId: store.mainAgent(projectId)?.id, role: 'other', title, state: 'queued', cli: 'harbor', model: 'git', effort: 'low',
@@ -1087,14 +1108,16 @@ export class Orchestrator {
     const refuse = (why: string) => end('failed', `Integration refused. Nothing was merged.\n${why}`, `Refused: ${why}`);
 
     if (!(await git.isRepoWithCommits(project.path))) return refuse('the project folder is not a git repository with commits.');
-    // 1. Target and base. A re-run keeps the base its integration branch was built on.
-    let target = integ.target, base = integ.base;
-    if (!a.worktree || !base) {
-      target = target ?? await git.currentBranch(project.path);
-      if (!target) return refuse('the project folder has a detached HEAD; name a target branch.');
-      base = await git.branchHead(project.path, target);
-      if (!base) return refuse(`"${target}" is not an existing local branch.`);
-    }
+    // 1. Target (as the ref is really spelled: on Windows "Main" reaches "main") and base. A re-run keeps the base its
+    // integration branch was built on while the target is still there; once the target moved it starts fresh from the new head.
+    const named = integ.target ?? await git.currentBranch(project.path);
+    if (!named) return refuse('the project folder has a detached HEAD; name a target branch.');
+    const target = await git.resolveBranch(project.path, named);
+    if (!target) return refuse(`"${named}" is not an existing local branch.`);
+    const targetHead = await git.branchHead(project.path, target);
+    if (!targetHead) return refuse(`"${target}" is not an existing local branch.`);
+    const rebase = !!a.worktree && !!integ.base && integ.base !== targetHead;
+    const base = a.worktree && integ.base && !rebase ? integ.base : targetHead;
     // 2. Gate every source before any git write.
     const items = integ.sources.map((s) => ({ s, agent: store.getAgent(s.agentId) }));
     const gates = await Promise.all(items.map((x) => this.gateSource(project.path, x.agent)));
@@ -1122,9 +1145,16 @@ export class Orchestrator {
     }
     const wt = a.worktree!;
     await git.abortMerge(wt); // a merge left half-done by a crash
+    const lines: string[] = [];
+    if (rebase) {
+      // Only Harbor's own integration branch, in its own worktree, is reset; sources already on the new base are skipped below.
+      try { await git.resetHarborWorktree(this.d.worktreesRoot, wt, a.branch!, base); }
+      catch (e) { return end('failed', `Could not restart the integration on the new base: ${String((e as Error).message)}`, `Could not restart on the new base: ${String((e as Error).message)}`); }
+      a.baseCommit = base;
+      lines.push(`- ${target} moved since the last run: rebuilt ${a.branch} from ${base.slice(0, 10)}`);
+    }
 
     // 4. Merge, one pinned commit at a time.
-    const lines: string[] = [];
     let conflict: { title: string; paths: string[]; output: string } | undefined;
     for (const x of this.integrationOrder(items as Array<{ s: IntegrationSource; agent: AgentRecord }>)) {
       if (signal?.aborted) break;
@@ -1185,26 +1215,36 @@ export class Orchestrator {
     if (!job) throw new Error('This agent is not an integration.');
     const kind = a.integration ? 'integration' : 'rollback';
     if (this.running.has(a.id)) throw new Error(`This ${kind} is still running.`);
-    const { target, base, head } = job;
+    const { base, head } = job;
     const complete = a.integration ? a.integration.sources.every((s) => s.state === 'merged') : !!a.rollback?.merges.length && a.rollback.merges.every((m) => m.state === 'reverted');
-    if (a.state !== 'done' || !target || !base || !head || !a.branch || !complete) {
+    if (a.state !== 'done' || !job.target || !base || !head || !a.branch || !complete) {
       throw new Error(a.integration
         ? 'Only a finished integration with every branch merged and its checks passing can be applied.'
         : 'Only a finished rollback with every merge reverted and its checks passing can be applied.');
     }
     const project = this.project(a.projectId);
-    const current = await git.branchHead(project.path, target);
-    if (!current) throw new Error(`The target branch ${target} no longer exists.`);
+    // The ref's real spelling: on Windows a target stored as "Main" would otherwise move the checked-out "main" behind its index.
+    const target = await git.resolveBranch(project.path, job.target);
+    const current = target && await git.branchHead(project.path, target);
+    if (!target || !current) throw new Error(`The target branch ${job.target} no longer exists.`);
     if (job.applied && current === head) return a;
     if (current !== head) {
       if ((await git.branchHead(project.path, a.branch)) !== head) throw new Error(`${a.branch} moved since its checks ran. Run the ${kind} again.`);
-      if (current !== base) throw new Error(`${target} moved since the ${kind} started (was ${base.slice(0, 10)}, now ${current.slice(0, 10)}). Run the ${kind} again on the new base.`);
+      if (current !== base) {
+        throw new Error(`${target} moved since the ${kind} started (was ${base.slice(0, 10)}, now ${current.slice(0, 10)}). ${a.integration
+          ? 'Run the integration again: it rebuilds on the new head of the target.'
+          : 'Start a new rollback of the task: this one was built on the old head.'}`);
+      }
       if (await git.isDirty(project.path)) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
-      if ((await git.currentBranch(project.path)) !== target) {
+      if (!git.sameBranch(await git.currentBranch(project.path), target)) {
         const elsewhere = await git.worktreeOf(project.path, target);
         if (elsewhere) throw new Error(`${target} is checked out in ${elsewhere}. Apply from there or switch the project folder to ${target}.`);
       }
-      await git.fastForward(project.path, target, base, head);
+      // The awaits above leave room for a re-run to start: check again right before the write. The compare-and-swap
+      // (update-ref with the expected old value, or the HEAD check before an ff-only merge) is the final authority.
+      await git.fastForward(project.path, target, base, head, () => {
+        if (this.running.has(a.id) || a.state !== 'done' || job.head !== head || job.base !== base) throw new Error(`This ${kind} started running again; nothing was changed.`);
+      });
     }
     job.applied = true;
     store.upsertAgent(a);
@@ -1278,7 +1318,10 @@ export class Orchestrator {
     const task = store.getAgent(rb.taskId);
     if (!task) return refuse('the task is no longer available.');
     const agents = store.listAgentRecords(a.projectId).filter((x) => x.id !== a.id);
-    const preview = await previewRollback({ git, repo: project.path, agents }, task, rb.target);
+    // The ref's real spelling: on Windows "Main" reaches "main".
+    const named = rb.target && await git.resolveBranch(project.path, rb.target);
+    if (rb.target && !named) return refuse(`"${rb.target}" is not an existing local branch.`);
+    const preview = await previewRollback({ git, repo: project.path, agents }, task, named);
     if (preview.blockers?.length) return refuse(preview.blockers.join(' '));
     if (!preview.target || !preview.targetHead) return refuse('the target branch could not be resolved.');
     if (signal?.aborted) return end('stopped', 'Stopped before reverting.', 'Stopped by the user.');

@@ -14,7 +14,17 @@ const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
  * target paths/branches that Harbor itself created (the `harbor/` branch prefix under the Harbor data dir).
  */
 export class Git {
-  constructor(private run: Runner = runProcess) {}
+  /**
+   * `caseInsensitiveRefs`: on Windows, loose refs live on a case-insensitive file system, so `refs/heads/Main` reaches the
+   * file of `main`. Branch names typed by the user are resolved to the ref's real spelling and compared without case there.
+   */
+  constructor(private run: Runner = runProcess, private caseInsensitiveRefs = process.platform === 'win32') {}
+
+  /** Whether two branch names name the same ref on this platform. */
+  sameBranch(a: string | undefined, b: string | undefined): boolean {
+    if (a === undefined || b === undefined) return false;
+    return this.caseInsensitiveRefs ? a.toLowerCase() === b.toLowerCase() : a === b;
+  }
 
   private async git(cwd: string, args: string[]) {
     return this.run('git', args, { cwd, timeoutMs: 60000 });
@@ -95,6 +105,21 @@ export class Git {
     return r.code === 0 ? r.stdout.trim() || undefined : undefined;
   }
 
+  /**
+   * The real spelling of an existing local branch: an exact match, else (case-insensitive platforms only) the single branch
+   * that differs in case alone. Undefined when nothing (or more than one branch) matches.
+   */
+  async resolveBranch(repo: string, name: string): Promise<string | undefined> {
+    if (!name || name.startsWith('-')) return undefined;
+    const r = await this.git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
+    if (r.code !== 0) return undefined;
+    const all = r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (all.includes(name)) return name;
+    if (!this.caseInsensitiveRefs) return undefined;
+    const matches = all.filter((b) => b.toLowerCase() === name.toLowerCase());
+    return matches.length === 1 ? matches[0] : undefined;
+  }
+
   async isAncestor(cwd: string, ancestor: string, of: string): Promise<boolean> {
     return (await this.git(cwd, ['merge-base', '--is-ancestor', ancestor, of])).code === 0;
   }
@@ -109,7 +134,7 @@ export class Git {
   async worktreeOf(repo: string, branch: string): Promise<string | undefined> {
     const r = await this.git(repo, ['worktree', 'list', '--porcelain']);
     if (r.code !== 0) return undefined;
-    return parseWorktrees(r.stdout).find((w) => w.branch === branch)?.path;
+    return parseWorktrees(r.stdout).find((w) => this.sameBranch(w.branch, branch))?.path;
   }
 
   private async onHarborBranch(cwd: string): Promise<boolean> {
@@ -150,16 +175,33 @@ export class Git {
   }
 
   /**
-   * Move `branch` from `expected` to `to` only as a fast-forward. Checked out in `repo`: `merge --ff-only`. Otherwise a
-   * compare-and-swap ref update, which fails if the branch moved. Never forces.
+   * Reset Harbor's own branch, checked out in its own worktree under `worktreesRoot`, to `commit` (a fresh start on a new
+   * base). Refuses any other branch or path.
    */
-  async fastForward(repo: string, branch: string, expected: string, to: string): Promise<void> {
+  async resetHarborWorktree(worktreesRoot: string, worktree: string, branch: string, commit: string): Promise<void> {
+    const norm = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+    if (!norm(worktree).startsWith(norm(worktreesRoot) + '/')) throw new Error('Refusing to reset a path outside Harbor worktrees.');
+    const current = await this.currentBranch(worktree);
+    if (!branch.startsWith('harbor/') || current !== branch) throw new Error('Refusing to reset outside the Harbor branch of this worktree.');
+    const r = await this.git(worktree, ['reset', '--hard', '--quiet', commit]);
+    if (r.code !== 0) throw new Error(`git reset failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
+  }
+
+  /**
+   * Move `branch` from `expected` to `to` only as a fast-forward. Checked out in `repo`: `merge --ff-only`, after checking
+   * HEAD is still `expected`. Otherwise a compare-and-swap ref update, which fails if the branch moved. Never forces.
+   * `beforeWrite` runs right before the write and may throw to cancel it.
+   */
+  async fastForward(repo: string, branch: string, expected: string, to: string, beforeWrite?: () => void): Promise<void> {
     if (!(await this.isAncestor(repo, expected, to))) throw new Error('Not a fast-forward.');
-    if ((await this.currentBranch(repo)) === branch) {
+    if (this.sameBranch(await this.currentBranch(repo), branch)) {
+      if ((await this.head(repo)) !== expected) throw new Error(`${branch} moved; nothing was changed.`);
+      beforeWrite?.();
       const r = await this.git(repo, ['merge', '--ff-only', to]);
       if (r.code !== 0) throw new Error(`git merge --ff-only failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
       return;
     }
+    beforeWrite?.();
     const r = await this.git(repo, ['update-ref', `refs/heads/${branch}`, to, expected]);
     if (r.code !== 0) throw new Error(`git update-ref failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
   }
