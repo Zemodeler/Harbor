@@ -8,8 +8,10 @@ export interface RunOptions {
   effort: Effort;
   /** Native session id captured from an earlier run, to continue that session. */
   resumeId?: string;
-  /** read-only: planners/reviewers. edit: implementers inside their own worktree. */
-  permission: 'read-only' | 'edit';
+  /** read-only: planners/reviewers. edit: implementers inside their own worktree. full: auto mode, no approvals or sandbox. */
+  permission: 'read-only' | 'edit' | 'full';
+  /** Absolute paths of images attached to this turn (only the turn they were sent with). */
+  images?: string[];
   /** Extra system-level instructions (role contract). Appended, never replaces CLI defaults. */
   systemPrompt?: string;
   signal?: AbortSignal;

@@ -1,5 +1,6 @@
-import type { AgentRole, Id, Message } from '../shared/api';
+import type { AgentRole, CliId, ConversationMode, Id, Message } from '../shared/api';
 import { NEEDS, type Need } from './clis/capabilities';
+import { CLI_DEFINITIONS } from './clis/registry';
 import type { Effort } from './adapters/types';
 import type { Complexity } from './router';
 import type { AgentRecord } from './types';
@@ -25,6 +26,8 @@ export interface PlannedTask {
   helpFor?: Id;
   /** Failed or rejected helper this task redoes. Harbor runs the retry one complexity level up (a stronger model). */
   retryOf?: Id;
+  /** Pin to one CLI (e.g. a task that only suits Codex). Harbor falls back to normal routing when it is unavailable. */
+  cli?: CliId;
 }
 
 export interface ImageBrief { subject: string; style: string; prompt: string; notes: string }
@@ -111,8 +114,8 @@ export const LEAD_SYSTEM = `You are the LEAD agent of Harbor for one software pr
 
 Delegating: you may hand work to helpers that Harbor starts for you. Delegate ONLY when it clearly pays off: independent parts that can run in parallel, long or bulky work (broad research sweeps, many mechanical edits), or an independent review of finished work. Split as finely as is useful and no finer, at most ${MAX_TASKS_PER_TURN} per turn. Do not delegate small things you can do in a few steps. Helpers cannot talk to each other or start helpers; give each one precise instructions, the files it owns and what to report back.
 Each delegation is one line, exactly this format, on its own line at the END of your answer:
-HARBOR_DELEGATE: {"ref":"t1","title":"<short imperative>","access":"edit|read","role":"implementer|reviewer|planner|other","instructions":"<what to do and the deliverable>","complexity":"low|medium|high","needs":["code|research|planning|review|long-context|vision"],"files":["<paths it will edit>"],"dependsOn":["<ref of an earlier delegation>"],"specFrom":"<ref whose report is its spec, optional>","retryOf":"<id of a failed or rejected helper this redoes, optional>"}
-Harbor picks the CLI and model for each helper from "needs" and "complexity" (cheapest that fits). When you redo work that a helper failed or a reviewer rejected, set "retryOf" to that helper's id: Harbor then runs the retry on a stronger model, so do not raise "complexity" yourself, runs them in parallel where it can, then resumes you with their reports. After delegating, end your turn with one or two sentences saying what is running. Edit helpers work in their own git worktree on a harbor/<slug> branch: do not edit the files they own meanwhile. When their reports arrive, check them (checks Harbor ran itself are evidence; checks a helper says it ran are claims), merge finished harbor/* branches into the current branch yourself when the user's request implies applying the changes (stop and report on conflicts, never push), and tell the user what was and was not verified.
+HARBOR_DELEGATE: {"ref":"t1","title":"<short imperative>","access":"edit|read","role":"implementer|reviewer|planner|other","instructions":"<what to do and the deliverable>","complexity":"low|medium|high","needs":["code|research|planning|review|long-context|vision"],"files":["<paths it will edit>"],"dependsOn":["<ref of an earlier delegation>"],"specFrom":"<ref whose report is its spec, optional>","retryOf":"<id of a failed or rejected helper this redoes, optional>","cli":"<claude|codex|gemini, optional: pin this helper to one CLI>"}
+Harbor picks the CLI and model for each helper from "needs" and "complexity" (cheapest that fits); set "cli" only when the task truly needs one CLI, and Harbor falls back to normal routing if that CLI is unavailable. When you redo work that a helper failed or a reviewer rejected, set "retryOf" to that helper's id: Harbor then runs the retry on a stronger model, so do not raise "complexity" yourself, runs them in parallel where it can, then resumes you with their reports. After delegating, end your turn with one or two sentences saying what is running. Edit helpers work in their own git worktree on a harbor/<slug> branch: do not edit the files they own meanwhile. When their reports arrive, check them (checks Harbor ran itself are evidence; checks a helper says it ran are claims), merge finished harbor/* branches into the current branch yourself when the user's request implies applying the changes (stop and report on conflicts, never push), and tell the user what was and was not verified.
 
 Asking the user: when you truly cannot continue without a decision, put one line at the end of your answer and finish your turn (do not guess):
 HARBOR_ASK: {"question":"<one clear question>","options":["<short choice>", ...],"allowText":true|false}
@@ -120,20 +123,32 @@ HARBOR_ASK: {"question":"<one clear question>","options":["<short choice>", ...]
 Images: you cannot generate images and Harbor has no image tool. If the user wants an image, say so plainly and give them a ready-to-paste brief for an image generator, as one line at the end of your answer:
 HARBOR_IMAGE_BRIEF: {"subject":"<what the image shows>","style":"<art style, medium, lighting, palette>","prompt":"<the complete prompt to paste, with composition, aspect ratio and anything to avoid>","notes":"<which kind of tool suits it and what to adjust>"}
 
+Goal mode: when the prompt says the conversation has a GOAL, Harbor keeps resuming you until it is reached. When it is fully reached (or cannot be reached without the user), end your answer with one line:
+HARBOR_GOAL_DONE: {"summary":"<what was achieved, and what was and was not verified>"}
+
+Images: attached images are listed by absolute path in the user's message; look at them with your file-reading tool. They belong to that message only.
+
 Never use native Task/Agent tools or plugins to spawn agents; use HARBOR_DELEGATE. If the project root contains AGENTS.md, follow its conventions.`;
 
 export type LeadTrigger =
-  | { kind: 'user'; text: string; /** The stored user message; history is everything before it. */ messageId?: Id }
+  | { kind: 'user'; text: string; /** The stored user message; history is everything before it. */ messageId?: Id; /** Absolute paths of images attached to this message (this turn only). */ images?: string[] }
+  | { kind: 'goal'; continuation: number; max: number }
   | { kind: 'reports'; items: AgentRecord[] }
   | { kind: 'help'; from: AgentRecord; reason: string; proposedRole: string; instructions: string; blocked: boolean };
 
-export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[] } = {}): string {
+export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[]; mode?: ConversationMode; goal?: string } = {}): string {
   const parts = [`Project: ${projectName}`];
+  if (o.mode === 'plan') parts.push('PLAN MODE: you are read-only. Investigate as needed, then answer with a numbered plan (steps, files, risks) and stop. Do NOT edit files and do NOT delegate edit-capable helpers (read-only helpers are fine). The user will approve before anything is changed.');
+  if (o.mode === 'goal' && o.goal) parts.push(`GOAL for this conversation (keep working until it is reached, then print HARBOR_GOAL_DONE):\n${o.goal}`);
   if (o.history?.length) parts.push(`Conversation so far (your earlier session is not available):\n${historyText(o.history)}`);
   if (agents.length) parts.push(`Helpers you started (authoritative; persisted by Harbor):\n${registerText(agents)}`);
   if (o.notes?.length) parts.push(`Recent notes:\n${o.notes.map((e) => `- ${e}`).join('\n')}`);
-  if (t.kind === 'user') parts.push(`User:\n${t.text}`);
-  else if (t.kind === 'reports') {
+  if (t.kind === 'user') {
+    parts.push(`User:\n${t.text}`);
+    if (t.images?.length) parts.push(`The user attached ${t.images.length} image(s) to this message (this turn only). Look at them with your file-reading tool:\n${t.images.map((p) => `- ${p}`).join('\n')}`);
+  } else if (t.kind === 'goal') {
+    parts.push(`Automatic continuation ${t.continuation} of ${t.max}: continue toward the goal. Do the next concrete step. If the goal is fully reached, end with HARBOR_GOAL_DONE; if you need the user, use HARBOR_ASK.`);
+  } else if (t.kind === 'reports') {
     parts.push('Helper reports (not independently verified unless a reviewer says so):\n' +
       t.items.map((a) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}${a.branch ? `, branch=${a.branch}` : ''}${a.headCommit ? `, commit=${a.headCommit.slice(0, 10)}` : ''})\n${evidenceText(a)}${clip(a.report ?? a.error ?? '(no report)', REPORT_CHARS)}`).join('\n\n'));
     parts.push('Decide the next step: delegate follow-up work, do it yourself, or if everything is finished write a concise summary for the user with evidence, saying what was and was not verified.');
@@ -218,6 +233,7 @@ export const systemFor = (role: Exclude<AgentRole, 'main'>): string => `${ROLE_C
 
 const ROLES = new Set(['planner', 'implementer', 'reviewer', 'other']);
 const CX = new Set(['low', 'medium', 'high']);
+const CLI_IDS = new Set<CliId>(CLI_DEFINITIONS.map((d) => d.id));
 
 /** Pull the first balanced JSON object out of free text (handles code fences and chatter). */
 export function extractJson(text: string): unknown | undefined {
@@ -267,7 +283,8 @@ function toTask(raw: Record<string, unknown>, i: number, seen: Set<string>): Pla
     complexity: CX.has(str(raw['complexity'])) ? (raw['complexity'] as Complexity) : 'medium',
     needs: asNeeds(raw['needs']),
     dependsOn: strs(raw['dependsOn']), files: strs(raw['files']),
-    specFrom: str(raw['specFrom']) || undefined, helpFor: str(raw['helpFor']) || undefined, retryOf: str(raw['retryOf']) || undefined
+    specFrom: str(raw['specFrom']) || undefined, helpFor: str(raw['helpFor']) || undefined, retryOf: str(raw['retryOf']) || undefined,
+    cli: CLI_IDS.has(str(raw['cli'])) ? str(raw['cli']) : undefined
   };
 }
 
@@ -283,11 +300,11 @@ function toResult(j: Record<string, unknown>): HelperResult | undefined {
   return { outcome, summary: str(j['summary']).trim().slice(0, 400), verdict: verdict === 'approve' || verdict === 'changes' ? verdict : undefined, checks };
 }
 
-const KINDS = 'REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT';
+const KINDS = 'REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE';
 const LINE = new RegExp(`^\\s*HARBOR_(${KINDS}):\\s*(\\{.*\\})\\s*$`);
 const PREFIX = new RegExp(`^\\s*HARBOR_(${KINDS}):`);
 
-export interface Protocol { help: HelpRequest[]; ask: AskRequest[]; delegate: PlannedTask[]; image: ImageBrief[]; result?: HelperResult; malformed: string[] }
+export interface Protocol { help: HelpRequest[]; ask: AskRequest[]; delegate: PlannedTask[]; image: ImageBrief[]; result?: HelperResult; goalDone?: { summary: string }; malformed: string[] }
 
 /** Scan agent output for protocol lines. Malformed lines are hidden by stripProtocol and returned so they can be reported. */
 export function parseProtocol(text: string): Protocol {
@@ -306,6 +323,7 @@ export function parseProtocol(text: string): Protocol {
       if (out.delegate.length >= MAX_TASKS_PER_TURN) ok = false;
       else { const t = toTask(j, out.delegate.length, seen); if (t) out.delegate.push(t); else ok = false; }
     } else if (m[1] === 'RESULT') { const r = toResult(j); if (r) out.result = r; else ok = false; }
+    else if (m[1] === 'GOAL_DONE') out.goalDone = { summary: str(j['summary']).trim().slice(0, 600) };
     else if (str(j['prompt']).trim()) out.image.push({ subject: str(j['subject']), style: str(j['style']), prompt: str(j['prompt']).trim(), notes: str(j['notes']) });
     else ok = false;
     if (!ok) out.malformed.push(clip(line.trim(), 300));
