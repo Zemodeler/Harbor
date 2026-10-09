@@ -335,6 +335,17 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async pauseAgent(agentId) { orchestrator.pause(agentId); },
     async resumeAgent(agentId) { orchestrator.resume(agentId); },
     async resumeAgentSession(agentId) { orchestrator.resumeAgent(agentId); },
+    async integrateBranches(projectId, agentIds, target) { await ready; return toAgent(orchestrator.integrateBranches(needProject(projectId).id, agentIds, target)); },
+    async applyIntegration(agentId) { return toAgent(await orchestrator.applyIntegration(agentId)); },
+    async getChanges(agentId) {
+      const a = store.getAgent(agentId);
+      if (!a) throw new Error('Unknown agent');
+      const repo = needProject(a.projectId).path;
+      // An integration spans base..head; a helper's branch spans its base commit to the branch's current head.
+      const from = a.integration ? a.integration.base : a.baseCommit;
+      const to = a.integration?.head ?? (a.branch ? await git.branchHead(repo, a.branch) : undefined);
+      return from && to ? git.changes(repo, from, to) : [];
+    },
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },

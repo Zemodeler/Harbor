@@ -1,4 +1,4 @@
-import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, Message, Project, SessionActivity } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
@@ -13,8 +13,8 @@ import {
 } from './prompts';
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
-import { DEFAULT_CONCURRENCY, effectiveSettings, newId, type Store } from './store';
-import type { AgentRecord } from './types';
+import { DEFAULT_CONCURRENCY, effectiveSettings, newId, normPath, type Store } from './store';
+import type { AgentRecord, CheckRun } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
 
@@ -124,9 +124,11 @@ export class Orchestrator {
   private startedAt = Date.now();
   /** Settles when the orphan sweep started by recover() is done. */
   private sweep: Promise<OrphanSweep> = Promise.resolve({ killed: [], skipped: [] });
+  readonly journal: Journal;
 
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
+    this.journal = d.journal ?? new Journal();
     // Every CLI process this run starts is persisted, so a crash cannot leave one that the next run cannot identify.
     setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid) => d.store.untrackProcess(pid) });
   }
@@ -139,6 +141,8 @@ export class Orchestrator {
   // ------------------------------------------------------------ plumbing
 
   private emit(e: HarborEvent): void { this.d.bus.emit(e); }
+
+  private log(e: Omit<JournalEntry, 'time'>): void { this.journal.add(e); }
 
   private sessionState(id: Id, state: SessionActivity['state'], detail?: string): void {
     const c = this.d.store.getConversation(id);
@@ -266,7 +270,7 @@ export class Orchestrator {
     if (a.role === 'main') throw new Error('Send a message in the conversation to continue the lead agent.');
     if (a.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.');
     if (this.running.has(a.id)) throw new Error('This agent is already running.');
-    if (!this.d.store.getSession(a.id)) throw new Error('This agent has no saved session to resume. Send it a message instead.');
+    if (!a.integration && !this.d.store.getSession(a.id)) throw new Error('This agent has no saved session to resume. Send it a message instead.');
     this.stoppedSessions.delete(a.parentConversationId);
     this.reported.delete(`${a.id}:${a.revision}:${a.state}`);
     this.post(this.convFor(a), 'system', 'Resuming from the saved session.', { agentId: a.id });
@@ -556,11 +560,23 @@ export class Orchestrator {
     const out: AgentRecord[] = [];
     // Resolve the whole dependency graph first so cycles can be detected and broken (never left waiting forever).
     const graph = new Map<Id, Set<Id>>();
+    const sourcesOf = new Map<Id, Id[]>();
     for (const t of tasks) {
       const id = refToId.get(t.ref)!;
       const deps = new Set(t.dependsOn.map(resolve).filter((x): x is Id => !!x && x !== id));
       const spec = t.specFrom ? resolve(t.specFrom) : undefined;
       if (spec && spec !== id) deps.add(spec);
+      if (t.integrate) {
+        // An integrator waits for each source and for every reviewer of it, so the gate sees final verdicts.
+        const sources = [...new Set(t.integrate.sources.map(resolve).filter((x): x is Id => !!x && x !== id))];
+        sourcesOf.set(id, sources);
+        for (const s of sources) {
+          deps.add(s);
+          for (const u of tasks) if (u.role === 'reviewer' && u.dependsOn.map(resolve).includes(s)) deps.add(refToId.get(u.ref)!);
+          for (const r of store.listAgentRecords(project.id)) if (r.role === 'reviewer' && r.dependsOn.includes(s)) deps.add(r.id);
+        }
+        deps.delete(id);
+      }
       graph.set(id, deps);
     }
     for (const [from, to] of breakCycles(graph)) {
@@ -586,6 +602,10 @@ export class Orchestrator {
         // A clear edit goes straight to one implementer; its instructions are the spec.
         spec: t.role === 'implementer' && !specFromId ? t.instructions : undefined
       };
+      if (t.integrate) {
+        Object.assign(rec, { cli: 'harbor', model: 'git', effort: 'low', needs: undefined, pinnedCli: undefined, retry: undefined });
+        rec.integration = { target: t.integrate.target, sources: (sourcesOf.get(id) ?? []).map((agentId) => ({ agentId, state: 'pending' as const })) };
+      }
       store.upsertAgent(rec);
       store.addConversation({ id: newId(), projectId: project.id, title: `${t.role}: ${t.title}`, updated: Date.now(), agentId: id });
       this.publish(rec);
@@ -643,7 +663,8 @@ export class Orchestrator {
 
   /** Acquire file ownership for edit helpers. On conflict, ask the user whether to proceed in parallel. */
   private claim(a: AgentRecord): boolean {
-    if (!this.canEdit(a) || a.sharedOk) return true;
+    // An integrator only writes its own new branch, never files another helper is editing.
+    if (!this.canEdit(a) || a.sharedOk || a.integration) return true;
     const files = a.files?.length ? a.files : [WHOLE_PROJECT];
     const r = this.locks.acquire(a.projectId, a.id, files);
     if (r.ok) return true;
@@ -671,6 +692,7 @@ export class Orchestrator {
     this.locks.release(a.id);
     this.setState(a, 'failed', { error });
     this.post(this.convFor(a), 'system', `Failed: ${error}`, { agentId: a.id });
+    this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${error}` });
     this.finished(a);
   }
 
@@ -679,6 +701,7 @@ export class Orchestrator {
   }
 
   private async runAgent(a: AgentRecord): Promise<void> {
+    if (a.integration) return this.runIntegration(a);
     const project = this.project(a.projectId);
     const { store } = this.d;
     const conv = this.convFor(a);
@@ -753,10 +776,12 @@ export class Orchestrator {
 
   private async afterRun(a: AgentRecord, res: RoutedRun): Promise<void> {
     const { store, git } = this.d;
-    this.running.delete(a.id);
-    this.controllers.delete(a.id);
+    // Still "running" while Harbor checkpoints and checks, so stop() aborts the checks instead of finishing the agent twice.
+    const ctl = this.controllers.get(a.id);
     let report = stripProtocol(res.text);
     const proto = parseProtocol(res.allText ?? res.text);
+    for (const l of proto.malformed) this.log({ kind: 'protocol', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${l}` });
+    if (!res.ok && !res.stopped) this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}" on ${a.cli}/${a.model}: ${res.error ?? 'failed'}` });
 
     if (res.ok && a.worktree && a.baseCommit) {
       const cp = await git.checkpoint(a.worktree, `harbor: ${a.title}`);
@@ -771,18 +796,29 @@ export class Orchestrator {
         const msg = `"${a.title}" changed files outside its claim: ${outside.join(', ')}. Needs coordination before integration.`;
         store.addCoordination({ projectId: a.projectId, kind: 'conflict', from: a.id, text: msg, files: outside });
         this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
+        this.log({ kind: 'outside-claim', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: msg });
         report += `\n\nWARNING: edits outside claimed files: ${outside.join(', ')}`;
       }
+      if (cp.head && this.canEdit(a)) report += await this.runChecks(a, cp.head, ctl?.signal);
     }
 
+    // Each run replaces the previous result: a verdict from an earlier revision must not outlive it.
+    // The commit ties the result to what was examined: the reviewed head pinned at start, or the helper's own head.
+    const examined = a.role === 'reviewer' ? a.testedCommit : this.canEdit(a) ? a.headCommit : undefined;
+    a.result = proto.result ? { ...proto.result, ...(examined ? { commit: examined } : {}) } : undefined;
+
+    this.running.delete(a.id);
+    this.controllers.delete(a.id);
+    const stopped = !!res.stopped || !!ctl?.signal.aborted;
     const blocked = res.ok && proto.help.some((h) => h.blocked);
-    const asking = res.ok && proto.ask[0];
+    const asking = res.ok && !stopped && proto.ask[0];
+    const summary = a.result?.summary || firstLine(report);
     this.locks.release(a.id);
-    if (res.stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
+    if (stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed' });
-    else if (asking) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Waiting for your answer.' });
-    else if (blocked) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Blocked: waiting for another helper requested through the lead.' });
-    else this.setState(a, 'done', { report, summary: firstLine(report), error: undefined });
+    else if (asking) this.setState(a, 'waiting', { report, summary, error: 'Waiting for your answer.' });
+    else if (blocked) this.setState(a, 'waiting', { report, summary, error: 'Blocked: waiting for another helper requested through the lead.' });
+    else this.setState(a, 'done', { report, summary, error: undefined });
 
     if (asking) {
       const conv = this.convFor(a);
@@ -794,9 +830,33 @@ export class Orchestrator {
 
     // Direct prompts that arrived while running are delivered now, resuming this agent's session.
     const queued = this.followups.get(a.id)?.splice(0) ?? [];
-    if (queued.length && !res.stopped) { this.followUp(a, queued.join('\n\n')); return; }
+    if (queued.length && !stopped) { this.followUp(a, queued.join('\n\n')); return; }
     if (a.state !== 'waiting') this.finished(a);
     else this.pump(a.projectId);
+  }
+
+  /**
+   * Run the project's checks on the helper's committed branch head. These are evidence; the helper's own HARBOR_RESULT
+   * checks are claims. With no checks configured nothing changes. Returns the text appended to the report.
+   */
+  private async runChecks(a: AgentRecord, head: string, signal?: AbortSignal): Promise<string> {
+    const cmds = (this.d.loadChecks ?? loadProjectChecks)(this.project(a.projectId).path);
+    if (!cmds.length || !a.worktree) return '';
+    const run = this.d.runCheck ?? runShellCheck;
+    this.post(this.convFor(a), 'system', `Harbor is running checks on ${a.branch}: ${cmds.join(', ')}`, { agentId: a.id });
+    const runs: CheckRun[] = [];
+    for (const cmd of cmds) {
+      if (signal?.aborted) break;
+      runs.push({ cmd, ...(await run(cmd, a.worktree, signal)) });
+    }
+    // testedWorktree lets markOutdated flag these checks once the branch moves past `head`.
+    Object.assign(a, { checks: runs, testedCommit: head, testedWorktree: a.worktree, outdated: false });
+    const failed = runs.filter((r) => !r.ok);
+    if (failed.length && !signal?.aborted) {
+      this.log({ kind: 'checks-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `"${a.title}" on ${head.slice(0, 10)}: ${failed.map((f) => `${f.cmd} (${f.timedOut ? 'timed out' : `exit ${f.exitCode}`})`).join(', ')}` });
+    }
+    const lines = runs.map((r) => `- ${r.cmd}: ${r.ok ? 'PASS' : `FAIL (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`})`}${r.ok ? '' : `\n${clip(r.output.split(/\r?\n/).slice(-15).join('\n'), 1500)}`}`);
+    return `\n\nChecks Harbor ran on ${head.slice(0, 10)}:\n${lines.join('\n')}`;
   }
 
   private finished(a: AgentRecord): void {
@@ -814,7 +874,7 @@ export class Orchestrator {
     if (a.state === 'failed' && this.d.store.getConversation(parent)?.mode === 'goal') this.d.store.setGoalPaused(parent, true);
 
     this.pump(a.projectId);
-    this.maybeReportToMain(a);
+    if (!a.byUser) this.maybeReportToMain(a);
   }
 
   /** Resume the lead only when its judgement is needed: planner done, any failure, or all work finished. */
@@ -838,6 +898,222 @@ export class Orchestrator {
     this.enqueueMain(a.projectId, { kind: 'reports', items: unreported }, a.parentConversationId);
   }
 
+  // ------------------------------------------------------------ integration (Harbor's own git code, no CLI)
+
+  /** Reviewers of a helper: those that waited for it, or examined its worktree. */
+  private reviewersOf(projectId: Id, src: AgentRecord): AgentRecord[] {
+    return this.d.store.listAgentRecords(projectId).filter((r) => r.role === 'reviewer' &&
+      (r.dependsOn.includes(src.id) || (!!src.worktree && !!r.testedWorktree && normPath(r.testedWorktree) === normPath(src.worktree))));
+  }
+
+  /** The user asks Harbor to integrate finished helpers' branches. Queued like a helper, after the sources and their reviewers. */
+  integrateBranches(projectId: Id, agentIds: Id[], target?: string): AgentRecord {
+    const { store } = this.d;
+    const project = this.project(projectId);
+    if (!Array.isArray(agentIds) || !agentIds.length) throw new Error('Choose at least one helper branch to integrate.');
+    if (target !== undefined && (typeof target !== 'string' || !target.trim())) throw new Error('Name the target branch, or leave it out to use the checked-out branch.');
+    const sources = [...new Set(agentIds)].map((id) => {
+      const s = store.getAgent(id);
+      if (!s || s.projectId !== projectId) throw new Error('Unknown agent');
+      if (s.integration || !s.branch) throw new Error(`"${s.title}" has no helper branch to integrate.`);
+      return s;
+    });
+    const deps = new Set<Id>();
+    for (const s of sources) { deps.add(s.id); for (const r of this.reviewersOf(projectId, s)) deps.add(r.id); }
+    const title = `Integrate ${sources.length === 1 ? `"${clip(sources[0]!.title, 40)}"` : `${sources.length} branches`}`;
+    const rec: AgentRecord = {
+      id: newId(), projectId, parentId: store.mainAgent(projectId)?.id, role: 'other', title, state: 'queued', cli: 'harbor', model: 'git', effort: 'low',
+      task: `Merge the approved branches of ${sources.map((s) => `"${s.title}" (${s.branch})`).join(', ')} into a new integration branch${target ? ` for ${target.trim()}` : ''}.`,
+      dependsOn: [...deps], revision: 1, attempts: 0, created: Date.now(), byUser: true,
+      parentConversationId: sources.find((s) => s.parentConversationId)?.parentConversationId ?? this.ensureProject(project).conversation.id,
+      integration: { target: target?.trim(), sources: sources.map((s) => ({ agentId: s.id, state: 'pending' })) }
+    };
+    store.upsertAgent(rec);
+    store.addConversation({ id: newId(), projectId, title: `integrator: ${title}`, updated: Date.now(), agentId: rec.id });
+    this.publish(rec);
+    this.post(rec.parentConversationId, 'system', `You started "${title}". Harbor merges the approved branches itself once they and their reviews are finished.`, { agentId: rec.id });
+    this.pump(projectId);
+    return rec;
+  }
+
+  /** Why a source may not be merged, or its head to pin. Reads only. */
+  private async gateSource(repo: string, src: AgentRecord | undefined): Promise<{ head: string } | string> {
+    if (!src) return 'a source helper is no longer available';
+    const name = `"${src.title}"`;
+    if (src.integration) return `${name} is an integration, not a helper branch`;
+    if (!src.branch?.startsWith('harbor/')) return `${name} has no harbor/* branch`;
+    const head = await this.d.git.branchHead(repo, src.branch);
+    if (!head) return `${name}: branch ${src.branch} does not exist`;
+    const reviewers = this.reviewersOf(src.projectId, src);
+    // A verdict counts only for the exact head it examined; anything older is outdated.
+    const current = reviewers.filter((r) => r.state === 'done' && r.testedCommit === head && r.outdated !== true);
+    if (current.some((r) => r.result?.verdict === 'changes')) return `${name}: a reviewer asked for changes on ${head.slice(0, 7)}`;
+    if (current.some((r) => r.result?.verdict === 'approve')) return { head };
+    if (reviewers.some((r) => r.result?.verdict === 'approve')) return `${name}: its approval is outdated (${src.branch} moved to ${head.slice(0, 7)} since the review)`;
+    return `${name} has no approving review of ${head.slice(0, 7)}`;
+  }
+
+  /** Sources in dependency order (a source another one builds on goes first), otherwise creation order. */
+  private integrationOrder<T extends { agent: AgentRecord }>(items: T[]): T[] {
+    const { store } = this.d;
+    const reaches = (from: AgentRecord, to: Id, seen = new Set<Id>()): boolean => from.dependsOn.some((d) => {
+      if (d === to) return true;
+      if (seen.has(d)) return false;
+      seen.add(d);
+      const n = store.getAgent(d);
+      return !!n && reaches(n, to, seen);
+    });
+    const left = [...items].sort((x, y) => x.agent.created - y.agent.created);
+    const out: T[] = [];
+    while (left.length) {
+      const i = Math.max(0, left.findIndex((x) => !left.some((y) => y !== x && reaches(x.agent, y.agent.id))));
+      out.push(left.splice(i, 1)[0]!);
+    }
+    return out;
+  }
+
+  /**
+   * Merge approved helper branches into a harbor/integrate-* worktree, deterministically. Every source is gated before any
+   * git write; sources are merged by pinned SHA; a conflict is recorded, aborted and ends the run. Re-running is idempotent:
+   * sources already contained in the integration head are skipped. The user's branch is never touched here (see applyIntegration).
+   */
+  private async runIntegration(a: AgentRecord): Promise<void> {
+    const { store, git } = this.d;
+    const project = this.project(a.projectId);
+    const integ = a.integration!;
+    const signal = this.controllers.get(a.id)?.signal;
+    const conv = this.convFor(a);
+    this.setState(a, 'working', { error: undefined });
+    this.post(conv, 'system', `Assignment (integrator, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+
+    const end = (state: AgentState, report: string, error?: string, summary?: string): void => {
+      this.running.delete(a.id);
+      this.controllers.delete(a.id);
+      this.followups.delete(a.id);
+      this.locks.release(a.id);
+      if (state === 'failed') this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `integrator "${a.title}": ${error}` });
+      this.post(conv, 'assistant', report, { agentId: a.id });
+      this.setState(a, state, { report, summary, error });
+      this.finished(a);
+    };
+    const refuse = (why: string) => end('failed', `Integration refused. Nothing was merged.\n${why}`, `Refused: ${why}`);
+
+    if (!(await git.isRepoWithCommits(project.path))) return refuse('the project folder is not a git repository with commits.');
+    // 1. Target and base. A re-run keeps the base its integration branch was built on.
+    let target = integ.target, base = integ.base;
+    if (!a.worktree || !base) {
+      target = target ?? await git.currentBranch(project.path);
+      if (!target) return refuse('the project folder has a detached HEAD; name a target branch.');
+      base = await git.branchHead(project.path, target);
+      if (!base) return refuse(`"${target}" is not an existing local branch.`);
+    }
+    // 2. Gate every source before any git write.
+    const items = integ.sources.map((s) => ({ s, agent: store.getAgent(s.agentId) }));
+    const gates = await Promise.all(items.map((x) => this.gateSource(project.path, x.agent)));
+    const refusals = gates.filter((g): g is string => typeof g === 'string');
+    if (!items.length) refusals.push('there are no source branches.');
+    if (refusals.length) return refuse(refusals.join('; '));
+    if (signal?.aborted) return end('stopped', 'Stopped before merging.', 'Stopped by the user.');
+    integ.target = target;
+    integ.base = base;
+    integ.conflicts = undefined;
+    integ.applied = undefined;
+    items.forEach((x, i) => Object.assign(x.s, { branch: x.agent!.branch, commit: (gates[i] as { head: string }).head, state: 'pending' }));
+    this.setState(a, 'working');
+
+    // 3. The integration worktree, on harbor/integrate-<target>-<id6>, from base.
+    if (!a.worktree) {
+      try {
+        const wt = await git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), `integrate ${target}`, a.id, base);
+        Object.assign(a, { worktree: wt.path, branch: wt.branch, baseCommit: base });
+        integ.branch = wt.branch;
+        this.setState(a, 'working');
+      } catch (e) { return end('failed', `Could not create the integration worktree: ${String((e as Error).message)}`, `Could not create a git worktree: ${String((e as Error).message)}`); }
+    }
+    const wt = a.worktree!;
+    await git.abortMerge(wt); // a merge left half-done by a crash
+
+    // 4. Merge, one pinned commit at a time.
+    const lines: string[] = [];
+    let conflict: { title: string; paths: string[]; output: string } | undefined;
+    for (const x of this.integrationOrder(items as Array<{ s: IntegrationSource; agent: AgentRecord }>)) {
+      if (signal?.aborted) break;
+      const label = `${x.s.branch} ("${x.agent.title}") @ ${x.s.commit!.slice(0, 10)}`;
+      if (await git.isAncestor(wt, x.s.commit!, 'HEAD')) { x.s.state = 'merged'; lines.push(`- ${label}: already included`); continue; }
+      const r = await git.merge(wt, x.s.commit!);
+      if (r.ok) { x.s.state = 'merged'; lines.push(`- ${label}: merged`); continue; }
+      const paths = await git.unmergedPaths(wt);
+      await git.abortMerge(wt);
+      x.s.state = 'conflict';
+      integ.conflicts = paths;
+      conflict = { title: x.agent.title, paths, output: r.output };
+      lines.push(`- ${label}: CONFLICT${paths.length ? ` in ${paths.join(', ')}` : ''} (merge aborted)`);
+      break;
+    }
+    for (const x of items) if (x.s.state === 'pending') lines.push(`- ${x.s.branch} ("${x.agent!.title}"): not merged`);
+    const head = await git.head(wt);
+    integ.head = head;
+    this.setState(a, 'working', { headCommit: head });
+    if (head) this.markOutdated(a.projectId, wt, head);
+
+    let report = `Integration of ${items.length} branch${items.length === 1 ? '' : 'es'} for ${target} (base ${base.slice(0, 10)}) on ${a.branch}:\n${lines.join('\n')}\n\nIntegration head: ${head?.slice(0, 10) ?? 'unknown'}`;
+    if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
+    if (conflict) {
+      const why = conflict.paths.length ? `"${conflict.title}" conflicts in ${conflict.paths.join(', ')}` : `"${conflict.title}" could not be merged: ${clip(conflict.output, 300)}`;
+      report += `\n\nThe merge was aborted; branches merged before it stay on ${a.branch}. Resolve the conflict on the source branch (or in a new helper), have it reviewed again, then run the integration again.`;
+      return end('failed', report, `Merge conflict: ${why}`);
+    }
+
+    // 5. Checks on the combined result: the sources' own checks do not cover it.
+    Object.assign(a, { checks: undefined, testedCommit: undefined, testedWorktree: undefined, outdated: undefined });
+    if (head) report += await this.runChecks(a, head, signal);
+    if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
+    const failed = (a.checks ?? []).filter((c) => !c.ok);
+    if (failed.length) {
+      report += `\n\nNot ready to apply: checks failed on the integration head.`;
+      return end('failed', report, `Checks failed on integration: ${failed.map((f) => f.cmd).join(', ')}`);
+    }
+    report += `\n\nReady to apply: Harbor can fast-forward ${target} to ${head?.slice(0, 10)} (only while ${target} is still at ${base.slice(0, 10)} and the project folder is clean). Nothing was pushed.`;
+    return end('done', report, undefined, `Integrated ${items.length} branch${items.length === 1 ? '' : 'es'} on ${a.branch}; ready to apply to ${target}.`);
+  }
+
+  /**
+   * Fast-forward the user's target branch to a finished integration's head. Refuses when the project folder has uncommitted
+   * changes, when the target moved since the integration's base, or when the integration is not done. Never pushes or forces.
+   */
+  async applyIntegration(agentId: Id): Promise<AgentRecord> {
+    const { store, git } = this.d;
+    const a = store.getAgent(agentId);
+    if (!a) throw new Error('Unknown agent');
+    const integ = a.integration;
+    if (!integ) throw new Error('This agent is not an integration.');
+    if (this.running.has(a.id)) throw new Error('This integration is still running.');
+    const { target, base, head } = integ;
+    if (a.state !== 'done' || !target || !base || !head || !a.branch || integ.sources.some((s) => s.state !== 'merged')) {
+      throw new Error('Only a finished integration with every branch merged and its checks passing can be applied.');
+    }
+    const project = this.project(a.projectId);
+    const current = await git.branchHead(project.path, target);
+    if (!current) throw new Error(`The target branch ${target} no longer exists.`);
+    if (current !== head) {
+      if ((await git.branchHead(project.path, a.branch)) !== head) throw new Error(`${a.branch} moved since its checks ran. Run the integration again.`);
+      if (current !== base) throw new Error(`${target} moved since the integration started (was ${base.slice(0, 10)}, now ${current.slice(0, 10)}). Run the integration again on the new base.`);
+      if (await git.isDirty(project.path)) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
+      if ((await git.currentBranch(project.path)) !== target) {
+        const elsewhere = await git.worktreeOf(project.path, target);
+        if (elsewhere) throw new Error(`${target} is checked out in ${elsewhere}. Apply from there or switch the project folder to ${target}.`);
+      }
+      await git.fastForward(project.path, target, base, head);
+    }
+    integ.applied = true;
+    store.upsertAgent(a);
+    this.publish(a);
+    const msg = `${target} fast-forwarded to ${head.slice(0, 10)} ("${a.title}"). Nothing was pushed.`;
+    this.post(this.convFor(a), 'system', msg, { agentId: a.id });
+    if (a.parentConversationId && a.parentConversationId !== this.convFor(a)) this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
+    return a;
+  }
+
   // ------------------------------------------------------------ direct prompts and follow-ups
 
   private direct(a: AgentRecord, text: string, conversationId: Id): void {
@@ -858,8 +1134,15 @@ export class Orchestrator {
   private followUp(a: AgentRecord, text: string): void {
     if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(text); this.followups.set(a.id, q); return; }
     this.begin(a.id);
+    // An integrator has no CLI session: any message (or resume) runs the integration again, which is idempotent.
+    if (a.integration) { void this.runIntegration(a).catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`)); return; }
     void (async () => {
-      const cwd = a.worktree ?? this.project(a.projectId).path;
+      let cwd = a.worktree ?? this.project(a.projectId).path;
+      if (a.role === 'reviewer' && a.testedWorktree) {
+        // A reviewer's follow-up looks at the reviewed branch again, so its next verdict covers the head it sees now.
+        const tested = await this.d.git.head(a.testedWorktree).catch(() => undefined);
+        if (tested) { cwd = a.testedWorktree; Object.assign(a, { testedCommit: tested, outdated: false }); }
+      }
       if (this.canEdit(a) && !a.worktree) {
         const r = this.locks.acquire(a.projectId, a.id, a.files?.length ? a.files : [WHOLE_PROJECT]);
         if (!r.ok) { this.running.delete(a.id); this.post(this.convFor(a), 'system', 'Another agent owns the files this agent needs; try again when it finishes.', { agentId: a.id }); return; }
@@ -987,7 +1270,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();

@@ -12,6 +12,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listMessages', 'send', 'setConversationMode',
   'listAgents', 'openAgentConversation', 'stopAgent',
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
+  'integrateBranches', 'applyIntegration', 'getChanges',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'answerQuestion'
 ];
 
