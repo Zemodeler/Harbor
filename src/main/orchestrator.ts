@@ -247,6 +247,41 @@ export class Orchestrator {
     }
   }
 
+  private helperRecord(agentId: Id): AgentRecord {
+    const a = this.d.store.getAgent(agentId);
+    if (!a) throw new Error('Unknown agent');
+    if (a.role === 'main') throw new Error('The lead agent has no queue position. Use stop to stop it.');
+    return a;
+  }
+
+  /** Higher runs first among queued work of the same project; default 0. Does not affect running agents. */
+  setPriority(agentId: Id, priority: number): void {
+    if (!Number.isFinite(priority)) throw new Error('Priority must be a number.');
+    const a = this.helperRecord(agentId);
+    a.priority = priority;
+    this.d.store.upsertAgent(a);
+    this.publish(a);
+    this.pump(a.projectId);
+  }
+
+  /** Keeps a queued agent from starting. A running agent is not interrupted; the flag only applies if it is queued again. */
+  pause(agentId: Id): void {
+    const a = this.helperRecord(agentId);
+    if (TERMINAL.includes(a.state) || a.paused) return;
+    a.paused = true;
+    this.d.store.upsertAgent(a);
+    this.publish(a);
+  }
+
+  resume(agentId: Id): void {
+    const a = this.helperRecord(agentId);
+    if (!a.paused) return;
+    a.paused = false;
+    this.d.store.upsertAgent(a);
+    this.publish(a);
+    this.pump(a.projectId);
+  }
+
   // ------------------------------------------------------------ concierge and lead
 
   private enqueueMain(projectId: Id, trigger: LeadTrigger, conversationId: Id): void {
@@ -435,11 +470,13 @@ export class Orchestrator {
   pump(projectId: Id): void {
     const { store } = this.d;
     const max = this.d.maxActivePerProject ?? 4;
-    const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main').sort((a, b) => a.created - b.created);
+    // Higher priority first, then oldest first.
+    const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main').sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.created - b.created);
     const byId = new Map(all.map((a) => [a.id, a]));
     for (const a of all) {
       if (a.state !== 'queued') continue;
       if (this.running.has(a.id)) continue;
+      if (a.paused) continue;
       const deps = a.dependsOn.map((id) => byId.get(id)).filter((x): x is AgentRecord => !!x);
       const bad = deps.find((x) => x.state === 'failed' || x.state === 'stopped');
       if (bad) {
@@ -765,7 +802,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();
