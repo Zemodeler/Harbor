@@ -51,4 +51,27 @@ describe('Store', () => {
     s.setSettings({ cliOverrides: { codex: { enabled: true } } });
     expect(s.getSettings().cliOverrides).toEqual({ claude: { enabled: false }, codex: { enabled: true } });
   });
+
+  it('defaults background running to off and persists the optional preference', () => {
+    const dir = tmp();
+    const s = new Store(dir);
+    expect(s.getSettings().keepRunningInBackground ?? false).toBe(false);
+    s.setSettings({ keepRunningInBackground: true });
+    s.flush();
+    const reloaded = new Store(dir);
+    expect(reloaded.getSettings().keepRunningInBackground).toBe(true);
+    reloaded.setSettings({ keepRunningInBackground: false });
+    expect(reloaded.getSettings().keepRunningInBackground).toBe(false);
+    reloaded.setSettings({ keepRunningInBackground: undefined });
+    reloaded.flush();
+    expect(new Store(dir).getSettings().keepRunningInBackground).toBeUndefined();
+  });
+
+  it.each(['true', 1, null, {}, []])('rejects malformed background preferences without applying any of the patch: %j', value => {
+    const s = new Store();
+    s.setSettings({ keepRunningInBackground: true, concurrencyLimit: 2 });
+    expect(() => s.setSettings({ keepRunningInBackground: value as unknown as boolean, concurrencyLimit: 3 })).toThrow(/keepRunningInBackground must be a boolean/);
+    expect(s.getSettings().keepRunningInBackground).toBe(true);
+    expect(s.getSettings().concurrencyLimit).toBe(2);
+  });
 });
