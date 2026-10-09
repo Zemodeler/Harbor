@@ -14,7 +14,7 @@ import {
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { DEFAULT_CONCURRENCY, effectiveSettings, newId, type Store } from './store';
-import type { AgentRecord } from './types';
+import type { AgentRecord, CheckRun } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
 
@@ -124,9 +124,11 @@ export class Orchestrator {
   private startedAt = Date.now();
   /** Settles when the orphan sweep started by recover() is done. */
   private sweep: Promise<OrphanSweep> = Promise.resolve({ killed: [], skipped: [] });
+  readonly journal: Journal;
 
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
+    this.journal = d.journal ?? new Journal();
     // Every CLI process this run starts is persisted, so a crash cannot leave one that the next run cannot identify.
     setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid) => d.store.untrackProcess(pid) });
   }
@@ -139,6 +141,8 @@ export class Orchestrator {
   // ------------------------------------------------------------ plumbing
 
   private emit(e: HarborEvent): void { this.d.bus.emit(e); }
+
+  private log(e: Omit<JournalEntry, 'time'>): void { this.journal.add(e); }
 
   private sessionState(id: Id, state: SessionActivity['state'], detail?: string): void {
     const c = this.d.store.getConversation(id);
@@ -671,6 +675,7 @@ export class Orchestrator {
     this.locks.release(a.id);
     this.setState(a, 'failed', { error });
     this.post(this.convFor(a), 'system', `Failed: ${error}`, { agentId: a.id });
+    this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${error}` });
     this.finished(a);
   }
 
@@ -753,10 +758,12 @@ export class Orchestrator {
 
   private async afterRun(a: AgentRecord, res: RoutedRun): Promise<void> {
     const { store, git } = this.d;
-    this.running.delete(a.id);
-    this.controllers.delete(a.id);
+    // Still "running" while Harbor checkpoints and checks, so stop() aborts the checks instead of finishing the agent twice.
+    const ctl = this.controllers.get(a.id);
     let report = stripProtocol(res.text);
     const proto = parseProtocol(res.allText ?? res.text);
+    for (const l of proto.malformed) this.log({ kind: 'protocol', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${l}` });
+    if (!res.ok && !res.stopped) this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}" on ${a.cli}/${a.model}: ${res.error ?? 'failed'}` });
 
     if (res.ok && a.worktree && a.baseCommit) {
       const cp = await git.checkpoint(a.worktree, `harbor: ${a.title}`);
@@ -771,18 +778,29 @@ export class Orchestrator {
         const msg = `"${a.title}" changed files outside its claim: ${outside.join(', ')}. Needs coordination before integration.`;
         store.addCoordination({ projectId: a.projectId, kind: 'conflict', from: a.id, text: msg, files: outside });
         this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
+        this.log({ kind: 'outside-claim', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: msg });
         report += `\n\nWARNING: edits outside claimed files: ${outside.join(', ')}`;
       }
+      if (cp.head && this.canEdit(a)) report += await this.runChecks(a, cp.head, ctl?.signal);
     }
 
+    // Each run replaces the previous result: a verdict from an earlier revision must not outlive it.
+    // The commit ties the result to what was examined: the reviewed head pinned at start, or the helper's own head.
+    const examined = a.role === 'reviewer' ? a.testedCommit : this.canEdit(a) ? a.headCommit : undefined;
+    a.result = proto.result ? { ...proto.result, ...(examined ? { commit: examined } : {}) } : undefined;
+
+    this.running.delete(a.id);
+    this.controllers.delete(a.id);
+    const stopped = !!res.stopped || !!ctl?.signal.aborted;
     const blocked = res.ok && proto.help.some((h) => h.blocked);
-    const asking = res.ok && proto.ask[0];
+    const asking = res.ok && !stopped && proto.ask[0];
+    const summary = a.result?.summary || firstLine(report);
     this.locks.release(a.id);
-    if (res.stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
+    if (stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed' });
-    else if (asking) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Waiting for your answer.' });
-    else if (blocked) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Blocked: waiting for another helper requested through the lead.' });
-    else this.setState(a, 'done', { report, summary: firstLine(report), error: undefined });
+    else if (asking) this.setState(a, 'waiting', { report, summary, error: 'Waiting for your answer.' });
+    else if (blocked) this.setState(a, 'waiting', { report, summary, error: 'Blocked: waiting for another helper requested through the lead.' });
+    else this.setState(a, 'done', { report, summary, error: undefined });
 
     if (asking) {
       const conv = this.convFor(a);
@@ -794,9 +812,33 @@ export class Orchestrator {
 
     // Direct prompts that arrived while running are delivered now, resuming this agent's session.
     const queued = this.followups.get(a.id)?.splice(0) ?? [];
-    if (queued.length && !res.stopped) { this.followUp(a, queued.join('\n\n')); return; }
+    if (queued.length && !stopped) { this.followUp(a, queued.join('\n\n')); return; }
     if (a.state !== 'waiting') this.finished(a);
     else this.pump(a.projectId);
+  }
+
+  /**
+   * Run the project's checks on the helper's committed branch head. These are evidence; the helper's own HARBOR_RESULT
+   * checks are claims. With no checks configured nothing changes. Returns the text appended to the report.
+   */
+  private async runChecks(a: AgentRecord, head: string, signal?: AbortSignal): Promise<string> {
+    const cmds = (this.d.loadChecks ?? loadProjectChecks)(this.project(a.projectId).path);
+    if (!cmds.length || !a.worktree) return '';
+    const run = this.d.runCheck ?? runShellCheck;
+    this.post(this.convFor(a), 'system', `Harbor is running checks on ${a.branch}: ${cmds.join(', ')}`, { agentId: a.id });
+    const runs: CheckRun[] = [];
+    for (const cmd of cmds) {
+      if (signal?.aborted) break;
+      runs.push({ cmd, ...(await run(cmd, a.worktree, signal)) });
+    }
+    // testedWorktree lets markOutdated flag these checks once the branch moves past `head`.
+    Object.assign(a, { checks: runs, testedCommit: head, testedWorktree: a.worktree, outdated: false });
+    const failed = runs.filter((r) => !r.ok);
+    if (failed.length && !signal?.aborted) {
+      this.log({ kind: 'checks-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `"${a.title}" on ${head.slice(0, 10)}: ${failed.map((f) => `${f.cmd} (${f.timedOut ? 'timed out' : `exit ${f.exitCode}`})`).join(', ')}` });
+    }
+    const lines = runs.map((r) => `- ${r.cmd}: ${r.ok ? 'PASS' : `FAIL (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`})`}${r.ok ? '' : `\n${clip(r.output.split(/\r?\n/).slice(-15).join('\n'), 1500)}`}`);
+    return `\n\nChecks Harbor ran on ${head.slice(0, 10)}:\n${lines.join('\n')}`;
   }
 
   private finished(a: AgentRecord): void {
@@ -859,7 +901,12 @@ export class Orchestrator {
     if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(text); this.followups.set(a.id, q); return; }
     this.begin(a.id);
     void (async () => {
-      const cwd = a.worktree ?? this.project(a.projectId).path;
+      let cwd = a.worktree ?? this.project(a.projectId).path;
+      if (a.role === 'reviewer' && a.testedWorktree) {
+        // A reviewer's follow-up looks at the reviewed branch again, so its next verdict covers the head it sees now.
+        const tested = await this.d.git.head(a.testedWorktree).catch(() => undefined);
+        if (tested) { cwd = a.testedWorktree; Object.assign(a, { testedCommit: tested, outdated: false }); }
+      }
       if (this.canEdit(a) && !a.worktree) {
         const r = this.locks.acquire(a.projectId, a.id, a.files?.length ? a.files : [WHOLE_PROJECT]);
         if (!r.ok) { this.running.delete(a.id); this.post(this.convFor(a), 'system', 'Another agent owns the files this agent needs; try again when it finishes.', { agentId: a.id }); return; }
@@ -987,7 +1034,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();

@@ -1,6 +1,5 @@
-import type { Agent, CliId, Conversation, Message, Project, Settings } from '../shared/api';
+import type { Agent, AgentResult, CliId, Conversation, Message, Project, Settings } from '../shared/api';
 import type { Need } from './clis/capabilities';
-import type { HelperResult } from './prompts';
 import type { Complexity } from './router';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
@@ -40,8 +39,8 @@ export interface AgentRecord extends Agent {
   /** Number of CLI fallbacks used. */
   attempts: number;
   created: number;
-  /** The helper's HARBOR_RESULT line (self-reported). */
-  result?: HelperResult;
+  /** The helper's HARBOR_RESULT line (self-reported), tied to the commit the run examined. */
+  result?: AgentResult;
   /** Branch head after Harbor's checkpoint commit. */
   headCommit?: string;
   /** Checks Harbor itself ran on `testedCommit` (evidence, unlike result.checks). */
