@@ -527,6 +527,10 @@ export class Orchestrator {
         } else if ((this.plans.has(conversationId) || this.goAhead.has(conversationId)) && isApproval(trigger.text)) {
           // A go-ahead continues the last request at its size: no front-desk call, no fresh guess. A one-off "/deep" is not inherited.
           plan = { ...plan, effort: undefined };
+        } else if (!this.leadAsked.has(conversationId) && this.heldReports(project.id, conversationId).items.length) {
+          // Held reports need the lead: the front desk sees only their summaries and would answer "continue" itself, leaving
+          // them stranded. Decided here, when the turn runs, so reports settled or queued meanwhile count as they are now.
+          plan = { ...plan, effort: undefined };
         } else if (!this.leadAsked.has(conversationId)) {
           const c = await this.concierge(project, main, conversationId, trigger.text, ctl.signal);
           if (c === 'handled') return;

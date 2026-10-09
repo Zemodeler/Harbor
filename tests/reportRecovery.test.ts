@@ -39,6 +39,8 @@ interface Opts {
    */
   leadAdapter?: () => 'ok' | 'none' | 'spawnFails' | 'silent';
   onSilent?: () => void;
+  /** The front desk answers these messages itself (as a cheap model may for "continue") instead of escalating. */
+  conciergeAnswers?: (text: string) => boolean;
 }
 
 /**
@@ -49,6 +51,7 @@ async function harbor(dataDir: string, project: string, opts: Opts = {}) {
   let reportTurn = 0;
   const script: FakeScript = async (prompt, o) => {
     const sys = o.systemPrompt ?? '';
+    if (sys.includes('front desk') && opts.conciergeAnswers?.(prompt)) return say(JSON.stringify({ answer: 'Sure, carrying on.' }));
     if (sys.includes('front desk')) return say(JSON.stringify({ escalate: { complexity: 'low', needs: ['code'], ack: '' } }));
     if (isLead(o)) {
       const run = /User:\nrun ([\w ]+)/.exec(prompt);
@@ -157,6 +160,54 @@ describe('helper report delivery across restarts', () => {
     expect(second.svc.store.listAgentRecords(second.project.id).filter((a) => a.role !== 'main')).toHaveLength(1);
     expect(second.agent('Alpha').reportDelivery).toMatchObject({ status: 'confirmed' });
     second.svc.shutdown();
+  });
+
+  it('a "continue" after a restart reaches the lead with retained reports even when the front desk would answer it', async () => {
+    const data = tmp(), repo = tmp();
+    const marker = 'FULL-REPORT-END-MARKER';
+    const long = `report of Alpha ${'x'.repeat(400)} ${marker}`; // the marker is past the 300 characters the front desk sees
+    const frontDesk = (a: FakeAdapter) => a.calls.filter((c) => (c.opts.systemPrompt ?? '').includes('front desk'));
+    const withMarker = (a: FakeAdapter) => a.calls.filter((c) => isLead(c.opts) && c.prompt.includes(marker));
+    let lead: 'ok' | 'none' = 'ok';
+    const first = await harbor(data, repo, { leadAdapter: () => lead, helper: (t) => { lead = 'none'; return say(t === 'Alpha' ? long : `report of ${t}`); } });
+    await first.svc.send(first.conv.id, 'run Alpha');
+    await first.svc.whenIdle();
+    expect(first.agent('Alpha').reportDelivery).toBeUndefined();
+    first.svc.shutdown();
+
+    const second = await harbor(data, repo, { conciergeAnswers: (p) => /\bcontinue\b/.test(p) });
+    await second.svc.whenIdle();
+    // Another conversation of the project holds nothing: its "continue" stays with the front desk.
+    const other = await second.svc.newConversation(second.project.id);
+    await second.svc.send(other.id, 'continue');
+    await second.svc.whenIdle();
+    expect(frontDesk(second.adapter)).toHaveLength(1);
+    expect(second.adapter.calls.filter((c) => isLead(c.opts))).toHaveLength(0);
+
+    await second.svc.send(second.conv.id, 'continue');
+    await second.svc.whenIdle();
+    expect(frontDesk(second.adapter)).toHaveLength(1); // the front desk was skipped, not overruled
+    expect(withMarker(second.adapter)).toHaveLength(1);
+    expect(reportTurns(second.adapter)).toEqual([['Alpha']]);
+    expect(reportCalls(second.adapter)[0]!.prompt).toContain('User:\ncontinue'); // the user's own text, unchanged
+    expect(second.agent('Alpha').reportDelivery).toMatchObject({ status: 'confirmed' });
+    expect((await second.svc.listMessages(second.conv.id)).some((m) => m.text === 'Sure, carrying on.')).toBe(false);
+
+    // Nothing is held any more: a later "continue" carries no report again.
+    await second.svc.send(second.conv.id, 'continue');
+    await second.svc.whenIdle();
+    expect(withMarker(second.adapter)).toHaveLength(1);
+    expect(reportTurns(second.adapter)).toEqual([['Alpha']]);
+    second.svc.shutdown();
+
+    const third = await harbor(data, repo, { conciergeAnswers: (p) => /\bcontinue\b/.test(p) });
+    await third.svc.send(third.conv.id, 'continue');
+    await third.svc.whenIdle();
+    // With no retained reports the cheap front desk answers on its own, as before.
+    expect(frontDesk(third.adapter)).toHaveLength(1);
+    expect(third.adapter.calls.filter((c) => isLead(c.opts))).toHaveLength(0);
+    expect((await third.svc.listMessages(third.conv.id)).some((m) => m.role === 'assistant' && m.text === 'Sure, carrying on.')).toBe(true);
+    third.svc.shutdown();
   });
 
   it('a lead CLI that fails to spawn leaves the report pending in the same run', async () => {
