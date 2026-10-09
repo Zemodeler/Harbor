@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { Chunk, CliAdapter, RunOptions } from './types';
+import type { Chunk, CliAdapter, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from './types';
 import { RATE_LIMIT_RE } from './types';
-import { streamLines, type StreamedLine, type StreamResult } from './stream';
+import { streamLines, type StdinSink, type StreamedLine, type StreamResult } from './stream';
 
 /**
  * Claude Code headless adapter. Flags verified against `claude --help` (2.1.293):
@@ -20,8 +20,27 @@ import { streamLines, type StreamedLine, type StreamResult } from './stream';
  * first and take precedence over allow rules, but that was not confirmed against the installed CLI. Also not covered:
  * `git -C x merge`, aliases, or merging through a shell wrapper; the post-turn check in orchestrator.ts is the backstop.
  * In `full` (bypassPermissions) mode deny rules still apply in Claude Code (also unconfirmed).
+ *
+ * Controlled mode (`onToolPermission` set and permission `edit`; everything else is unchanged): the run adds
+ * `--input-format stream-json --permission-prompt-tool stdio`, keeps stdin open, sends the prompt as a user message line,
+ * and answers the CLI's `can_use_tool` control requests through the host handler. Stdin is ended when `result` arrives.
+ * VERIFIED by the planner on claude.exe 2.1.293 (no model call): `--input-format stream-json` is accepted, an `initialize`
+ * control_request gets a `control_response` with subtype success, empty stream-json stdin exits quietly; the
+ * `can_use_tool` request fields and `control_cancel_request` exist as strings in the binary (not seen live).
+ * UNVERIFIED (taken from the Agent SDK; not run live, the CLI was not reachable from the session that added this):
+ * `--permission-prompt-tool stdio` being what routes permission prompts to stdin; the response shape
+ * `{subtype:'success',request_id,response:{behavior:'allow',updatedInput}|{behavior:'deny',message}}` and the error shape
+ * `{subtype:'error',request_id,error}`; the user turn line `{type:'user',message:{role:'user',content}}`; that a cancelled
+ * request needs no reply; and that --disallowedTools deny rules are evaluated before the host is asked. Because of the
+ * last one, lead runs (`denyGitWrites`) also auto-deny git merge/rebase/cherry-pick/reset/push here, without asking.
  */
-const GIT_WRITE_DENY = ['merge', 'rebase', 'cherry-pick', 'reset', 'push'].map((c) => `Bash(git ${c} *)`);
+const GIT_WRITE_CMDS = ['merge', 'rebase', 'cherry-pick', 'reset', 'push'];
+const GIT_WRITE_DENY = GIT_WRITE_CMDS.map((c) => `Bash(git ${c} *)`);
+// Broader than the deny rules on purpose (`git -C x merge`, `cd x && git push`): a false deny is cheap, a merge is not.
+const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join('|')})(?![\\w-])`, 'i');
+
+/** Whether this run answers permission prompts through the host instead of silently denying. */
+export const isControlled = (o: RunOptions): boolean => !!o.onToolPermission && o.permission === 'edit';
 
 export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
@@ -44,7 +63,56 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   if (o.denyGitWrites) a.push(...GIT_WRITE_DENY);
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
   if (systemPromptFile) a.push('--append-system-prompt-file', systemPromptFile);
+  if (isControlled(o)) a.push('--input-format', 'stream-json', '--permission-prompt-tool', 'stdio');
   return a;
+}
+
+export interface ControlRequest { requestId: string; subtype: string; permission?: ToolPermissionRequest }
+
+/** Parse a `control_request` line from the CLI. Pure; anything else is undefined. */
+export function parseControlRequest(line: string): ControlRequest | undefined {
+  let j: any;
+  try { j = JSON.parse(line); } catch { return undefined; }
+  if (j?.type !== 'control_request' || typeof j.request_id !== 'string') return undefined;
+  const r = j.request ?? {};
+  const subtype = typeof r.subtype === 'string' ? r.subtype : '';
+  if (subtype !== 'can_use_tool') return { requestId: j.request_id, subtype };
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const reason = typeof r.decision_reason === 'string' ? r.decision_reason : r.decision_reason ? JSON.stringify(r.decision_reason) : undefined;
+  const permission: ToolPermissionRequest = { tool: String(r.tool_name ?? ''), input: r.input ?? {} };
+  const opt = { toolUseId: str(r.tool_use_id), description: str(r.description), blockedPath: str(r.blocked_path), reason: str(reason) };
+  for (const [k, v] of Object.entries(opt)) if (v) (permission as any)[k] = v;
+  return { requestId: j.request_id, subtype, permission };
+}
+
+/** The request id of a `control_cancel_request` line, or undefined. Pure. */
+export function parseControlCancel(line: string): string | undefined {
+  let j: any;
+  try { j = JSON.parse(line); } catch { return undefined; }
+  return j?.type === 'control_cancel_request' && typeof j.request_id === 'string' ? j.request_id : undefined;
+}
+
+/** One stream-json user turn, newline-terminated. */
+export function userMessageLine(text: string): string {
+  return JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n';
+}
+
+/** Answer to a can_use_tool request. Allow passes the original input back unchanged (the host never rewrites tool calls). */
+export function controlResponse(requestId: string, decision: ToolPermissionDecision, originalInput: unknown): string {
+  const response = decision.allow
+    ? { behavior: 'allow', updatedInput: originalInput ?? {} }
+    : { behavior: 'deny', message: decision.message };
+  return JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response } }) + '\n';
+}
+
+export function controlError(requestId: string, error: string): string {
+  return JSON.stringify({ type: 'control_response', response: { subtype: 'error', request_id: requestId, error } }) + '\n';
+}
+
+/** Lead runs never get a git history rewrite or push approved through the handler. */
+export function isGitWrite(tool: string, input: unknown): boolean {
+  const cmd = (input as { command?: unknown } | null)?.command;
+  return tool === 'Bash' && typeof cmd === 'string' && GIT_WRITE_RE.test(cmd);
 }
 
 /** Parse one stream-json line into zero or more chunks. Pure; unknown shapes are ignored. */
@@ -86,6 +154,68 @@ function summarizeInput(i: any): string {
   return String(v).slice(0, 120);
 }
 
+/**
+ * The host side of the control channel for one run. Requests are answered asynchronously so stdout keeps flowing while
+ * the host decides; each has its own AbortController, aborted by a control_cancel_request, the run signal, or the run ending.
+ */
+class PermissionChannel {
+  private stdin?: StdinSink;
+  private pending = new Map<string, AbortController>();
+  private closed = false;
+  private onAbort = () => this.finish();
+  constructor(private o: RunOptions) {
+    o.signal?.addEventListener('abort', this.onAbort, { once: true });
+  }
+
+  attach(s: StdinSink): void { this.stdin = s; }
+
+  /** Consume a control line; false means it is an ordinary output line. */
+  handle(line: string): boolean {
+    const cancelled = parseControlCancel(line);
+    if (cancelled !== undefined) {
+      this.pending.get(cancelled)?.abort();
+      this.pending.delete(cancelled);
+      return true;
+    }
+    const req = parseControlRequest(line);
+    if (!req) return false;
+    if (!req.permission) this.send(controlError(req.requestId, `Unsupported control request: ${req.subtype || 'unknown'}`));
+    else void this.ask(req.requestId, req.permission);
+    return true;
+  }
+
+  private async ask(id: string, p: ToolPermissionRequest): Promise<void> {
+    if (this.o.denyGitWrites && isGitWrite(p.tool, p.input)) {
+      this.send(controlResponse(id, { allow: false, message: 'Lead runs never merge, rebase, cherry-pick, reset or push; the integrator lands branches.' }, p.input));
+      return;
+    }
+    const ac = new AbortController();
+    this.pending.set(id, ac);
+    let d: ToolPermissionDecision;
+    try {
+      d = await this.o.onToolPermission!(p, ac.signal);
+    } catch (e) {
+      d = { allow: false, message: `Permission request failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    // A cancelled or finished request needs no answer; the CLI has moved on.
+    if (ac.signal.aborted || this.pending.get(id) !== ac) return;
+    this.pending.delete(id);
+    this.send(controlResponse(id, d, p.input));
+  }
+
+  private send(line: string): void { if (!this.closed) this.stdin?.write(line); }
+
+  /** The result arrived or the run stopped: end stdin so the CLI exits, and drop open questions. */
+  finish(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.o.signal?.removeEventListener('abort', this.onAbort);
+    for (const ac of this.pending.values()) ac.abort();
+    this.pending.clear();
+    this.stdin?.end();
+  }
+}
+
 export class ClaudeAdapter implements CliAdapter {
   id = 'claude';
   constructor(private exe: string) {}
@@ -99,14 +229,24 @@ export class ClaudeAdapter implements CliAdapter {
       writeFileSync(spFile, o.systemPrompt);
     }
     let res: IteratorResult<StreamedLine, StreamResult>;
-    const gen = streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: prompt, signal: o.signal });
+    const ctl = isControlled(o) ? new PermissionChannel(o) : undefined;
+    const gen = ctl
+      ? streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: userMessageLine(prompt), signal: o.signal, interactive: (s) => ctl.attach(s) })
+      : streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: prompt, signal: o.signal });
     try {
       res = await gen.next();
       while (!res.done) {
-        if (res.value.stream === 'stdout') for (const c of parseClaudeLine(res.value.line)) { if (c.kind === 'done') done = true; yield c; }
+        if (res.value.stream === 'stdout') {
+          if (ctl?.handle(res.value.line)) { res = await gen.next(); continue; }
+          for (const c of parseClaudeLine(res.value.line)) {
+            if (c.kind === 'done') { done = true; ctl?.finish(); }
+            yield c;
+          }
+        }
         res = await gen.next();
       }
     } finally {
+      ctl?.finish();
       if (spFile) try { unlinkSync(spFile); } catch { /* already gone */ }
     }
     if (!done) {
