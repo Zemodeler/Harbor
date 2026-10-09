@@ -44,6 +44,7 @@ export type HarborEvent =
  | { type:'cli'; cli: CliStatus }
  | { type:'permission'; requestId: Id; kind:'freeReset'|'tool'|'conflict'; prompt: string; agentId?: Id; conversationId?: Id; tool?: string; alwaysAllow?: boolean; expiresAt?: number }   // kind 'tool': conversationId = where the asking agent runs; tool = tool name; alwaysAllow = "always allow for this project" may be offered; expiresAt = denied automatically after this time
  | { type:'question'; requestId: Id; conversationId: Id; prompt: string; options?: string[]; allowText?: boolean; agentId?: Id };   // an agent needs a decision; answer with answerQuestion
+export type PendingPermission = Extract<HarborEvent, { type: 'permission' }>;
 export interface HarborApi {
  listClis(): Promise<CliStatus[]>; refreshClis(): Promise<CliStatus[]>; openLogin(cli: CliId): Promise<void>;
  listProjects(): Promise<Project[]>; addProject(path?: string): Promise<Project|null>; removeProject(id: Id): Promise<void>; setProjectImage(id: Id, image: string | null): Promise<Project>;
@@ -72,6 +73,7 @@ export interface HarborApi {
  getSettings(): Promise<Settings>; setSettings(s: Partial<Settings>): Promise<Settings>;
  answerPermission(requestId: Id, allow: boolean, opts?: { always?: boolean }): Promise<void>;   // always = (tool requests with alwaysAllow) also store a project rule; ignored elsewhere
  listToolRules(projectId: Id): Promise<ToolRule[]>; removeToolRule(projectId: Id, ruleId: Id): Promise<ToolRule[]>;   // "always allow for this project" rules; remove returns the remaining rules
+ listPendingPermissions(): Promise<PendingPermission[]>;   // permission requests still waiting for an answer (a reloaded renderer misses the events); same fields as the `permission` event
  answerQuestion(requestId: Id, answer: string): Promise<void>;   // delivered into the asking agent's conversation as the user's message
  onEvent(cb: (e: HarborEvent) => void): () => void;   // returns unsubscribe
 }

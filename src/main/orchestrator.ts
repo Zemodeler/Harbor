@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, Project, SessionActivity } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
 import type { CatalogEntry, Need, Tier } from './clis/capabilities';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
@@ -34,7 +34,8 @@ export interface OrchestratorDeps {
   catalog?: CatalogEntry[];
   worktreesRoot: string;
   /** Raise a permission event and resolve with the user's answer. */
-  ask: (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id) => Promise<boolean>;
+  /** `signal` withdraws the request (it resolves false and is no longer listed as pending). */
+  ask: (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id, signal?: AbortSignal) => Promise<boolean>;
   freeReset?: FreeResetCoordinator;
   maxActivePerProject?: number;
   /** Cap on automatic lead turns after one user message (guards against runaway loops). */
@@ -66,7 +67,7 @@ const defaultTimer = (fn: () => void, ms: number): (() => void) => {
 };
 
 /** A tool call waiting for the user's answer. In memory only: a restart ends the run that asked. */
-interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; settle(d: ToolPermissionDecision): void }
+interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; event: PendingPermission; settle(d: ToolPermissionDecision): void }
 
 const MAX_SNAPSHOTS = 5;
 
@@ -148,6 +149,8 @@ export class Orchestrator {
   /** Conversations where the lead asked a question: the next user message answers it and skips the concierge. */
   private leadAsked = new Set<Id>();
   private conflictAsked = new Set<Id>();
+  /** Withdraws an agent's open conflict question once it is moot (the agent got its files, or ended). */
+  private conflictAsks = new Map<Id, AbortController>();
   /** Edit helpers already told they are held back by plan mode (one note each). */
   private planHeldNoted = new Set<Id>();
   /** Open questions to the user. In memory only: after a restart the question text is still in the chat to answer by typing. */
@@ -808,7 +811,7 @@ export class Orchestrator {
     if (!this.canEdit(a) || a.sharedOk || a.integration || a.rollback) return true;
     const files = a.files?.length ? a.files : [WHOLE_PROJECT];
     const r = this.locks.acquire(a.projectId, a.id, files);
-    if (r.ok) return true;
+    if (r.ok) { this.withdrawConflictAsk(a.id); return true; }
     const holder = this.d.store.getAgent(r.conflicts[0]!.holder);
     const summary = `Waiting for "${holder?.title ?? 'another agent'}" to release ${r.conflicts.map((c) => c.file).join(', ')}`;
     if (a.error !== summary) this.setState(a, 'queued', { error: summary });
@@ -816,13 +819,22 @@ export class Orchestrator {
       this.conflictAsked.add(a.id);
       this.d.store.addCoordination({ projectId: a.projectId, kind: 'conflict', from: a.id, to: holder?.id, text: summary, files: r.conflicts.map((c) => c.file) });
       this.post(a.parentConversationId, 'system', `File conflict: "${a.title}" needs ${r.conflicts.map((c) => c.file).join(', ')} which "${holder?.title}" is editing.`);
-      void this.d.ask('conflict', `"${a.title}" wants to edit ${r.conflicts.map((c) => c.file).join(', ')}, currently owned by "${holder?.title}". Allow it to proceed in parallel? (Each works in its own worktree; the results will need integration.) Choose No to make it wait.`, a.id).then((allow) => {
+      const ctl = new AbortController();
+      this.conflictAsks.set(a.id, ctl);
+      void this.d.ask('conflict', `"${a.title}" wants to edit ${r.conflicts.map((c) => c.file).join(', ')}, currently owned by "${holder?.title}". Allow it to proceed in parallel? (Each works in its own worktree; the results will need integration.) Choose No to make it wait.`, a.id, ctl.signal).then((allow) => {
+        if (ctl.signal.aborted) return; // moot: the agent already got its files or ended
+        this.conflictAsks.delete(a.id);
         this.d.store.addCoordination({ projectId: a.projectId, kind: 'decision', text: `User ${allow ? 'allowed parallel editing' : 'chose to serialize'} for "${a.title}"`, from: a.id });
         if (allow) { a.sharedOk = true; this.d.store.upsertAgent(a); }
         this.pump(a.projectId);
       });
     }
     return false;
+  }
+
+  private withdrawConflictAsk(agentId: Id): void {
+    this.conflictAsks.get(agentId)?.abort();
+    this.conflictAsks.delete(agentId);
   }
 
   // ------------------------------------------------------------ running helpers
@@ -1031,6 +1043,7 @@ export class Orchestrator {
   private finished(a: AgentRecord): void {
     const { store } = this.d;
     this.conflictAsked.delete(a.id);
+    this.withdrawConflictAsk(a.id);
     const parent = a.parentConversationId;
     const verb = a.state === 'done' ? 'finished' : a.state === 'stopped' ? 'was stopped' : 'failed';
     this.post(parent, 'system', `${a.state === 'done' ? '✓' : '✗'} ${a.title} ${verb}${a.summary ? `: ${clip(a.summary, 200)}` : a.error ? `: ${clip(a.error, 200)}` : ''}`, { agentId: a.id });
@@ -1569,11 +1582,13 @@ export class Orchestrator {
     const minutes = `${n} ${timeoutMs >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`;
     const who = agent.role === 'main' ? 'The lead agent' : `"${agent.title}"`;
     const what = toolSummary(req);
+    const prompt = `${who} asks to run ${tool}${what ? `: ${what}` : ''}`;
     return new Promise<ToolPermissionDecision>((resolve) => {
       let cancelTimer = (): void => {};
       const onAbort = (): void => { this.finishToolAsk(requestId, { allow: false, message: 'Harbor cancelled this permission request because the run stopped.' }, 'cancelled: the run stopped'); };
+      const event: PendingPermission = { type: 'permission', requestId, kind: 'tool', prompt, agentId: agent.id, conversationId, tool, alwaysAllow: !!rule, expiresAt: Date.now() + timeoutMs };
       this.toolAsks.set(requestId, {
-        agentId: agent.id, projectId, conversationId, run, tool, rule,
+        agentId: agent.id, projectId, conversationId, run, tool, rule, event,
         settle: (d) => { cancelTimer(); signal.removeEventListener('abort', onAbort); resolve(d); }
       });
       signal.addEventListener('abort', onAbort, { once: true });
@@ -1583,10 +1598,9 @@ export class Orchestrator {
           'denied: no answer in time', `No answer within ${minutes}: denied ${tool}. The agent was told to continue without it.`);
       }, timeoutMs);
       const choices = rule ? 'allow once, always allow for this project, or deny' : 'allow once or deny (this call cannot be always-allowed)';
-      const prompt = `${who} asks to run ${tool}${what ? `: ${what}` : ''}`;
       this.post(conversationId, 'system', `${prompt}\nWaiting for your answer (${choices}). Denied automatically after ${minutes}.`, { agentId: agent.id });
       journal('asked the user');
-      this.emit({ type: 'permission', requestId, kind: 'tool', prompt, agentId: agent.id, conversationId, tool, alwaysAllow: !!rule, expiresAt: Date.now() + timeoutMs });
+      this.emit(event);
     });
   }
 
@@ -1605,6 +1619,9 @@ export class Orchestrator {
       always ? 'allowed once (always-allow is not available for this call)' : 'allowed once',
       always ? `Allowed ${p.tool} once. This kind of call cannot be always-allowed, so Harbor will ask again next time.` : `Allowed ${p.tool} once.`);
   }
+
+  /** Pending tool permission requests as the events that announced them. */
+  pendingToolEvents(): PendingPermission[] { return [...this.toolAsks.values()].map((p) => p.event); }
 
   /** Request ids of pending tool permission requests (tests and diagnostics). */
   pendingToolAsks(): Id[] { return [...this.toolAsks.keys()]; }

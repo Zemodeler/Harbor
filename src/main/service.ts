@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, ConversationMode, HarborApi, HarborEvent, Id, Project } from '../shared/api';
+import type { Attachment, CliId, ConversationMode, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -146,12 +146,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
 
   // ---- permissions: every request is an event; nothing is granted without an explicit answer.
-  const pending = new Map<Id, (allow: boolean) => void>();
-  const ask = (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id) =>
+  const pending = new Map<Id, { resolve: (allow: boolean) => void; event: PendingPermission }>();
+  const ask = (kind: 'freeReset' | 'tool' | 'conflict', prompt: string, agentId?: Id, signal?: AbortSignal) =>
     new Promise<boolean>((resolve) => {
       const requestId = newId();
-      pending.set(requestId, resolve);
-      bus.emit({ type: 'permission', requestId, kind, prompt, agentId });
+      const event: PendingPermission = { type: 'permission', requestId, kind, prompt, agentId };
+      pending.set(requestId, { resolve, event });
+      signal?.addEventListener('abort', () => { if (pending.delete(requestId)) resolve(false); }, { once: true });
+      bus.emit(event);
     });
 
   const freeReset = new FreeResetCoordinator({
@@ -381,8 +383,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const r = pending.get(requestId);
       if (!r) return;
       pending.delete(requestId);
-      r(allow);
+      r.resolve(allow);
     },
+    async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },
     async removeToolRule(projectId, ruleId) {

@@ -491,6 +491,17 @@ describe('file conflicts', () => {
     return h;
   };
 
+  it('withdraws an unanswered conflict question once the waiting agent got its files', async () => {
+    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false });
+    let asked = 0;
+    h.svc.onEvent((e) => { if (e.type === 'permission') asked++; });
+    await h.svc.send(h.conv.id, 'go');
+    await h.svc.whenIdle();
+    expect(asked).toBe(1);
+    expect(h.svc.store.listAgentRecords(h.project.id).filter((a) => a.role === 'implementer').map((a) => a.state)).toEqual(['done', 'done']);
+    expect(await h.svc.listPendingPermissions()).toEqual([]);
+  });
+
   it('serializes on denial: B waits for A, then runs; permission was kind conflict', async () => {
     const h = await run(false);
     const perms = h.events.filter((e) => e.type === 'permission');
