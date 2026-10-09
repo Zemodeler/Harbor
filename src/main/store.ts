@@ -168,10 +168,15 @@ export class Store {
 
   // ---- CLI processes Harbor started (so a later run can kill orphans)
   listTrackedProcesses(): TrackedProcess[] { return [...(this.state.processes ?? [])]; }
-  trackProcess(p: TrackedProcess): void { this.state.processes = [...(this.state.processes ?? []).filter((x) => x.pid !== p.pid), p]; this.dirty(); }
-  untrackProcess(pid: number): void {
-    if (!this.state.processes?.some((x) => x.pid === pid)) return;
-    this.state.processes = this.state.processes.filter((x) => x.pid !== pid);
+  trackProcess(p: TrackedProcess): void {
+    this.state.processes = [...(this.state.processes ?? []).filter((x) => x.pid !== p.pid), p];
+    // A spawn must survive a crash immediately; ordinary state changes remain debounced.
+    this.flush();
+  }
+  untrackProcess(pid: number, started?: number): void {
+    // Callers without an identity cannot safely remove a potentially reused PID.
+    if (!this.state.processes?.some((x) => x.pid === pid && x.started === started)) return;
+    this.state.processes = this.state.processes.filter((x) => x.pid !== pid || x.started !== started);
     this.dirty();
   }
   clearTrackedProcesses(): void { if (this.state.processes?.length) { this.state.processes = []; this.dirty(); } }

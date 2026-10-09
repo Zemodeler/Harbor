@@ -25,10 +25,15 @@ export interface TrackedProcess {
   name: string;
   /** Spawn time, epoch ms. */
   started: number;
+  /** Harbor instance that spawned this process; absent on legacy records. */
+  owner?: ProcessOwner;
 }
 
+export interface ProcessOwner { pid: number; started: number }
+const processOwner: ProcessOwner = { pid: process.pid, started: Date.now() - process.uptime() * 1000 };
+
 /** Told about every CLI spawn; the orchestrator persists these so orphans survive a Harbor crash. */
-export interface SpawnObserver { spawned(p: TrackedProcess): void; exited(pid: number): void }
+export interface SpawnObserver { spawned(p: TrackedProcess): void; exited(pid: number, started: number): void }
 let observer: SpawnObserver | undefined;
 export function setSpawnObserver(o: SpawnObserver | undefined): void { observer = o; }
 
@@ -45,9 +50,10 @@ export function spawnCli(exe: string, args: string[], opts: SpawnOptions = {}): 
   const pid = child.pid;
   if (pid && observer) {
     const o = observer;
-    o.spawned({ pid, name: procName(exe), started: Date.now() });
-    child.once('close', () => o.exited(pid));
-    child.once('error', () => o.exited(pid));
+    const started = Date.now();
+    o.spawned({ pid, name: procName(exe), started, owner: { ...processOwner } });
+    child.once('close', () => o.exited(pid, started));
+    child.once('error', () => o.exited(pid, started));
   }
   return child;
 }
@@ -57,6 +63,8 @@ export interface ProcessKiller {
   /** Name (no extension, lowercase) and start time (epoch ms) of a live process, or undefined when no such process exists. */
   inspect(pid: number): Promise<{ name: string; started: number } | undefined>;
   kill(pid: number): Promise<void>;
+  /** Injectable Harbor-owner liveness check, including its start time to guard PID reuse. */
+  ownerAlive?(owner: ProcessOwner): Promise<boolean>;
 }
 
 /** Allowed gap between our Date.now() at spawn and the OS start time of the process. */
@@ -65,6 +73,37 @@ export const START_TOLERANCE_MS = 10_000;
 /** A recorded PID is only ours if the live process has the same name and started when we spawned it (guards against PID reuse). */
 export function matchesTracked(t: TrackedProcess, live: { name: string; started: number } | undefined): boolean {
   return !!live && live.name === t.name && Math.abs(live.started - t.started) <= START_TOLERANCE_MS;
+}
+
+export async function isOwnerAlive(owner: ProcessOwner): Promise<boolean> {
+  try { process.kill(owner.pid, 0); }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+  const live = await systemKiller.inspect(owner.pid);
+  // If inspection is unavailable, keep the process belonging to a live PID safe.
+  return !live || Math.abs(live.started - owner.started) <= START_TOLERANCE_MS;
+}
+
+/** Keep live owners' records; legacy entries retain the original orphan-recovery policy. */
+export async function reapTrackedProcesses(
+  entries: readonly TrackedProcess[],
+  store: { untrackProcess(pid: number, started: number): void },
+  killer: ProcessKiller
+): Promise<{ killed: number[]; skipped: number[] }> {
+  const out: { killed: number[]; skipped: number[] } = { killed: [], skipped: [] };
+  for (const entry of entries) {
+    try {
+      if (entry.owner && await (killer.ownerAlive ?? isOwnerAlive)(entry.owner)) {
+        out.skipped.push(entry.pid);
+        continue;
+      }
+      store.untrackProcess(entry.pid, entry.started);
+      if (matchesTracked(entry, await killer.inspect(entry.pid))) {
+        await killer.kill(entry.pid);
+        out.killed.push(entry.pid);
+      } else out.skipped.push(entry.pid);
+    } catch { out.skipped.push(entry.pid); }
+  }
+  return out;
 }
 
 export const systemKiller: ProcessKiller = {

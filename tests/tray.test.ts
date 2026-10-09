@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { shouldHideOnClose, trayMenuModel, trayTooltip } from '../src/main/tray';
+import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } from '../src/main/tray';
 import type { AgentState } from '../src/shared/api';
 
 describe('tray policy', () => {
+  it('starts only the instance holding the lock', () => {
+    expect(instanceStartupAction(true)).toBe('start');
+    expect(instanceStartupAction(false)).toBe('quit');
+  });
   it('only hides when explicitly enabled and not quitting', () => {
     expect(shouldHideOnClose({}, false)).toBe(false);
     expect(shouldHideOnClose({ keepRunningInBackground: false }, false)).toBe(false);
