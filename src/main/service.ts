@@ -360,6 +360,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (target !== undefined && typeof target !== 'string') throw new Error('Name an existing local branch, or leave the target out.');
       return previewRollback({ git, repo: needProject(a.projectId).path, agents: store.listAgentRecords(a.projectId) }, a, target);
     },
+    async rollbackTask(agentId, target) { await ready; return toAgent(orchestrator.rollbackTask(agentId, target)); },
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },
