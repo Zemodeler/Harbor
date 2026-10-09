@@ -3,10 +3,21 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
 import type { TrackedProcess } from './proc';
-import type { AgentRecord, CoordinationEntry, FileLock, SessionLink, State, UsageEvent } from './types';
+import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
 
-/** State plus fields added after version 1; `processes` is optional so older files still load. */
-type Persisted = State & { processes?: TrackedProcess[] };
+/**
+ * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
+ * report delivery (`AgentRecord.reportDelivery`); its absence means a file written before that existed.
+ */
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1 };
+
+/** One helper result, as captured when its report was queued for the lead. */
+export type ReportMark = Pick<AgentRecord, 'id' | 'revision' | 'state'>;
+
+const TERMINAL_STATES = ['done', 'failed', 'stopped'];
+/** A mark never moves to a weaker status for the same result. */
+const DELIVERY_RANK: Record<ReportDelivery['status'], number> = { unknown: 0, attempted: 1, skipped: 2, confirmed: 3 };
+const sameResult = (d: ReportDelivery | undefined, m: ReportMark): boolean => !!d && d.revision === m.revision && d.state === m.state;
 
 export const DEFAULT_SETTINGS: Settings = { routing: 'auto', cliOverrides: {}, allowFreeReset: 'ask' };
 
@@ -34,14 +45,16 @@ export class Store {
   }
 
   private load(): Persisted {
-    if (!this.file || !existsSync(this.file)) return emptyState();
+    if (!this.file || !existsSync(this.file)) return { ...emptyState(), reportLedger: 1 };
     try {
-      const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<State>;
-      return { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
+      const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Persisted>;
+      const state: Persisted = { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
+      if (!state.reportLedger) markLegacyReports(state);
+      return state;
     } catch {
       // Keep the unreadable file for inspection rather than silently overwriting it.
       try { renameSync(this.file, `${this.file}.corrupt-${Date.now()}`); } catch { /* ignore */ }
-      return emptyState();
+      return { ...emptyState(), reportLedger: 1 };
     }
   }
 
@@ -142,6 +155,46 @@ export class Store {
     return a;
   }
 
+  /**
+   * Records how far these results got towards the lead. Written to disk at once: a crash must not lose an `attempted` mark
+   * (the report would come back as never sent) or a `confirmed` one (it would come back as uncertain). A mark never moves
+   * to a weaker status for the same result, and a mark for a stale result never replaces the mark of the current one.
+   */
+  markReports(marks: ReportMark[], status: ReportDelivery['status']): void {
+    const time = Date.now();
+    for (const m of marks) {
+      const a = this.getAgent(m.id);
+      const cur = a?.reportDelivery;
+      if (!a) continue;
+      if (sameResult(cur, m) ? DELIVERY_RANK[cur!.status] >= DELIVERY_RANK[status] : cur && (cur.revision > m.revision || sameResult(cur, a))) continue;
+      a.reportDelivery = { v: 1, revision: m.revision, state: m.state, status, time };
+    }
+    this.flush();
+  }
+  /** A turn marked `attempted` never reached a CLI after all (no output): the results get the mark they had before it. */
+  restoreReports(entries: Array<{ mark: ReportMark; prev: ReportDelivery | undefined }>): void {
+    for (const { mark, prev } of entries) {
+      const a = this.getAgent(mark.id);
+      if (!a || !sameResult(a.reportDelivery, mark) || a.reportDelivery!.status !== 'attempted') continue;
+      if (prev) a.reportDelivery = prev; else delete a.reportDelivery;
+    }
+    this.flush();
+  }
+  /** The user was told these results may not have reached the lead. */
+  noticeReports(marks: ReportMark[]): void {
+    const time = Date.now();
+    for (const m of marks) {
+      const a = this.getAgent(m.id);
+      if (a && sameResult(a.reportDelivery, m)) a.reportDelivery!.noticed = time;
+    }
+    this.dirty();
+  }
+  /** A stopped agent resumed in place keeps its revision: its old mark must not hide the outcome of the resumed run. */
+  clearReportDelivery(id: Id): void {
+    const a = this.getAgent(id);
+    if (a?.reportDelivery) { delete a.reportDelivery; this.dirty(); }
+  }
+
   // ---- sessions (native CLI session ids)
   getSession(agentId: Id): SessionLink | undefined { return this.state.sessions.find((s) => s.agentId === agentId); }
   setSession(link: SessionLink): void {
@@ -218,6 +271,20 @@ export class Store {
     this.state.settings = next;
     this.dirty(); return this.state.settings;
   }
+}
+
+/**
+ * A file written before report delivery was recorded. Its finished helpers were probably reported as they finished, but a
+ * report may also have been waiting for a lead turn when that Harbor stopped. Nothing proves either, so they are marked
+ * `unknown`: the report is kept and reaches the lead flagged as possibly seen, instead of being dropped or replayed silently.
+ * Helpers still running then are left alone: after recovery stops them, their outcome is an ordinary pending report.
+ */
+function markLegacyReports(state: Persisted): void {
+  const time = Date.now();
+  for (const a of state.agents) {
+    if (a.role !== 'main' && !a.byUser && !a.reportDelivery && TERMINAL_STATES.includes(a.state)) a.reportDelivery = { v: 1, revision: a.revision, state: a.state, status: 'unknown', time };
+  }
+  state.reportLedger = 1;
 }
 
 // ---- settings validation and resolution (pure)
