@@ -10,7 +10,7 @@ import { breakCycles } from './graph';
 import { Journal, journalDigest, type JournalEntry, type JournalKind } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
 import { reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
@@ -106,6 +106,8 @@ interface RoutedOptions {
   /** Keep `effort` as given: the effort policy does not apply. */
   fixedEffort?: boolean;
   retry?: boolean;
+  /** CLI the user asked for by name. */
+  preferCli?: CliId;
   permission: 'read-only' | 'edit' | 'full';
   /** Absolute paths of images for this turn only. */
   images?: string[];
@@ -469,6 +471,9 @@ export class Orchestrator {
           if (c === 'handled') return;
           plan = c;
         } // else: this message answers the lead's own question, so there is nothing to triage
+        // An explicit "use codex" applies to this request (and its go-aheads); other messages keep the earlier choice.
+        const asked = requestedCli(trigger.text);
+        if (asked) plan = { ...plan, preferCli: asked };
         this.plans.set(conversationId, plan);
         // Vision is a need of this turn only; later go-ahead turns must not inherit it.
         if (trigger.images?.length && !plan.needs.includes('vision')) plan = { ...plan, needs: [...plan.needs, 'vision'] };
@@ -530,7 +535,7 @@ export class Orchestrator {
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
-      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs,
+      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli,
       permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
       images: trigger.kind === 'user' ? trigger.images : undefined,
       signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true
@@ -1595,7 +1600,7 @@ export class Orchestrator {
       const link = store.getSession(key);
       // Read every attempt: a settings change applies to the next routing decision, not only to new agents.
       const eff = effectiveSettings(store.getSettings(), agent.projectId);
-      const routeWith = (requireCli?: CliId) => route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, fixedEffort: o.fixedEffort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude, requireCli }, {
+      const routeWith = (requireCli?: CliId) => route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, fixedEffort: o.fixedEffort, retry: o.retry, prefer: o.preferCli, continuity: o.resume ? link?.cli : undefined, exclude, requireCli }, {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
         verified: this.d.verified, catalog: this.d.catalog,

@@ -15,6 +15,9 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
   const latestMessage = state.messages.filter(m => m.details).at(-1);
   const model = c?.activity?.model || latestMessage?.details?.model || agent?.model;
   const cli = c?.activity?.cli || latestMessage?.details?.cli || agent?.cli;
+  // The reason must explain the model shown: the concierge's reply (haiku) is newer than the lead's until the lead speaks.
+  const reasonFrom = state.messages.filter(m => m.details?.reason && m.details.model === model && m.details.cli === cli).at(-1);
+  const reason = reasonFrom?.details?.reason ?? (model && latestMessage?.details?.model && latestMessage.details.model !== model ? undefined : latestMessage?.details?.reason);
   useEffect(() => {
     if (!['working', 'queued'].includes(status)) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -29,7 +32,7 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
       <dt>Current step</dt><dd>{c.activity?.detail || (status === 'waiting' ? 'Waiting for a response or dependency.' : 'No active lead step.')}</dd>
       <dt>Connection</dt><dd>{cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex' : cli || 'Not assigned'}</dd><dt>Model</dt><dd>{model === 'default' ? 'Connection default' : model && model !== 'auto' ? model : 'Assigned when work starts'}</dd>
       {model?.toLowerCase().includes('haiku') ? <><dt>Why this model?</dt><dd>Haiku is a lightweight Claude model. Harbor uses it for the first pass and smaller tasks.</dd></> : null}
-      {latestMessage?.details?.reason ? <><dt>Routing reason</dt><dd>{latestMessage.details.reason}</dd></> : null}
+      {reason ? <><dt>Routing reason</dt><dd>{reason}</dd></> : null}
       {c.activity?.complexity ? <><dt>Complexity</dt><dd><ComplexityBadge complexity={c.activity.complexity}/></dd></> : null}
       {c.activity?.effort ? <><dt>Effort</dt><dd>{c.activity.effort}</dd></> : null}
       {c.mode && c.mode !== 'default' ? <><dt>Mode</dt><dd>{modes.find(m => m.id === c.mode)?.label}{c.mode === 'goal' && c.goal ? `: ${c.goal}` : ''}</dd></> : null}
