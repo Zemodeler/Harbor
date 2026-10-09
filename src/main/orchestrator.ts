@@ -88,6 +88,8 @@ interface RoutedOptions {
   resume: boolean;
   conversationId: Id;
   stream: boolean;
+  /** Lead turns: forbid git merge/rebase/cherry-pick/reset/push in CLIs that can enforce it. */
+  denyGitWrites?: boolean;
   /** Key of the native session to resume and record; defaults to the agent id. */
   sessionKey?: Id;
 }
@@ -492,14 +494,16 @@ export class Orchestrator {
     const mode = conv?.mode ?? 'default';
     const goal = mode === 'goal' ? conv?.goal : undefined;
     const goalMode = !!goal;
+    const headBefore = await this.d.git.head(project.path).catch(() => undefined);
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
       role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs,
       permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
       images: trigger.kind === 'user' ? trigger.images : undefined,
-      signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
+      signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true
     });
+    await this.detectLeadMerge(project, main, conversationId, headBefore);
     if (!out.ok) {
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
       this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The lead agent could not run: ${out.error}`, { agentId: main.id });
@@ -533,6 +537,31 @@ export class Orchestrator {
     }
     this.pump(project.id);
     if (goalMode) this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking);
+  }
+
+  /**
+   * Backstop for the rule that only the integrator lands harbor/* branches: if a harbor/* head became reachable from the
+   * project's HEAD during the lead's turn, the lead merged (or fast-forwarded to) one itself. Works for every CLI.
+   */
+  private async detectLeadMerge(project: Project, main: AgentRecord, conversationId: Id, before: string | undefined): Promise<void> {
+    if (!before) return;
+    try {
+      const { git } = this.d;
+      const after = await git.head(project.path);
+      if (!after || after === before) return;
+      const merged: string[] = [];
+      const seen = new Set<string>();
+      for (const r of this.d.store.listAgentRecords(project.id)) {
+        if (!r.branch?.startsWith('harbor/') || seen.has(r.branch)) continue;
+        seen.add(r.branch);
+        const head = await git.branchHead(project.path, r.branch);
+        if (head && head !== before && !(await git.isAncestor(project.path, head, before)) && await git.isAncestor(project.path, head, after)) merged.push(r.branch);
+      }
+      if (!merged.length) return;
+      const list = merged.join(', ');
+      this.post(conversationId, 'system', `Warning: the lead merged ${list} into the project itself. Branches should land through an integrator helper so they are gated and applied by you. Check the project's history before building on it.`, { agentId: main.id });
+      this.log({ kind: 'protocol', projectId: project.id, conversationId, agentId: main.id, text: `Lead merged helper branch(es) itself: ${list}` });
+    } catch { /* detection must never break a lead turn */ }
   }
 
   /** True while any helper of the conversation (not only this turn's) is queued, running or waiting. */
@@ -1231,7 +1260,7 @@ export class Orchestrator {
       const details = { cli: decision.cli, model: decision.model, effort: decision.effort, reason: decision.reason };
       const t0 = Date.now();
       try {
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, signal: o.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, signal: o.signal }) as AsyncIterable<Chunk>) {
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now() });
           else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
