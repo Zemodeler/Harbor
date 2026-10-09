@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractJson, imageBriefText, parseConcierge, parseProtocol, stripProtocol } from '../src/main/prompts';
+import { clipMiddle, extractJson, historyText, imageBriefText, needsWorkspace, parseConcierge, parseProtocol, stripProtocol } from '../src/main/prompts';
 
 describe('prompt parsing', () => {
   it('extracts JSON from fences and chatter, handling braces inside strings', () => {
@@ -22,6 +22,40 @@ describe('prompt parsing', () => {
     expect(p.ask).toHaveLength(1);
     expect(p.ask[0]).toMatchObject({ question: 'Pick?', options: ['a', 'b', 'c', 'd', 'e', 'f'], allowText: false });
     expect(stripProtocol(t)).toBe('text');
+  });
+});
+
+describe('self-reporting and history', () => {
+  it('parses HARBOR_RESULT, keeps the last one, and reports malformed protocol lines instead of dropping them silently', () => {
+    const p = parseProtocol([
+      'done',
+      'HARBOR_RESULT: {"outcome":"partial","summary":"first"}',
+      'HARBOR_RESULT: {"outcome":"done","summary":"Added x.","verdict":"bogus","checks":[{"cmd":"npm test","ok":true},{"cmd":"npm run build"},{"nope":1}]}',
+      'HARBOR_RESULT: {"outcome":"great"}',
+      'HARBOR_DELEGATE: {"ref":"a",',
+      'HARBOR_ASK: {"options":["x"]}'
+    ].join('\n'));
+    expect(p.result).toEqual({ outcome: 'done', summary: 'Added x.', verdict: undefined, checks: [{ cmd: 'npm test', ok: true }, { cmd: 'npm run build', ok: false }] });
+    expect(p.malformed).toHaveLength(3);
+    expect(stripProtocol('done\nHARBOR_RESULT: {"outcome":"done"}')).toBe('done');
+  });
+
+  it('keeps the end of long history messages, where conclusions are, and gives the latest exchange more room', () => {
+    const long = `start ${'x'.repeat(3000)} CONCLUSION`;
+    const msg = (text: string, role: 'user' | 'assistant' = 'assistant') => ({ id: text.slice(0, 8), conversationId: 'c', role, text, time: 0 });
+    const h = historyText([msg(long), msg('q1', 'user'), msg('a1'), msg(long)]);
+    const [old, , , latest] = h.split('\n');
+    expect(old).toMatch(/^Assistant: start x+ … \[\d+ chars omitted\] … x+ CONCLUSION$/);
+    expect(old!.length).toBeLessThan(700);
+    expect(latest!.length).toBeGreaterThan(1900);
+    expect(clipMiddle('short', 10)).toBe('short');
+  });
+
+  it('flags messages that need the workspace, but not small talk or status questions', () => {
+    for (const t of ['fix src/app.ts', 'why does this throw TypeError: x is undefined', 'refactor the router', 'how would you improve yourself', '```\ncode\n```'])
+      expect(needsWorkspace(t), t).toBe(true);
+    for (const t of ['hello', 'thanks, the fix works', 'is the build done?', 'what is the capital of France?'])
+      expect(needsWorkspace(t), t).toBe(false);
   });
 });
 

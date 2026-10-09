@@ -30,7 +30,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 19. **API fallback** (L): key storage (OS credential store), ask-before-use, hard per-task/per-period limits.
 20. **Storage**: split messages per conversation file or move to SQLite when `state.json` grows; add pagination to `listMessages`.
 21. **Archive conversations**, history search.
-22. **`CLAUDE.md` containing `@AGENTS.md`** (S) so Claude Code subagents read these rules automatically (Codex already reads `AGENTS.md`). Not done because it was outside the original ownership list.
+22. ~~**`CLAUDE.md` containing `@AGENTS.md`**~~ Done (branch `harbor/self-improve-2`).
 23. **Tray / background-on-close preference** (UI + main).
 
 ## Lead rework (concierge + lead) — what is done and what is next
@@ -41,7 +41,13 @@ Next:
 - **Delta streaming for the lead** (M): backlog P0 #5; lead text currently arrives per CLI message, not per token.
 - **Interactive tool permissions for the lead** (L): P1 #6. The lead runs with `acceptEdits` and the allowlist in `adapters/claude.ts`; anything else is denied silently.
 - **Codex model ids** (S): fill `DEFAULT_CATALOG` with verified Codex models and tiers once P0 #1 is done.
-- **Concierge quality** (S): watch for wrong "simple" answers; `/deep` forces a strong lead. Consider a per-conversation "always use lead" toggle.
+- **Concierge quality** (S): the `needsWorkspace` guard overrides front-desk answers to workspace requests, and guarded answers, unparseable replies and "/deep after an answer" are journaled. Use `/journal` to see whether the guard is too broad or too narrow. Consider a per-conversation "always use lead" toggle.
+- **Self-improvement follow-ups** (from `harbor/self-improve-2`):
+  - Check runs are not surfaced in the UI. `AgentRecord.checks` / `testedCommit` are main-process only; exposing them needs optional `Agent` fields (contract change + UI request).
+  - Checks run sequentially with a 15-minute timeout per command and hold the helper's concurrency slot meanwhile. Consider a separate check queue if builds get slow.
+  - The worktree's `node_modules` junction is only created when `node_modules` is git-ignored. Projects without it need a setup command before checks (`.harbor/checks.json` could gain `"setup"`).
+  - A running conversation summary for the lead was not added: the head+tail history clipping covers the observed loss. Revisit if resumed sessions break often.
+  - Concierge session reuse (prompt caching) was not done. It needs measurement with a real CLI first.
 - **Doc reconcile** (product owner): README and `docs/*` still describe the old planner/implementer pipeline and sibling messaging.
 
 ## UI requests (src/renderer — owned by the UI engineer)

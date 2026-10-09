@@ -13,7 +13,7 @@ import {
 } from './prompts';
 import { route, type Complexity, type RouteDecision } from './router';
 import { newId, type Store } from './store';
-import type { AgentRecord } from './types';
+import type { AgentRecord, CheckRun } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
 
@@ -99,12 +99,18 @@ export class Orchestrator {
   private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
   private sessionGeneration = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
+  /** Last front-desk outcome per conversation, to notice the user overriding an answer with /deep. */
+  private lastTriage = new Map<Id, 'answer' | 'escalate'>();
+  readonly journal: Journal;
 
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
+    this.journal = d.journal ?? new Journal();
   }
 
   get lockTable(): LockTable { return this.locks; }
+
+  private log(e: Omit<JournalEntry, 'time'>): void { this.journal.add(e); }
 
   // ------------------------------------------------------------ plumbing
 
@@ -214,12 +220,12 @@ export class Orchestrator {
     const agent = this.d.store.getAgent(conv.agentId);
     if (!agent) throw new Error('Conversation has no agent');
     if (conv.archived) throw new Error('Restore this conversation before sending a message.');
-    this.post(conversationId, 'user', text, { agentId: agent.id });
+    const posted = this.post(conversationId, 'user', text, { agentId: agent.id });
     for (const [id, q] of this.questions) if (q.conversationId === conversationId) this.questions.delete(id);
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: clip(text.replace(/\s+/g, ' '), 50) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
-      this.enqueueMain(agent.projectId, { kind: 'user', text }, conversationId);
+      this.enqueueMain(agent.projectId, { kind: 'user', text, messageId: posted.id }, conversationId);
     } else {
       this.direct(agent, text, conversationId);
     }
@@ -279,13 +285,20 @@ export class Orchestrator {
       }
       let plan: Escalation = this.plans.get(conversationId) ?? { complexity: 'medium', needs: [], ack: '' };
       if (trigger.kind === 'user') {
+        const journal = /^\/journal\b\s*(review)?/i.exec(trigger.text);
+        if (journal && !journal[1]) { this.post(conversationId, 'system', journalDigest(this.journal.list(projectId)), { agentId: main.id }); return; }
         const deep = /^\/deep\b\s*/i.exec(trigger.text);
-        if (deep) {
+        if (journal) {
+          // Harbor reviewing its own failures: the lead turns recurring patterns into backlog items.
+          plan = { complexity: 'medium', needs: ['planning', 'review'], ack: '' };
+          trigger = { ...trigger, text: `Review Harbor's run journal for this project and find recurring problems (prompt-format drift, failing helpers, fallbacks, failed checks, wrong triage). For each real pattern, propose one concrete, bounded BACKLOG.md item with the evidence. Do not change code.\n\n${journalDigest(this.journal.list(projectId), 200)}` };
+        } else if (deep) {
           // "/deep" skips the front desk and gives the lead a strong model.
+          if (this.lastTriage.get(conversationId) === 'answer') this.log({ kind: 'triage', projectId, conversationId, text: `User re-asked with /deep after a front-desk answer: ${clip(trigger.text, 200)}` });
           plan = { complexity: 'high', needs: ['planning', 'code'], ack: '' };
-          trigger = { kind: 'user', text: trigger.text.slice(deep[0].length) || trigger.text };
+          trigger = { ...trigger, text: trigger.text.slice(deep[0].length) || trigger.text };
         } else if (!this.leadAsked.has(conversationId)) {
-          const c = await this.concierge(project, main, conversationId, trigger.text, ctl.signal);
+          const c = await this.concierge(project, main, conversationId, trigger.text, ctl.signal, trigger.messageId);
           if (c === 'handled') return;
           plan = c;
         } // else: this message answers the lead's own question, so there is nothing to triage
@@ -306,15 +319,21 @@ export class Orchestrator {
     return this.d.store.listAgentRecords(projectId).filter((x) => x.role !== 'main' && x.parentConversationId === conversationId);
   }
 
-  private chatHistory(conversationId: Id, excludeLatest: boolean): Message[] {
-    const msgs = this.d.store.listMessages(conversationId).filter((m) => m.role === 'user' || m.role === 'assistant');
-    return (excludeLatest ? msgs.slice(0, -1) : msgs).slice(-10);
+  /**
+   * Chat history up to (not including) the triggering user message. Cut by id, not position: the concierge's
+   * acknowledgement is posted after the user message, so "drop the last one" dropped the ack and kept the prompt twice.
+   */
+  private chatHistory(conversationId: Id, before?: Id): Message[] {
+    let msgs = this.d.store.listMessages(conversationId);
+    const i = before ? msgs.findIndex((m) => m.id === before) : -1;
+    if (i >= 0) msgs = msgs.slice(0, i);
+    return msgs.filter((m) => m.role === 'user' || m.role === 'assistant').slice(-10);
   }
 
   /** Cheap model: answers simple messages itself, otherwise says what the work needs. Never uses tools. */
-  private async concierge(project: Project, main: AgentRecord, conversationId: Id, text: string, signal: AbortSignal): Promise<'handled' | Escalation> {
+  private async concierge(project: Project, main: AgentRecord, conversationId: Id, text: string, signal: AbortSignal, messageId?: Id): Promise<'handled' | Escalation> {
     const out = await this.runRouted(main, {
-      prompt: conciergePrompt(project.name, this.registerFor(project.id, conversationId), this.chatHistory(conversationId, true).slice(-8), text), system: CONCIERGE_SYSTEM,
+      prompt: conciergePrompt(project.name, this.registerFor(project.id, conversationId), this.chatHistory(conversationId, messageId).slice(-8), text), system: CONCIERGE_SYSTEM,
       role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'], permission: 'read-only', cwd: project.path,
       signal, resume: false, conversationId, stream: false, sessionKey: `concierge:${conversationId}`
     });
@@ -327,8 +346,14 @@ export class Orchestrator {
     const d = parseConcierge(out.text);
     // The front desk cannot read files: an answer to a message that clearly needs the workspace is a guess, so the lead takes it.
     // Medium (not high): the guard knows work is needed, not how hard it is, and must not buy Opus for a trivial edit.
-    if (d.kind === 'answer' && needsWorkspace(text)) return { complexity: 'medium', needs: ['code'], ack: '' };
-    if (d.kind === 'answer') { this.post(conversationId, 'assistant', d.text, { agentId: main.id, details }); return 'handled'; }
+    if (d.kind === 'answer' && needsWorkspace(text)) {
+      this.log({ kind: 'triage', projectId: project.id, conversationId, text: `Front desk tried to answer a workspace request; escalated instead: ${clip(text, 200)}` });
+      this.lastTriage.set(conversationId, 'escalate');
+      return { complexity: 'medium', needs: ['code'], ack: '' };
+    }
+    if (d.kind === 'answer') { this.lastTriage.set(conversationId, 'answer'); this.post(conversationId, 'assistant', d.text, { agentId: main.id, details }); return 'handled'; }
+    this.lastTriage.set(conversationId, 'escalate');
+    if (!d.parsed) this.log({ kind: 'triage', projectId: project.id, conversationId, text: `Front desk reply was not valid JSON (escalated by default): ${clip(out.text, 200)}` });
     if (d.escalation.ack) this.post(conversationId, 'assistant', d.escalation.ack, { agentId: main.id, details });
     return d.escalation;
   }
@@ -337,20 +362,28 @@ export class Orchestrator {
   private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal): Promise<void> {
     const notes = this.notes.get(conversationId) ?? [];
     this.notes.delete(conversationId);
-    const history = this.chatHistory(conversationId, trigger.kind === 'user');
+    const history = this.chatHistory(conversationId, trigger.kind === 'user' ? trigger.messageId : undefined);
     const tier: Tier = plan.complexity === 'high' ? 'strong' : plan.complexity === 'low' ? 'cheap' : 'standard';
+    // Only claim a lost session when there was one: otherwise the model acts as if it forgot something.
+    const hadSession = !!this.d.store.getSession(`lead:${conversationId}`);
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes }), system: LEAD_SYSTEM,
-      contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
+      contextIfNoResume: history.length ? `Conversation so far${hadSession ? ' (your earlier session could not be resumed)' : ''}:\n${historyText(history)}` : undefined,
       role: 'main', complexity: plan.complexity, tier, effort: plan.complexity, needs: plan.needs, permission: 'edit', cwd: project.path,
       signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
     });
     if (!out.ok) {
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
       this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `The lead agent could not run: ${out.error}`, { agentId: main.id });
+      if (!out.stopped) this.log({ kind: 'lead-failed', projectId: project.id, conversationId, text: out.error ?? 'unknown error' });
       return;
     }
     const proto = parseProtocol(out.allText ?? out.text);
+    if (proto.malformed.length) {
+      // Tell the lead next turn, so a broken delegation is redone instead of silently missing.
+      this.addNote(conversationId, `Harbor ignored ${proto.malformed.length} malformed protocol line(s) from your last turn: ${proto.malformed.map((l) => clip(l, 120)).join(' | ')}`);
+      for (const l of proto.malformed) this.log({ kind: 'protocol', projectId: project.id, conversationId, agentId: main.id, text: `lead: ${l}` });
+    }
     const created = this.createTasks(project, proto.delegate, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined);
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     if (created.length) {
@@ -482,6 +515,7 @@ export class Orchestrator {
     this.locks.release(a.id);
     this.setState(a, 'failed', { error });
     this.post(this.convFor(a), 'system', `Failed: ${error}`, { agentId: a.id });
+    this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${error}` });
     this.finished(a);
   }
 
@@ -543,13 +577,17 @@ export class Orchestrator {
 
   private async afterRun(a: AgentRecord, res: RoutedRun): Promise<void> {
     const { store, git } = this.d;
-    this.running.delete(a.id);
-    this.controllers.delete(a.id);
+    // Still "running" while Harbor checkpoints and checks, so stop() aborts the checks instead of finishing the agent twice.
+    const ctl = this.controllers.get(a.id);
     let report = stripProtocol(res.text);
     const proto = parseProtocol(res.allText ?? res.text);
+    if (proto.result) a.result = proto.result;
+    for (const l of proto.malformed) this.log({ kind: 'protocol', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${l}` });
+    if (!res.ok && !res.stopped) this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}" on ${a.cli}/${a.model}: ${res.error ?? 'failed'}` });
 
     if (res.ok && a.worktree && a.baseCommit) {
       const cp = await git.checkpoint(a.worktree, `harbor: ${a.title}`);
+      if (cp.head) a.headCommit = cp.head;
       const stat = await git.diffStat(a.worktree, a.baseCommit);
       const files = await git.changedFiles(a.worktree, a.baseCommit);
       if (stat) report += `\n\nChanges on ${a.branch}${cp.committed ? ' (uncommitted work was checkpointed by Harbor)' : ''}:\n${stat}`;
@@ -560,18 +598,24 @@ export class Orchestrator {
         const msg = `"${a.title}" changed files outside its claim: ${outside.join(', ')}. Needs coordination before integration.`;
         store.addCoordination({ projectId: a.projectId, kind: 'conflict', from: a.id, text: msg, files: outside });
         this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
+        this.log({ kind: 'outside-claim', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: msg });
         report += `\n\nWARNING: edits outside claimed files: ${outside.join(', ')}`;
       }
+      if (stat && this.canEdit(a)) report += await this.runChecks(a, ctl?.signal);
     }
 
+    this.running.delete(a.id);
+    this.controllers.delete(a.id);
+    const stopped = res.stopped || !!ctl?.signal.aborted;
     const blocked = res.ok && proto.help.some((h) => h.blocked);
-    const asking = res.ok && proto.ask[0];
+    const asking = res.ok && !stopped && proto.ask[0];
+    const summary = a.result?.summary || firstLine(report);
     this.locks.release(a.id);
-    if (res.stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
+    if (stopped) this.setState(a, 'stopped', { report, error: 'Stopped by the user.' });
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed' });
-    else if (asking) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Waiting for your answer.' });
-    else if (blocked) this.setState(a, 'waiting', { report, summary: firstLine(report), error: 'Blocked: waiting for another helper requested through the lead.' });
-    else this.setState(a, 'done', { report, summary: firstLine(report), error: undefined });
+    else if (asking) this.setState(a, 'waiting', { report, summary, error: 'Waiting for your answer.' });
+    else if (blocked) this.setState(a, 'waiting', { report, summary, error: 'Blocked: waiting for another helper requested through the lead.' });
+    else this.setState(a, 'done', { report, summary, error: undefined });
 
     if (asking) {
       const conv = this.convFor(a);
@@ -583,9 +627,34 @@ export class Orchestrator {
 
     // Direct prompts that arrived while running are delivered now, resuming this agent's session.
     const queued = this.followups.get(a.id)?.splice(0) ?? [];
-    if (queued.length && !res.stopped) { this.followUp(a, queued.join('\n\n')); return; }
+    if (queued.length && !stopped) { this.followUp(a, queued.join('\n\n')); return; }
     if (a.state !== 'waiting') this.finished(a);
     else this.pump(a.projectId);
+  }
+
+  /**
+   * Run the project's checks on the helper's committed branch head. These are evidence; the helper's own HARBOR_RESULT
+   * checks are claims. Returns the text appended to the report.
+   */
+  private async runChecks(a: AgentRecord, signal?: AbortSignal): Promise<string> {
+    const project = this.project(a.projectId);
+    const cmds = (this.d.loadChecks ?? loadProjectChecks)(project.path);
+    if (!cmds.length || !a.worktree) return '';
+    const run = this.d.runCheck ?? runShellCheck;
+    this.post(this.convFor(a), 'system', `Harbor is running checks on ${a.branch}: ${cmds.join(', ')}`, { agentId: a.id });
+    const runs: CheckRun[] = [];
+    for (const cmd of cmds) {
+      if (signal?.aborted) break;
+      runs.push({ cmd, ...(await run(cmd, a.worktree, signal)) });
+    }
+    a.checks = runs;
+    a.testedCommit = a.headCommit;
+    const failed = runs.filter((r) => !r.ok);
+    if (failed.length && !signal?.aborted) {
+      this.log({ kind: 'checks-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `"${a.title}" on ${a.headCommit?.slice(0, 10) ?? a.branch}: ${failed.map((f) => `${f.cmd} (${f.timedOut ? 'timed out' : `exit ${f.exitCode}`})`).join(', ')}` });
+    }
+    const lines = runs.map((r) => `- ${r.cmd}: ${r.ok ? 'PASS' : `FAIL (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`})`}${r.ok ? '' : `\n${clip(r.output.split(/\r?\n/).slice(-15).join('\n'), 1500)}`}`);
+    return `\n\nChecks Harbor ran on ${a.headCommit?.slice(0, 10) ?? a.branch}:\n${lines.join('\n')}`;
   }
 
   private finished(a: AgentRecord): void {
@@ -750,6 +819,7 @@ export class Orchestrator {
       if (ok) return { ok: true, text: final || text, allText: text, decision };
       if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped' };
       lastError = `${decision.cli} failed${rateLimited ? ' (rate limit)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
+      this.log({ kind: 'fallback', projectId: agent.projectId, conversationId: o.conversationId, agentId: agent.id, text: `${agent.role} "${agent.title}" on ${decision.cli}/${decision.model}: ${lastError}` });
       // A rate limit is held against the model in the ledger (it may be a per-model cap); anything else is a CLI-level failure.
       if (!rateLimited) exclude.push(decision.cli);
       store.patchAgent(agent.id, { attempts: attempt + 1 });
