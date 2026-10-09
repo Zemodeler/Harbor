@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
@@ -549,5 +549,82 @@ describe('questions to the user', () => {
     await h.svc.whenIdle();
     expect(h.svc.store.getAgent(agent.id)!.state).toBe('done');
     expect(h.svc.store.getAgent(agent.id)!.report).toContain('reviewed with tabs');
+  });
+});
+
+describe('sessions of one project know of each other', () => {
+  const gate = () => { let open!: () => void; const p = new Promise<void>((r) => { open = r; }); return { p, open }; };
+
+  it('tells a running lead about its running sibling, and delivers a peer message at the sibling\'s next turn', async () => {
+    const aStarted = gate(), aRelease = gate();
+    const prompts: Record<string, string[]> = { A: [], B: [] };
+    const claude = script({
+      lead: async (prompt) => {
+        if (prompt.includes('User:\nAAA task')) { prompts.A!.push(prompt); aStarted.open(); await aRelease.p; return say('A done.'); }
+        if (prompt.includes('User:\nBBB task')) { prompts.B!.push(prompt); return say('B done.\nHARBOR_PEER: {"to":"AAA task","text":"I am renaming auth.ts"}'); }
+        if (prompt.includes('User:\nAAA again')) { prompts.A!.push(prompt); return say('ok'); }
+        return say('ok');
+      }
+    });
+    const h = await harness({ claude }, { ids: ['claude'] });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA task');
+    await aStarted.p;
+    await h.svc.send(second.id, 'BBB task');
+    await vi.waitFor(async () => expect((await h.texts(second.id)).some((t) => t.startsWith('You told session'))).toBe(true));
+    // B saw A (working) in its prompt; A, mid-turn, was not woken by the message.
+    expect(prompts.B![0]).toContain('Other sessions running in this project');
+    expect(prompts.B![0]).toContain(`id=${h.conv.id}`);
+    expect(prompts.B![0]).toContain('goal="AAA task"');
+    expect(h.calls(isLead).filter((c) => c.prompt.includes('renaming auth.ts'))).toHaveLength(0);
+    expect((await h.texts(h.conv.id)).some((t) => t.startsWith('Message from session'))).toBe(true);
+    aRelease.open();
+    await h.svc.whenIdle();
+    await h.svc.send(h.conv.id, 'AAA again');
+    await h.svc.whenIdle();
+    const again = prompts.A!.find((p) => p.includes('User:\nAAA again'))!;
+    expect(again).toContain('Messages from other sessions');
+    expect(again).toContain('I am renaming auth.ts');
+    // Delivered once: the inbox is empty afterwards.
+    await h.svc.send(h.conv.id, 'AAA again');
+    await h.svc.whenIdle();
+    expect(h.calls(isLead).filter((c) => c.prompt.includes('renaming auth.ts'))).toHaveLength(1);
+  });
+
+  it('an urgent message wakes an idle lead, at most twice until the user writes to it', async () => {
+    const claude = script({
+      lead: (prompt) => {
+        if (prompt.includes('User:\nBBB')) return say('B\nHARBOR_PEER: {"to":"AAA","text":"stop editing x.ts","urgent":true}');
+        if (prompt.includes('Message from another session')) return say('Noted.\nHARBOR_PEER: {"to":"BBB","text":"ok","urgent":true}');
+        return say('ok');
+      }
+    });
+    const h = await harness({ claude }, { ids: ['claude'] });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA');
+    await h.svc.whenIdle();
+    await h.svc.send(second.id, 'BBB');
+    await h.svc.whenIdle();
+    const woken = h.calls(isLead).filter((c) => c.prompt.includes('Message from another session'));
+    expect(woken.length).toBeGreaterThanOrEqual(1);
+    expect(woken[0]!.prompt).toContain('stop editing x.ts');
+    // A's reply wakes B, B's replies are bounded: the exchange ends without any further user message.
+    expect(h.calls(isLead).length).toBeLessThan(10);
+  });
+
+  it('does not deliver to an unknown, ambiguous, or other-project session, and says so', async () => {
+    const claude = script({ lead: (prompt) => (prompt.includes('User:\nBBB') ? say('x\nHARBOR_PEER: {"to":"Nope","text":"a"}\nHARBOR_PEER: {"to":"Elsewhere","text":"b"}') : say('ok')) });
+    const h = await harness({ claude }, { ids: ['claude'] });
+    const other = await h.svc.addProject(tmp());
+    const [oc] = await h.svc.listConversations(other!.id);
+    await h.svc.send(oc!.id, 'Elsewhere');
+    await h.svc.whenIdle();
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(second.id, 'BBB');
+    await h.svc.whenIdle();
+    const texts = await h.texts(second.id);
+    expect(texts.filter((t) => t.startsWith('Could not deliver'))).toHaveLength(2);
+    expect((await h.texts(oc!.id)).some((t) => t.startsWith('Message from session'))).toBe(false);
+    expect(h.svc.store.listCoordination(h.project.id).filter((c) => c.kind === 'peer')).toHaveLength(0);
   });
 });
