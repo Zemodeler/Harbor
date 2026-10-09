@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
+import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Complexity } from './router';
 
@@ -52,8 +52,16 @@ export interface AgentRecord extends Agent {
   byUser?: boolean;
   /** What each run committed on the helper's branch (newest last, at most 5). Evidence for rollback; reversal always uses git objects. */
   snapshots?: TaskSnapshot[];
+  /** The result (revision + terminal state) last handed to the lead, so a restart neither replays it nor drops a newer one. */
+  reportDelivered?: ReportDelivery;
 }
 type Id = string;
+
+/**
+ * Persisted mark that one helper result reached the lead: written when a lead turn carrying it starts, or when Harbor
+ * deliberately skips it (a batch of only stopped agents). A result whose revision or state differs is still undelivered.
+ */
+export interface ReportDelivery { v: 1; revision: number; state: AgentState; time: number }
 
 /** One recorded state of a helper branch after Harbor's checkpoint: `base..head` and the files it changed. */
 export interface TaskSnapshot {
