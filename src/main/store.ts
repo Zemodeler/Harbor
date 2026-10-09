@@ -271,6 +271,9 @@ function scoped(v: Record<string, unknown>): ProjectSettings {
 export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settings> {
   if (!isObj(patch)) throw new Error('Settings must be an object.');
   const out: Partial<Settings> = { ...patch, ...scoped(patch as Record<string, unknown>) };
+  if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') {
+    throw new Error('keepRunningInBackground must be a boolean.');
+  }
   if ('projectOverrides' in patch) {
     const po: unknown = patch.projectOverrides;
     if (po === undefined) out.projectOverrides = undefined;
