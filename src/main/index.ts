@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { statSync } from 'node:fs';
 import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, shell, Tray } from 'electron';
 import { registerIpc } from './ipc';
 import { readCodexLimits } from './codexLimits';
@@ -7,6 +8,18 @@ import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } 
 
 let win: BrowserWindow | undefined;
 let quitting = false;
+
+// A hidden-to-tray instance keeps running old code after a repackage; launching the exe again would only focus it.
+function builtCodeMtime(): number {
+  // noAsar makes fs see app.asar as the plain file it is on disk.
+  const proc = process as NodeJS.Process & { noAsar?: boolean };
+  const before = proc.noAsar;
+  try {
+    proc.noAsar = true;
+    return statSync(app.isPackaged ? join(process.resourcesPath, 'app.asar') : __filename).mtimeMs;
+  } catch { return 0; } finally { proc.noAsar = before; }
+}
+const startedWithMtime = builtCodeMtime();
 
 function iconPath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico');
@@ -37,7 +50,10 @@ const startupAction = instanceStartupAction(app.requestSingleInstanceLock());
 if (startupAction === 'quit') app.quit();
 let openExistingWindow: (() => void) | undefined;
 // Registered before readiness; startup itself opens the window if the second launch arrives earlier.
-if (startupAction === 'start') app.on('second-instance', () => openExistingWindow?.());
+if (startupAction === 'start') app.on('second-instance', () => {
+  if (builtCodeMtime() > startedWithMtime) { app.relaunch(); app.quit(); return; }
+  openExistingWindow?.();
+});
 if (startupAction === 'start') app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
   const service = createHarborService({
