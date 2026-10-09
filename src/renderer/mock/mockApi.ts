@@ -1,4 +1,4 @@
-import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, Settings } from '../../shared/api';
+import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, Settings, ToolRule } from '../../shared/api';
 import { seed } from './seed';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
@@ -14,12 +14,15 @@ const demoChanges: GitFileChange[] = [
   { path: '.env.local', status: 'untracked', hidden: true }
 ];
 
-export function createMockApi(options: { empty?: boolean; delay?: number } = {}): HarborApi {
+/** toolTimeoutMs = when an unanswered tool request is denied (Harbor: 5 minutes); conflictWithdrawMs = when a sample conflict becomes moot and is withdrawn. */
+export function createMockApi(options: { empty?: boolean; delay?: number; toolTimeoutMs?: number; conflictWithdrawMs?: number } = {}): HarborApi {
   const data = seed(options.empty);
   const listeners = new Set<(e: HarborEvent) => void>();
   const runs = new Map<string, { cancelled: boolean }>();
-  const permissions = new Map<string, (allow: boolean) => void>();
-  const pendingPermissions = new Map<string, Extract<HarborEvent, { type: 'permission' }>>();
+  // Like Harbor: requests live in memory, are listed until answered, expired (tool) or withdrawn (conflict), and have no resolution event.
+  const permissions = new Map<string, { resolve: (allow: boolean, always: boolean) => void; timer?: ReturnType<typeof setTimeout> }>();
+  const pendingPermissions = new Map<string, PendingPermission>();
+  const toolRules = new Map<string, ToolRule[]>();
   const questions = new Map<string, string>();
   let settings: Settings = { routing: 'auto', cliOverrides: { codex: { enabled: true }, claude: { enabled: true }, gemini: { enabled: false } }, allowFreeReset: 'ask' };
   let requested = false;
@@ -27,6 +30,34 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
   const emit = (e: HarborEvent) => {
     if (e.type === 'permission') pendingPermissions.set(e.requestId, copy(e));
     listeners.forEach(cb => cb(copy(e)));
+  };
+  const settle = (requestId: string) => { const p = permissions.get(requestId); if (p?.timer) clearTimeout(p.timer); permissions.delete(requestId); pendingPermissions.delete(requestId); return p; };
+  /** Raise a permission request; `endAfter` ends it without an answer (expiry or withdrawal), calling `ended`. */
+  const ask = (event: PendingPermission, resolve: (allow: boolean, always: boolean) => void, endAfter?: { ms: number; ended: () => void }) => {
+    const timer = endAfter ? setTimeout(() => { if (settle(event.requestId)) endAfter.ended(); }, endAfter.ms) : undefined;
+    permissions.set(event.requestId, { resolve, timer }); emit(event);
+  };
+  const system = (conversationId: string, text: string, agentId?: string) => { const m: Message = { id: id(), conversationId, role: 'system', text, time: Date.now(), ...(agentId ? { agentId } : {}) }; data.messages.push(m); emit({ type: 'message', message: m }); };
+  /** "ask for permission" in a message: two tool requests (one can be always-allowed) and a file conflict that becomes moot. */
+  const askSamplePermissions = (conversationId: string, projectId: string) => {
+    const lead = `main-${projectId}`, helper = data.agents.find(a => a.projectId === projectId && a.role === 'implementer');
+    const timeout = options.toolTimeoutMs ?? 300000, minutes = Math.max(1, Math.round(timeout / 60000));
+    const tool = (agentId: string, who: string, name: string, what: string, rule?: Omit<ToolRule, 'id' | 'created'>) => {
+      const requestId = id(), prompt = `${who} asks to run ${name}: ${what}`;
+      system(conversationId, `${prompt}\nWaiting for your answer. Denied automatically after ${minutes} minute${minutes === 1 ? '' : 's'}. Demo only; nothing runs.`, agentId);
+      ask({ type: 'permission', requestId, kind: 'tool', prompt, agentId, conversationId, tool: name, alwaysAllow: !!rule, expiresAt: Date.now() + timeout }, (allow, always) => {
+        if (allow && always && rule) toolRules.set(projectId, [...toolRules.get(projectId) || [], { ...rule, id: id(), created: Date.now() }]);
+        system(conversationId, !allow ? `Denied ${name}.` : always && rule ? `Allowed. Always allowed in this project from now on: ${rule.prefix ? `${rule.tool}(${rule.prefix} ...)` : rule.tool}.` : `Allowed ${name} once.`, agentId);
+      }, { ms: timeout, ended: () => system(conversationId, `No answer within ${minutes} minute${minutes === 1 ? '' : 's'}: denied ${name}. The agent was told to continue without it.`, agentId) });
+    };
+    tool(lead, 'The lead agent', 'Bash', 'npm test', { tool: 'Bash', prefix: 'npm test' });
+    tool(helper?.id || lead, helper ? `"${helper.title}"` : 'The lead agent', 'Write', '.env.local');
+    if (helper) {
+      const requestId = id();
+      ask({ type: 'permission', requestId, kind: 'conflict', agentId: helper.id, prompt: `"${helper.title}" wants to edit src/account.tsx, currently owned by "Plan account page". Allow it to proceed in parallel? (Each works in its own worktree; the results will need integration.) Choose No to make it wait.` },
+        allow => system(conversationId, `You ${allow ? 'allowed parallel editing' : 'chose to serialize'} for "${helper.title}".`, helper.id),
+        { ms: options.conflictWithdrawMs ?? 45000, ended: () => system(conversationId, `"${helper.title}" got its files; the conflict question was withdrawn.`, helper.id) });
+    }
   };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
@@ -133,6 +164,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
       const user: Message = { id: id(), conversationId, role: 'user', text, time: Date.now(), ...(attachments?.length ? { attachments: attachments.map(a => ({ name: a.name, mime: a.mime })) } : {}) };
       data.messages.push(user); emit({ type: 'message', message: user });
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
+      if (/ask for permission/i.test(text)) { askSamplePermissions(conversationId, c.projectId); return; }
       if (/ask me a question/i.test(text)) {
         const requestId = id(); questions.set(requestId, conversationId);
         c.activity = { state: 'waiting', updated: Date.now(), detail: 'Waiting for your design preference.' };
@@ -168,12 +200,10 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
         if (!requested && settings.allowFreeReset === 'ask') {
           requested = true;
           const requestId = id();
-          permissions.set(requestId, allow => {
+          ask({ type: 'permission', requestId, kind: 'freeReset', agentId: agent.id, prompt: 'Demo only: use one optional free reset for the sample Claude weekly window? It has 27% remaining and one sample entitlement. A reset restores this window to 100%. The scheduled refresh is in two days. This demonstrates approval handling; no real entitlement is consumed.' }, allow => {
             if (allow) { data.windows[1].usedPct = 0; data.windows[1].freeResetAvailable = false; emit({ type: 'usage', windows: data.windows }); }
-            const result: Message = { id: id(), conversationId, role: 'system', text: allow ? 'Sample reset approved. No real account was changed.' : 'Sample reset declined. Current allowance is unchanged.', time: Date.now() };
-            data.messages.push(result); emit({ type: 'message', message: result });
+            system(conversationId, allow ? 'Sample reset approved. No real account was changed.' : 'Sample reset declined. Current allowance is unchanged.');
           });
-          emit({ type: 'permission', requestId, kind: 'freeReset', agentId: agent.id, prompt: 'Demo only: use one optional free reset for the sample Claude weekly window? It has 27% remaining and one sample entitlement. A reset restores this window to 100%. The scheduled refresh is in two days. This demonstrates approval handling; no real entitlement is consumed.' });
         }
       } finally { runs.delete(agent.id); }
     },
@@ -205,16 +235,18 @@ export function createMockApi(options: { empty?: boolean; delay?: number } = {})
     },
     async previewRollback() { return { supported: false, notes: ['Task rollback is available in the desktop app.'] }; },
     async rollbackTask() { throw new Error('Task rollback is available in the desktop app.'); },
-    async listToolRules() { return []; },
-    async removeToolRule() { return []; },
+    async listToolRules(projectId) { return copy(toolRules.get(projectId) || []); },
+    async removeToolRule(projectId, ruleId) { const rest = (toolRules.get(projectId) || []).filter(r => r.id !== ruleId); toolRules.set(projectId, rest); return copy(rest); },
     async listPendingPermissions() { return copy([...pendingPermissions.values()]); },
     async getUsage() { await pause(); return copy(data.windows); },
     async getSettings() { await pause(); return copy(settings); },
     async setSettings(s) { settings = { ...settings, ...copy(s) }; return copy(settings); },
-    async answerPermission(requestId, allow) {
-      const resolve = permissions.get(requestId);
-      if (!resolve) throw new Error('This permission request is no longer pending.');
-      permissions.delete(requestId); pendingPermissions.delete(requestId); resolve(allow);
+    async answerPermission(requestId, allow, opts) {
+      const request = pendingPermissions.get(requestId);
+      const p = settle(requestId);
+      if (!p || !request) throw new Error('This permission request is no longer pending.');
+      // "always" only counts for a tool request that offered it, as in Harbor.
+      p.resolve(allow, allow && opts?.always === true && request.kind === 'tool' && request.alwaysAllow === true);
     },
     async answerQuestion(requestId, answer) {
       const c = data.conversations.find(c => c.id === questions.get(requestId)) || data.conversations[0];
