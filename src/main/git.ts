@@ -80,7 +80,7 @@ export class Git {
     return files;
   }
 
-  // ---- integration. Writes only ever happen in a harbor/* worktree, or as a fast-forward of the user's branch.
+  // ---- integration and rollback. Writes only ever happen in a harbor/* worktree, or as a fast-forward of the user's branch.
 
   /** The branch checked out in `repo`, or undefined on a detached HEAD. */
   async currentBranch(repo: string): Promise<string | undefined> {
@@ -133,6 +133,20 @@ export class Git {
     if (!(await this.onHarborBranch(worktree))) throw new Error('Refusing to abort a merge outside a harbor/* branch.');
     const m = await this.git(worktree, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD']);
     if (m.code === 0) await this.git(worktree, ['merge', '--abort']);
+  }
+
+  /** Revert one merge commit (by SHA, mainline = its target-side parent) in a harbor/* worktree, as a new commit. */
+  async revertMerge(worktree: string, merge: string): Promise<{ ok: boolean; output: string }> {
+    if (!(await this.onHarborBranch(worktree))) throw new Error('Refusing to revert outside a harbor/* branch.');
+    const r = await this.git(worktree, ['-c', 'user.name=Harbor', '-c', 'user.email=harbor@localhost', 'revert', '-m', '1', '--no-edit', merge]);
+    return { ok: r.code === 0, output: `${r.stdout}\n${r.stderr}`.trim() };
+  }
+
+  /** Abort an in-progress revert, only in a harbor/* worktree. No-op when no revert is in progress. */
+  async abortRevert(worktree: string): Promise<void> {
+    if (!(await this.onHarborBranch(worktree))) throw new Error('Refusing to abort a revert outside a harbor/* branch.');
+    const m = await this.git(worktree, ['rev-parse', '--verify', '--quiet', 'REVERT_HEAD']);
+    if (m.code === 0) await this.git(worktree, ['revert', '--abort']);
   }
 
   /**

@@ -70,7 +70,7 @@ export async function findTaskMerges(ctx: RollbackContext, task: AgentRecord, ta
 }
 
 /** Agents whose work relies on the task: waited for it, used its report as spec, or asked for it as help. */
-function relatedAgents(task: AgentRecord, agents: AgentRecord[]): RollbackDependent[] {
+export function relatedAgents(task: AgentRecord, agents: AgentRecord[]): RollbackDependent[] {
   const out: RollbackDependent[] = [];
   for (const a of agents) {
     if (a.id === task.id || a.role === 'main') continue;
@@ -130,6 +130,7 @@ export async function previewRollback(ctx: RollbackContext, task: AgentRecord, r
   Object.assign(out, { target, targetHead: head });
   for (const i of agents) {
     if (i.id !== task.id && i.integration && i.state === 'working' && (i.integration.target ?? target) === target) blockers.push(`Integration "${i.title}" is running for ${target}.`);
+    if (i.id !== task.id && i.rollback && i.state === 'working' && (i.rollback.target ?? target) === target) blockers.push(`Rollback "${i.title}" is running for ${target}.`);
   }
   if (!baseOf(task)) {
     blockers.push(`"${task.title}" has no recorded base commit, so Harbor cannot tell which commits are its own.`);

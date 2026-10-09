@@ -14,6 +14,7 @@ import {
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
+import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { DEFAULT_CONCURRENCY, effectiveSettings, newId, normPath, type Store } from './store';
 import type { AgentRecord, CheckRun, TaskSnapshot } from './types';
@@ -278,7 +279,7 @@ export class Orchestrator {
     if (a.role === 'main') throw new Error('Send a message in the conversation to continue the lead agent.');
     if (a.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.');
     if (this.running.has(a.id)) throw new Error('This agent is already running.');
-    if (!a.integration && !this.d.store.getSession(a.id)) throw new Error('This agent has no saved session to resume. Send it a message instead.');
+    if (!a.integration && !a.rollback && !this.d.store.getSession(a.id)) throw new Error('This agent has no saved session to resume. Send it a message instead.');
     this.stoppedSessions.delete(a.parentConversationId);
     this.reported.delete(`${a.id}:${a.revision}:${a.state}`);
     this.post(this.convFor(a), 'system', 'Resuming from the saved session.', { agentId: a.id });
@@ -698,8 +699,8 @@ export class Orchestrator {
 
   /** Acquire file ownership for edit helpers. On conflict, ask the user whether to proceed in parallel. */
   private claim(a: AgentRecord): boolean {
-    // An integrator only writes its own new branch, never files another helper is editing.
-    if (!this.canEdit(a) || a.sharedOk || a.integration) return true;
+    // An integrator or rollback only writes its own new branch, never files another helper is editing.
+    if (!this.canEdit(a) || a.sharedOk || a.integration || a.rollback) return true;
     const files = a.files?.length ? a.files : [WHOLE_PROJECT];
     const r = this.locks.acquire(a.projectId, a.id, files);
     if (r.ok) return true;
@@ -737,6 +738,7 @@ export class Orchestrator {
 
   private async runAgent(a: AgentRecord): Promise<void> {
     if (a.integration) return this.runIntegration(a);
+    if (a.rollback) return this.runRollback(a);
     const project = this.project(a.projectId);
     const { store } = this.d;
     const conv = this.convFor(a);
@@ -977,7 +979,7 @@ export class Orchestrator {
     const sources = [...new Set(agentIds)].map((id) => {
       const s = store.getAgent(id);
       if (!s || s.projectId !== projectId) throw new Error('Unknown agent');
-      if (s.integration || !s.branch) throw new Error(`"${s.title}" has no helper branch to integrate.`);
+      if (s.integration || s.rollback || !s.branch) throw new Error(`"${s.title}" has no helper branch to integrate.`);
       return s;
     });
     const deps = new Set<Id>();
@@ -1147,26 +1149,32 @@ export class Orchestrator {
   }
 
   /**
-   * Fast-forward the user's target branch to a finished integration's head. Refuses when the project folder has uncommitted
-   * changes, when the target moved since the integration's base, or when the integration is not done. Never pushes or forces.
+   * Fast-forward the user's target branch to a finished integration's or rollback's head. Refuses when the project folder has
+   * uncommitted changes, when the target moved since the base, or when the run is not done. Never pushes or forces.
+   * Applying again once the target is at head changes nothing.
    */
   async applyIntegration(agentId: Id): Promise<AgentRecord> {
     const { store, git } = this.d;
     const a = store.getAgent(agentId);
     if (!a) throw new Error('Unknown agent');
-    const integ = a.integration;
-    if (!integ) throw new Error('This agent is not an integration.');
-    if (this.running.has(a.id)) throw new Error('This integration is still running.');
-    const { target, base, head } = integ;
-    if (a.state !== 'done' || !target || !base || !head || !a.branch || integ.sources.some((s) => s.state !== 'merged')) {
-      throw new Error('Only a finished integration with every branch merged and its checks passing can be applied.');
+    const job = a.integration ?? a.rollback;
+    if (!job) throw new Error('This agent is not an integration.');
+    const kind = a.integration ? 'integration' : 'rollback';
+    if (this.running.has(a.id)) throw new Error(`This ${kind} is still running.`);
+    const { target, base, head } = job;
+    const complete = a.integration ? a.integration.sources.every((s) => s.state === 'merged') : !!a.rollback?.merges.length && a.rollback.merges.every((m) => m.state === 'reverted');
+    if (a.state !== 'done' || !target || !base || !head || !a.branch || !complete) {
+      throw new Error(a.integration
+        ? 'Only a finished integration with every branch merged and its checks passing can be applied.'
+        : 'Only a finished rollback with every merge reverted and its checks passing can be applied.');
     }
     const project = this.project(a.projectId);
     const current = await git.branchHead(project.path, target);
     if (!current) throw new Error(`The target branch ${target} no longer exists.`);
+    if (job.applied && current === head) return a;
     if (current !== head) {
-      if ((await git.branchHead(project.path, a.branch)) !== head) throw new Error(`${a.branch} moved since its checks ran. Run the integration again.`);
-      if (current !== base) throw new Error(`${target} moved since the integration started (was ${base.slice(0, 10)}, now ${current.slice(0, 10)}). Run the integration again on the new base.`);
+      if ((await git.branchHead(project.path, a.branch)) !== head) throw new Error(`${a.branch} moved since its checks ran. Run the ${kind} again.`);
+      if (current !== base) throw new Error(`${target} moved since the ${kind} started (was ${base.slice(0, 10)}, now ${current.slice(0, 10)}). Run the ${kind} again on the new base.`);
       if (await git.isDirty(project.path)) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
       if ((await git.currentBranch(project.path)) !== target) {
         const elsewhere = await git.worktreeOf(project.path, target);
@@ -1174,13 +1182,176 @@ export class Orchestrator {
       }
       await git.fastForward(project.path, target, base, head);
     }
-    integ.applied = true;
+    job.applied = true;
     store.upsertAgent(a);
     this.publish(a);
-    const msg = `${target} fast-forwarded to ${head.slice(0, 10)} ("${a.title}"). Nothing was pushed.`;
+    const task = a.rollback && store.getAgent(a.rollback.taskId);
+    const msg = `${target} fast-forwarded to ${head.slice(0, 10)} ("${a.title}")${task ? `: the merges of "${task.title}" are reverted` : ''}. Nothing was pushed.`;
     this.post(this.convFor(a), 'system', msg, { agentId: a.id });
     if (a.parentConversationId && a.parentConversationId !== this.convFor(a)) this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
+    if (a.rollback) this.rollbackApplied(a, task);
     return a;
+  }
+
+  // ------------------------------------------------------------ rollback (Harbor's own git code, no CLI)
+
+  /** The user asks Harbor to reverse a task's merges on `target`. Queued like a helper; nothing touches git until it runs. */
+  rollbackTask(agentId: Id, target?: string): AgentRecord {
+    const { store } = this.d;
+    const task = store.getAgent(agentId);
+    if (!task) throw new Error('Unknown agent');
+    const project = this.project(task.projectId);
+    if (task.role === 'main') throw new Error('The lead agent has no task to roll back.');
+    if (task.rollback) throw new Error('This agent is a rollback. Rolling back a rollback is not supported.');
+    if (target !== undefined && (typeof target !== 'string' || !target.trim())) throw new Error('Name the target branch, or leave it out to use the checked-out branch.');
+    // One rollback at a time per project: two would gate on each other's unapplied state.
+    const open = store.listAgentRecords(project.id).find((x) => x.rollback && !TERMINAL.includes(x.state));
+    if (open) throw new Error(`Rollback "${open.title}" is still ${open.state}. Wait for it to finish or stop it first.`);
+    const title = `Roll back "${clip(task.title, 40)}"`;
+    const rec: AgentRecord = {
+      id: newId(), projectId: project.id, parentId: store.mainAgent(project.id)?.id, role: 'other', title, state: 'queued', cli: 'harbor', model: 'git', effort: 'low',
+      task: `Revert the merges that brought "${task.title}" onto ${target?.trim() || 'the checked-out branch'}, on a new rollback branch, and run the project's checks on the result.`,
+      dependsOn: [], revision: 1, attempts: 0, created: Date.now(), byUser: true,
+      parentConversationId: task.parentConversationId || this.ensureProject(project).conversation.id,
+      rollback: { taskId: task.id, target: target?.trim(), merges: [] }
+    };
+    store.upsertAgent(rec);
+    store.addConversation({ id: newId(), projectId: project.id, title: `rollback: ${title}`, updated: Date.now(), agentId: rec.id });
+    this.publish(rec);
+    this.post(rec.parentConversationId, 'system', `You started "${title}". Harbor reverts the task's merges on a new branch; your branch changes only when you apply it.`, { agentId: rec.id });
+    this.pump(project.id);
+    return rec;
+  }
+
+  /**
+   * Revert a task's merge commits, newest first, on a harbor/rollback-* worktree from the target's head. The preview is the
+   * gate: any blocker refuses before a git write. A conflict is recorded and the revert aborted (earlier reverts stay on the
+   * rollback branch). A re-run continues on the same branch and base, skipping merges already reverted. The target is never
+   * touched here (see applyIntegration).
+   */
+  private async runRollback(a: AgentRecord): Promise<void> {
+    const { store, git } = this.d;
+    const project = this.project(a.projectId);
+    const rb = a.rollback!;
+    const signal = this.controllers.get(a.id)?.signal;
+    const conv = this.convFor(a);
+    this.setState(a, 'working', { error: undefined });
+    this.post(conv, 'system', `Assignment (rollback, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+
+    const end = (state: AgentState, report: string, error?: string, summary?: string): void => {
+      this.running.delete(a.id);
+      this.controllers.delete(a.id);
+      this.followups.delete(a.id);
+      this.locks.release(a.id);
+      if (state === 'failed') this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `rollback "${a.title}": ${error}` });
+      this.post(conv, 'assistant', report, { agentId: a.id });
+      this.setState(a, state, { report, summary, error });
+      this.finished(a);
+    };
+    const refuse = (why: string) => end('failed', `Rollback refused. Nothing was reverted.\n${why}`, `Refused: ${why}`);
+
+    // 1. The preview gates every git write. This agent is left out so it does not count as a running rollback.
+    const task = store.getAgent(rb.taskId);
+    if (!task) return refuse('the task is no longer available.');
+    const agents = store.listAgentRecords(a.projectId).filter((x) => x.id !== a.id);
+    const preview = await previewRollback({ git, repo: project.path, agents }, task, rb.target);
+    if (preview.blockers?.length) return refuse(preview.blockers.join(' '));
+    if (!preview.target || !preview.targetHead) return refuse('the target branch could not be resolved.');
+    if (signal?.aborted) return end('stopped', 'Stopped before reverting.', 'Stopped by the user.');
+
+    // 2. Pin base and merges on the first run; a re-run keeps what its rollback branch was built on.
+    if (!a.worktree || !rb.base) {
+      rb.target = preview.target;
+      rb.base = preview.targetHead;
+      rb.merges = (preview.merges ?? []).map((m) => ({ ...m, state: 'pending' as const }));
+    }
+    const target = rb.target!, base = rb.base;
+    rb.conflicts = undefined;
+    rb.applied = undefined;
+    for (const m of rb.merges) if (m.state === 'conflict') m.state = 'pending';
+    this.setState(a, 'working');
+
+    // 3. The rollback worktree, on harbor/rollback-<task>-<id6>, from base.
+    if (!a.worktree) {
+      try {
+        const wt = await git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), `rollback ${task.title}`, a.id, base);
+        Object.assign(a, { worktree: wt.path, branch: wt.branch, baseCommit: base });
+        rb.branch = wt.branch;
+        this.setState(a, 'working');
+      } catch (e) { return end('failed', `Could not create the rollback worktree: ${String((e as Error).message)}`, `Could not create a git worktree: ${String((e as Error).message)}`); }
+    }
+    const wt = a.worktree!;
+    await git.abortRevert(wt); // a revert left half-done by a crash
+
+    // 4. Revert, newest merge first, each by SHA against its target-side parent.
+    const lines: string[] = [];
+    let conflict: { commit: string; paths: string[]; output: string } | undefined;
+    for (const m of rb.merges) {
+      if (signal?.aborted) break;
+      const label = `merge ${m.commit.slice(0, 10)}`;
+      if (m.state === 'reverted' && m.revert && await git.isAncestor(wt, m.revert, 'HEAD')) { lines.push(`- ${label}: already reverted as ${m.revert.slice(0, 10)}`); continue; }
+      const r = await git.revertMerge(wt, m.commit);
+      if (r.ok) { m.state = 'reverted'; m.revert = await git.head(wt); lines.push(`- ${label}: reverted as ${m.revert?.slice(0, 10) ?? 'unknown'}`); continue; }
+      const paths = await git.unmergedPaths(wt);
+      await git.abortRevert(wt);
+      Object.assign(m, { state: 'conflict', revert: undefined });
+      rb.conflicts = paths;
+      conflict = { commit: m.commit, paths, output: r.output };
+      lines.push(`- ${label}: CONFLICT${paths.length ? ` in ${paths.join(', ')}` : ''} (revert aborted)`);
+      break;
+    }
+    for (const m of rb.merges) if (m.state === 'pending') lines.push(`- merge ${m.commit.slice(0, 10)}: not reverted`);
+    const head = await git.head(wt);
+    rb.head = head;
+    this.setState(a, 'working', { headCommit: head });
+    if (head) this.markOutdated(a.projectId, wt, head);
+
+    let report = `Rollback of "${task.title}" on ${target} (base ${base.slice(0, 10)}) on ${a.branch}:\n${lines.join('\n')}\n\nRollback head: ${head?.slice(0, 10) ?? 'unknown'}`;
+    if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
+    if (conflict) {
+      const why = conflict.paths.length ? `reverting ${conflict.commit.slice(0, 10)} conflicts in ${conflict.paths.join(', ')}` : `reverting ${conflict.commit.slice(0, 10)} failed: ${clip(conflict.output, 300)}`;
+      report += `\n\nThe revert was aborted; reverts made before it stay on ${a.branch}. ${target} was not touched. Later work on these files has to be undone or adjusted by hand (or by a new helper).`;
+      return end('failed', report, `Rollback conflict: ${why}`);
+    }
+
+    // 5. Checks on the result: the code without the task must still pass.
+    Object.assign(a, { checks: undefined, testedCommit: undefined, testedWorktree: undefined, outdated: undefined });
+    if (head) report += await this.runChecks(a, head, signal);
+    if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
+    const failed = (a.checks ?? []).filter((c) => !c.ok);
+    if (failed.length) {
+      report += `\n\nNot ready to apply: checks failed on the rollback head.`;
+      return end('failed', report, `Checks failed on rollback: ${failed.map((f) => f.cmd).join(', ')}`);
+    }
+    report += `\n\nReady to apply: Harbor can fast-forward ${target} to ${head?.slice(0, 10)} (only while ${target} is still at ${base.slice(0, 10)} and the project folder is clean). Nothing was pushed. ${EXTERNAL_EFFECTS_NOTE}`;
+    const n = rb.merges.length;
+    return end('done', report, undefined, `Reverted ${n} merge${n === 1 ? '' : 's'} of "${task.title}" on ${a.branch}; ready to apply to ${target}.`);
+  }
+
+  /**
+   * After a rollback reached the target: verification of the reverted task, the helpers it merged, its dependents and their
+   * reviewers no longer describes the code, so it is marked outdated (an approval then no longer lets it be integrated).
+   */
+  private rollbackApplied(a: AgentRecord, task: AgentRecord | undefined): void {
+    const { store } = this.d;
+    const rb = a.rollback!;
+    const all = store.listAgentRecords(a.projectId);
+    const ids = new Set<Id>([rb.taskId]);
+    for (const m of rb.merges) { if (m.agentId) ids.add(m.agentId); if (m.integrationId) ids.add(m.integrationId); }
+    if (task) for (const d of relatedAgents(task, all)) ids.add(d.agentId);
+    for (const id of [...ids]) { const x = store.getAgent(id); if (x) for (const r of this.reviewersOf(a.projectId, x)) ids.add(r.id); }
+    let marked = 0;
+    for (const id of ids) {
+      const x = store.getAgent(id);
+      if (!x || x.id === a.id || x.role === 'main' || !x.testedCommit || x.outdated === true) continue;
+      x.outdated = true;
+      store.upsertAgent(x);
+      this.publish(x);
+      marked++;
+    }
+    // The journal has no rollback kind yet (journal.ts is owned elsewhere); 'triage' marks it as something to look back at.
+    this.log({ kind: 'triage', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id,
+      text: `Rolled back "${task?.title ?? rb.taskId}" on ${rb.target}: reverted ${rb.merges.map((m) => m.commit.slice(0, 10)).join(', ')}; ${rb.target} fast-forwarded to ${rb.head?.slice(0, 10)}. Verification of ${marked} agent${marked === 1 ? '' : 's'} marked outdated.` });
   }
 
   // ------------------------------------------------------------ direct prompts and follow-ups
@@ -1205,6 +1376,7 @@ export class Orchestrator {
     this.begin(a.id);
     // An integrator has no CLI session: any message (or resume) runs the integration again, which is idempotent.
     if (a.integration) { void this.runIntegration(a).catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`)); return; }
+    if (a.rollback) { void this.runRollback(a).catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`)); return; }
     void (async () => {
       let cwd = a.worktree ?? this.project(a.projectId).path;
       if (a.role === 'reviewer' && a.testedWorktree) {
@@ -1339,7 +1511,7 @@ export class Orchestrator {
 // ---------------------------------------------------------------- helpers
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), rollback: a.rollback && structuredClone(a.rollback), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
 }
 
 const firstLine = (s: string): string => clip(s.split(/\r?\n/).find((l) => l.trim() && !l.startsWith('#')) ?? s, 200).trim();
