@@ -90,6 +90,18 @@ describe('tool permission prompts', () => {
     expect(t.timers[0]!.cancelled).toBe(true);
   });
 
+  it('listPendingPermissions returns requests that wait for an answer (a reloaded renderer misses the events) and drops answered ones', async () => {
+    const t = await setup({ nextLeadTool: () => bash('make build') });
+    expect(await t.svc.listPendingPermissions()).toEqual([]);
+    void t.svc.send(t.conv.id, 'build it');
+    await waitFor(() => t.events.length === 1);
+    const pending = await t.svc.listPendingPermissions();
+    expect(pending).toEqual([t.events[0]]);
+    await t.svc.answerPermission(pending[0]!.requestId, true);
+    await t.svc.whenIdle();
+    expect(await t.svc.listPendingPermissions()).toEqual([]);
+  });
+
   it('deny: the run gets a deny with a message and the user sees it', async () => {
     const t = await setup({ nextLeadTool: () => bash('make deploy') });
     t.svc.onEvent((e) => { if (e.type === 'permission' && e.kind === 'tool') void t.svc.answerPermission(e.requestId, false); });
