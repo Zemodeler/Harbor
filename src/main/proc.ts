@@ -18,14 +18,88 @@ export function quoteWinArg(a: string): string {
   return `"${a}"`;
 }
 
+/** A process Harbor started, recorded so a later run can recognise it as its own orphan. */
+export interface TrackedProcess {
+  pid: number;
+  /** Process name without extension, lowercase (`cmd` for .cmd shims). */
+  name: string;
+  /** Spawn time, epoch ms. */
+  started: number;
+}
+
+/** Told about every CLI spawn; the orchestrator persists these so orphans survive a Harbor crash. */
+export interface SpawnObserver { spawned(p: TrackedProcess): void; exited(pid: number): void }
+let observer: SpawnObserver | undefined;
+export function setSpawnObserver(o: SpawnObserver | undefined): void { observer = o; }
+
+const procName = (exe: string): string =>
+  isShellScript(exe) ? 'cmd' : (exe.split(/[\\/]/).pop() ?? exe).replace(/\.[a-z0-9]+$/i, '').toLowerCase();
+
 /** Spawn a CLI, handling Windows .cmd shims (which Node refuses to spawn without a shell). */
 export function spawnCli(exe: string, args: string[], opts: SpawnOptions = {}): ChildProcess {
+  let child: ChildProcess;
   if (isShellScript(exe)) {
     const line = [exe, ...args].map(quoteWinArg).join(' ');
-    return spawn(line, { ...opts, shell: true, windowsHide: true }); // node wraps this in cmd.exe /d /s /c "..."
+    child = spawn(line, { ...opts, shell: true, windowsHide: true }); // node wraps this in cmd.exe /d /s /c "..."
+  } else child = spawn(exe, args, { ...opts, windowsHide: true });
+  const pid = child.pid;
+  if (pid && observer) {
+    const o = observer;
+    o.spawned({ pid, name: procName(exe), started: Date.now() });
+    child.once('close', () => o.exited(pid));
+    child.once('error', () => o.exited(pid));
   }
-  return spawn(exe, args, { ...opts, windowsHide: true });
+  return child;
 }
+
+/** What is needed to find and kill a leftover process; injected so tests never touch real processes. */
+export interface ProcessKiller {
+  /** Name (no extension, lowercase) and start time (epoch ms) of a live process, or undefined when no such process exists. */
+  inspect(pid: number): Promise<{ name: string; started: number } | undefined>;
+  kill(pid: number): Promise<void>;
+}
+
+/** Allowed gap between our Date.now() at spawn and the OS start time of the process. */
+export const START_TOLERANCE_MS = 10_000;
+
+/** A recorded PID is only ours if the live process has the same name and started when we spawned it (guards against PID reuse). */
+export function matchesTracked(t: TrackedProcess, live: { name: string; started: number } | undefined): boolean {
+  return !!live && live.name === t.name && Math.abs(live.started - t.started) <= START_TOLERANCE_MS;
+}
+
+export const systemKiller: ProcessKiller = {
+  inspect: (pid) => new Promise((resolve) => {
+    if (!Number.isInteger(pid) || pid <= 0) return resolve(undefined);
+    const win = process.platform === 'win32';
+    const [exe, args] = win
+      ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.ProcessName.ToLower() + '|' + ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() }`]] as const
+      : ['ps', ['-o', 'comm=,lstart=', '-p', String(pid)]] as const;
+    let out = '';
+    const c = spawn(exe, [...args], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    c.stdout?.on('data', (d) => (out += d));
+    c.on('error', () => resolve(undefined));
+    c.on('close', () => {
+      const line = out.trim();
+      if (win) {
+        const m = /^(.+)\|(\d+)$/.exec(line);
+        return resolve(m ? { name: m[1]!, started: Number(m[2]) } : undefined);
+      }
+      const m = /^(\S+)\s+(.+)$/.exec(line);
+      const t = m ? Date.parse(m[2]!) : NaN;
+      resolve(m && !Number.isNaN(t) ? { name: (m[1]!.split('/').pop() ?? m[1]!).toLowerCase(), started: t } : undefined);
+    });
+  }),
+  kill: (pid) => new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      const c = spawn('taskkill', ['/pid', String(pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+      c.on('error', () => resolve());
+      c.on('close', () => resolve());
+    } else {
+      try { process.kill(-pid, 'SIGTERM'); } catch { try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ } }
+      resolve();
+    }
+  })
+};
 
 export const runProcess: Runner = (exe, args, opts = {}) =>
   new Promise((resolve) => {

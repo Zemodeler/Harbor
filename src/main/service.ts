@@ -12,6 +12,7 @@ import { EventBus } from './events';
 import { Git } from './git';
 import { GitView } from './gitView';
 import { Orchestrator, toAgent } from './orchestrator';
+import type { ProcessKiller } from './proc';
 import { newId, Store } from './store';
 import { reviewDirectory } from './review';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
@@ -42,6 +43,8 @@ export interface ServiceOptions {
   recheckDelaysMs?: number[];
   /** Override where worktrees are created (tests). */
   worktreesRoot?: string;
+  /** Replace the startup orphan-process killer (tests). */
+  killer?: ProcessKiller;
 }
 
 /** CLIs whose headless flow has been verified against a real install in this repo's history (codex: 0.160.0, see adapters/codex.ts). */
@@ -87,7 +90,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     verified: (c) => VERIFIED.has(c),
     // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog.
     catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
-    maxActivePerProject: opts.maxActivePerProject
+    maxActivePerProject: opts.maxActivePerProject,
+    killer: opts.killer
   });
 
   // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude
@@ -240,6 +244,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return store.addConversation({ id: newId(), projectId: a.projectId, title: `${a.role}: ${a.title}`, updated: Date.now(), agentId });
     },
     async stopAgent(agentId) { orchestrator.stop(agentId); },
+    async resumeAgent(agentId) { orchestrator.resumeAgent(agentId); },
 
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },

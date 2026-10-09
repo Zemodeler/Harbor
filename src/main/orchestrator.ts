@@ -11,6 +11,7 @@ import {
   CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
+import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { newId, type Store } from './store';
 import type { AgentRecord } from './types';
@@ -40,7 +41,13 @@ export interface OrchestratorDeps {
   /** Checks Harbor runs after an edit helper (default: `.harbor/checks.json` of the project, run in a shell). */
   loadChecks?: (projectPath: string) => string[];
   runCheck?: CheckRunner;
+  /** Finds and kills leftover CLI processes at startup; injected so tests never touch real processes. */
+  killer?: ProcessKiller;
 }
+
+export interface OrphanSweep { killed: number[]; skipped: number[] }
+
+const RESUME_PROMPT = 'Harbor was interrupted while you were working and has restarted. Continue your assignment from your session. First check the current state (git status and git log in your worktree, and any files you were changing). Do not repeat steps that already completed, in particular commits, pushes, installs, or any other action with external effects; do only what is still missing, then report.';
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
 const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
@@ -101,9 +108,18 @@ export class Orchestrator {
   private sessionGeneration = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
 
+  private startedAt = Date.now();
+  /** Settles when the orphan sweep started by recover() is done. */
+  private sweep: Promise<OrphanSweep> = Promise.resolve({ killed: [], skipped: [] });
+
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
+    // Every CLI process this run starts is persisted, so a crash cannot leave one that the next run cannot identify.
+    setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid) => d.store.untrackProcess(pid) });
   }
+
+  /** Resolves with what the startup orphan sweep did (tests and diagnostics). */
+  whenSwept(): Promise<OrphanSweep> { return this.sweep; }
 
   get lockTable(): LockTable { return this.locks; }
 
@@ -194,6 +210,7 @@ export class Orchestrator {
 
   /** Reconcile persisted state after a restart: nothing is running, so working agents are stopped (never replayed). */
   recover(): void {
+    this.sweep = this.reapOrphans();
     for (const p of this.d.store.listProjects()) for (const c of this.d.store.listConversations(p.id)) {
       if (c.activity && ['working', 'queued'].includes(c.activity.state)) this.sessionState(c.id, 'stopped', 'Harbor restarted. Send a message to continue.');
     }
@@ -205,6 +222,42 @@ export class Orchestrator {
     }
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     for (const p of this.d.store.listProjects()) this.pump(p.id);
+  }
+
+  /**
+   * Kill CLI processes a previous Harbor run left behind. Only PIDs Harbor recorded are considered, and only
+   * when the live process still has the recorded name and start time (a reused PID is someone else's process).
+   */
+  private async reapOrphans(): Promise<OrphanSweep> {
+    const { store } = this.d;
+    const killer = this.d.killer ?? systemKiller;
+    // Snapshot before anything else: processes this run spawns (discovery, agents) are recorded too and must be left alone.
+    const old = store.listTrackedProcesses().filter((t) => t.started < this.startedAt);
+    for (const t of old) store.untrackProcess(t.pid);
+    const out: OrphanSweep = { killed: [], skipped: [] };
+    for (const t of old) {
+      try {
+        if (matchesTracked(t, await killer.inspect(t.pid))) { await killer.kill(t.pid); out.killed.push(t.pid); } else out.skipped.push(t.pid);
+      } catch { out.skipped.push(t.pid); }
+    }
+    return out;
+  }
+
+  /**
+   * Continue a stopped helper in its own native session. Nothing is replayed: the prompt tells the agent to
+   * inspect its worktree and keep what already happened, and the session link must exist.
+   */
+  resumeAgent(agentId: Id): void {
+    const a = this.d.store.getAgent(agentId);
+    if (!a) throw new Error('This agent is no longer available.');
+    if (a.role === 'main') throw new Error('Send a message in the conversation to continue the lead agent.');
+    if (a.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.');
+    if (this.running.has(a.id)) throw new Error('This agent is already running.');
+    if (!this.d.store.getSession(a.id)) throw new Error('This agent has no saved session to resume. Send it a message instead.');
+    this.stoppedSessions.delete(a.parentConversationId);
+    this.reported.delete(`${a.id}:${a.revision}:${a.state}`);
+    this.post(this.convFor(a), 'system', 'Resuming from the saved session.', { agentId: a.id });
+    this.followUp(a, RESUME_PROMPT);
   }
 
   // ------------------------------------------------------------ user input
