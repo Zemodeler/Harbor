@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { Conversation, Id, Message, Project, Settings } from '../shared/api';
+import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings } from '../shared/api';
 import type { TrackedProcess } from './proc';
 import type { AgentRecord, CoordinationEntry, FileLock, SessionLink, State, UsageEvent } from './types';
 
@@ -169,10 +169,138 @@ export class Store {
 
   // ---- settings
   getSettings(): Settings { return this.state.settings; }
+  /** Validates first (throws on malformed values, so nothing is half-applied); `undefined` on a routing key resets it. */
   setSettings(patch: Partial<Settings>): Settings {
-    this.state.settings = { ...this.state.settings, ...patch, cliOverrides: { ...this.state.settings.cliOverrides, ...(patch.cliOverrides ?? {}) } };
+    const p = normalizeSettingsPatch(patch);
+    const cur = this.state.settings;
+    const next: Settings = { ...cur, ...p, cliOverrides: { ...cur.cliOverrides, ...(p.cliOverrides ?? {}) } };
+    if ('projectOverrides' in p && p.projectOverrides) {
+      // Per project: an entry replaces that project's overrides; an empty or undefined entry removes them.
+      const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
+      for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
+      next.projectOverrides = merged;
+    }
+    for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
+      if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
+    }
+    this.state.settings = next;
     this.dirty(); return this.state.settings;
   }
+}
+
+// ---- settings validation and resolution (pure)
+
+export const DEFAULT_CONCURRENCY = 4;
+export const CONCURRENCY_RANGE = [1, 8] as const;
+/** At most half the allowance can be reserved, or automatic routing would rarely have anything to use. */
+export const RESERVE_RANGE = [0, 50] as const;
+const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;
+const EFFORT_POLICIES: readonly EffortPolicy[] = ['adaptive', 'conserve', 'quality'];
+const LOW_ALLOWANCE_POLICIES: readonly LowAllowancePolicy[] = ['reduceEffort', 'switch'];
+/** Settings a project can override. */
+const SCOPED_KEYS = ['concurrencyLimit', 'allowedModels', 'rolePreferences', 'effortPolicy', 'lowAllowancePolicy', 'subscriptionReserve'] as const;
+
+type HelperRole = typeof HELPER_ROLES[number];
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+function clampInt(v: unknown, [lo, hi]: readonly [number, number], name: string): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`${name} must be a number.`);
+  return Math.min(hi, Math.max(lo, Math.round(v)));
+}
+
+function oneOf<T extends string>(v: unknown, allowed: readonly T[], name: string): T {
+  if (!allowed.includes(v as T)) throw new Error(`${name} must be one of: ${allowed.join(', ')}.`);
+  return v as T;
+}
+
+const cleanName = (v: unknown, name: string): string | undefined => {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string') throw new Error(`${name} must be text.`);
+  return v.trim() || undefined;
+};
+
+/** Empty lists mean "no restriction" and are dropped, so a typo cannot silently take a CLI out of routing. */
+function allowedModels(v: unknown): Record<CliId, string[]> | undefined {
+  if (!isObj(v)) throw new Error('allowedModels must map a CLI id to a list of model names.');
+  const out: Record<CliId, string[]> = {};
+  for (const [cli, list] of Object.entries(v)) {
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) throw new Error(`allowedModels.${cli} must be a list of model names.`);
+    const names = [...new Set(list.map((m) => cleanName(m, `allowedModels.${cli}`)).filter((m): m is string => !!m))];
+    if (names.length) out[cli] = names;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function rolePreferences(v: unknown): Settings['rolePreferences'] {
+  if (!isObj(v)) throw new Error('rolePreferences must map a role to { cli, model }.');
+  const out: Partial<Record<HelperRole, RolePreference>> = {};
+  for (const role of HELPER_ROLES) {
+    const p = v[role];
+    if (p === undefined) continue;
+    if (!isObj(p)) throw new Error(`rolePreferences.${role} must be { cli, model }.`);
+    const cli = cleanName(p['cli'], `rolePreferences.${role}.cli`), model = cleanName(p['model'], `rolePreferences.${role}.model`);
+    if (cli || model) out[role] = { ...(cli ? { cli } : {}), ...(model ? { model } : {}) };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Validates the project-scoped fields of `v`. Keys present with `undefined` stay present (they mean "reset"). */
+function scoped(v: Record<string, unknown>): ProjectSettings {
+  const out: ProjectSettings = {};
+  const has = (k: string) => k in v;
+  if (has('concurrencyLimit')) out.concurrencyLimit = v['concurrencyLimit'] === undefined ? undefined : clampInt(v['concurrencyLimit'], CONCURRENCY_RANGE, 'concurrencyLimit');
+  if (has('subscriptionReserve')) out.subscriptionReserve = v['subscriptionReserve'] === undefined ? undefined : clampInt(v['subscriptionReserve'], RESERVE_RANGE, 'subscriptionReserve');
+  if (has('effortPolicy')) out.effortPolicy = v['effortPolicy'] === undefined ? undefined : oneOf(v['effortPolicy'], EFFORT_POLICIES, 'effortPolicy');
+  if (has('lowAllowancePolicy')) out.lowAllowancePolicy = v['lowAllowancePolicy'] === undefined ? undefined : oneOf(v['lowAllowancePolicy'], LOW_ALLOWANCE_POLICIES, 'lowAllowancePolicy');
+  if (has('allowedModels')) out.allowedModels = v['allowedModels'] === undefined ? undefined : allowedModels(v['allowedModels']);
+  if (has('rolePreferences')) out.rolePreferences = v['rolePreferences'] === undefined ? undefined : rolePreferences(v['rolePreferences']);
+  return out;
+}
+
+/** Throws on values that cannot be interpreted; clamps numbers into range. Fields outside the routing settings pass through. */
+export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settings> {
+  if (!isObj(patch)) throw new Error('Settings must be an object.');
+  const out: Partial<Settings> = { ...patch, ...scoped(patch as Record<string, unknown>) };
+  if ('projectOverrides' in patch) {
+    const po: unknown = patch.projectOverrides;
+    if (po === undefined) out.projectOverrides = undefined;
+    else {
+      if (!isObj(po)) throw new Error('projectOverrides must map a project id to its settings.');
+      const map: Record<Id, ProjectSettings> = {};
+      for (const [id, o] of Object.entries(po)) {
+        if (o !== undefined && !isObj(o)) throw new Error(`projectOverrides.${id} must be an object.`);
+        // Drop reset markers: a project entry is stored whole, so an absent key already means "inherit".
+        map[id] = o ? Object.fromEntries(Object.entries(scoped(o)).filter(([, x]) => x !== undefined)) : {};
+      }
+      out.projectOverrides = map;
+    }
+  }
+  return out;
+}
+
+/** Settings that apply to one project: project values win per field, per CLI (allowedModels) and per role (rolePreferences). */
+export interface EffectiveSettings {
+  /** Undefined = the caller's default (Harbor's is DEFAULT_CONCURRENCY). */
+  concurrencyLimit?: number;
+  allowedModels: Record<CliId, string[]>;
+  rolePreferences: Partial<Record<HelperRole, RolePreference>>;
+  effortPolicy: EffortPolicy;
+  lowAllowancePolicy: LowAllowancePolicy;
+  subscriptionReserve: number;
+}
+
+export function effectiveSettings(s: Settings, projectId?: Id): EffectiveSettings {
+  const p: ProjectSettings = (projectId && s.projectOverrides?.[projectId]) || {};
+  return {
+    concurrencyLimit: p.concurrencyLimit ?? s.concurrencyLimit,
+    allowedModels: { ...(s.allowedModels ?? {}), ...(p.allowedModels ?? {}) },
+    rolePreferences: { ...(s.rolePreferences ?? {}), ...(p.rolePreferences ?? {}) },
+    effortPolicy: p.effortPolicy ?? s.effortPolicy ?? 'adaptive',
+    lowAllowancePolicy: p.lowAllowancePolicy ?? s.lowAllowancePolicy ?? 'reduceEffort',
+    subscriptionReserve: p.subscriptionReserve ?? s.subscriptionReserve ?? 0
+  };
 }
 
 export function normPath(p: string): string {

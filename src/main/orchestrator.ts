@@ -13,7 +13,7 @@ import {
 } from './prompts';
 import { matchesTracked, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { effortFor, route, type Complexity, type RouteDecision } from './router';
-import { newId, type Store } from './store';
+import { DEFAULT_CONCURRENCY, effectiveSettings, newId, type Store } from './store';
 import type { AgentRecord } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
 import type { EventBus } from './events';
@@ -74,6 +74,8 @@ interface RoutedOptions {
   tier?: Tier;
   needs?: Need[];
   effort?: Effort;
+  /** Keep `effort` as given: the effort policy does not apply. */
+  fixedEffort?: boolean;
   retry?: boolean;
   permission: 'read-only' | 'edit';
   cwd: string;
@@ -407,7 +409,7 @@ export class Orchestrator {
   private async concierge(project: Project, main: AgentRecord, conversationId: Id, text: string, signal: AbortSignal): Promise<'handled' | Escalation> {
     const out = await this.runRouted(main, {
       prompt: conciergePrompt(project.name, this.registerFor(project.id, conversationId), this.chatHistory(conversationId, true).slice(-8), text), system: CONCIERGE_SYSTEM,
-      role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'], permission: 'read-only', cwd: project.path,
+      role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'], permission: 'read-only', cwd: project.path,
       signal, resume: false, conversationId, stream: false, sessionKey: `concierge:${conversationId}`
     });
     if (!out.ok) {
@@ -434,7 +436,7 @@ export class Orchestrator {
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
-      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), needs: plan.needs, permission: 'edit', cwd: project.path,
+      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, permission: 'edit', cwd: project.path,
       signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
     });
     if (!out.ok) {
@@ -522,7 +524,7 @@ export class Orchestrator {
 
   pump(projectId: Id): void {
     const { store } = this.d;
-    const max = this.d.maxActivePerProject ?? 4;
+    const max = effectiveSettings(store.getSettings(), projectId).concurrencyLimit ?? this.d.maxActivePerProject ?? DEFAULT_CONCURRENCY;
     // Higher priority first, then oldest first.
     const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main').sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.created - b.created);
     const byId = new Map(all.map((a) => [a.id, a]));
@@ -809,10 +811,16 @@ export class Orchestrator {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const link = store.getSession(key);
-      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude }, {
+      // Read every attempt: a settings change applies to the next routing decision, not only to new agents.
+      const eff = effectiveSettings(store.getSettings(), agent.projectId);
+      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, fixedEffort: o.fixedEffort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude }, {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
-        verified: this.d.verified, catalog: this.d.catalog
+        verified: this.d.verified, catalog: this.d.catalog,
+        policy: {
+          allowedModels: eff.allowedModels, effortPolicy: eff.effortPolicy, lowAllowance: eff.lowAllowancePolicy, reserve: eff.subscriptionReserve,
+          preference: o.role === 'main' ? undefined : eff.rolePreferences[o.role]
+        }
       });
       if (!decision) return { ok: false, text: '', error: attempt === 0 ? lastError : `${lastError} (no remaining CLI to fall back to)` };
       const adapter = this.d.adapterFor(decision.cli)!;
