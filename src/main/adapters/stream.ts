@@ -4,13 +4,17 @@ import { killTree, spawnCli } from '../proc';
 export interface StreamedLine { stream: 'stdout' | 'stderr'; line: string }
 export interface StreamResult { code: number | null; aborted: boolean; stderr: string; spawnError?: string }
 
+/** Write side of a child's stdin kept open for a conversation (control protocols). Writes after `end` are dropped. */
+export interface StdinSink { write(data: string): void; end(): void }
+
 /**
  * Spawn a CLI, feed `input` on stdin, and yield output lines as they arrive.
  * The generator's return value is the exit summary. Aborting kills the whole process tree.
+ * With `interactive`, stdin is NOT ended after `input`: the hook gets a sink and the caller ends it.
  */
 export async function* streamLines(
   exe: string, args: string[],
-  opts: { cwd: string; input: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv }
+  opts: { cwd: string; input: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv; interactive?: (stdin: StdinSink) => void }
 ): AsyncGenerator<StreamedLine, StreamResult> {
   const queue: StreamedLine[] = [];
   let wake: (() => void) | undefined;
@@ -46,7 +50,16 @@ export async function* streamLines(
   child.on('error', (e) => { spawnError = e.message; closed = true; poke(); });
   child.on('close', (c) => { code = c; closed = true; poke(); });
   child.stdin?.on('error', () => {});
-  child.stdin?.end(opts.input);
+  if (opts.interactive) {
+    const stdin = child.stdin;
+    let ended = false;
+    const open = () => !ended && !!stdin && !stdin.destroyed && stdin.writable;
+    if (opts.input && open()) stdin!.write(opts.input);
+    opts.interactive({
+      write: (d) => { if (open()) stdin!.write(d); },
+      end: () => { if (open()) stdin!.end(); ended = true; }
+    });
+  } else child.stdin?.end(opts.input);
 
   const onAbort = () => { aborted = true; killTree(child); };
   if (opts.signal?.aborted) onAbort(); else opts.signal?.addEventListener('abort', onAbort, { once: true });
