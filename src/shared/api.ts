@@ -43,6 +43,7 @@ export interface HarborApi {
  listMessages(conversationId: Id): Promise<Message[]>; send(conversationId: Id, text: string): Promise<void>;
  listAgents(projectId: Id): Promise<Agent[]>; openAgentConversation(agentId: Id): Promise<Conversation>; stopAgent(agentId: Id): Promise<void>;   // also cancels a queued assignment
  setAgentPriority(agentId: Id, priority: number): Promise<void>; pauseAgent(agentId: Id): Promise<void>; resumeAgent(agentId: Id): Promise<void>;   // pause only holds queued work back; a running agent keeps running
+ resumeAgentSession(agentId: Id): Promise<void>;   // continue a stopped helper in its saved CLI session (rejects when it is not stopped or has no session)
  getUsage(): Promise<UsageWindow[]>;
  getSettings(): Promise<Settings>; setSettings(s: Partial<Settings>): Promise<Settings>;
  answerPermission(requestId: Id, allow: boolean): Promise<void>;
