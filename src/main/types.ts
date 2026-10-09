@@ -48,6 +48,8 @@ export interface AgentRecord extends Agent {
   testedCommit?: string;
   /** Worktree whose head `testedCommit` was taken from, so Harbor can tell when that branch moves. */
   testedWorktree?: string;
+  /** Integrator started by the user (integrateBranches): its outcome is shown to the user, not reported to the lead. */
+  byUser?: boolean;
 }
 type Id = string;
 
