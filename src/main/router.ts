@@ -20,6 +20,8 @@ export interface RouteRequest {
   exclude?: CliId[];
   /** CLIs needed by an explicit extension request; restricts the choice when present. */
   requireCli?: CliId;
+  /** Retry of failed or rejected work: worth the highest effort. */
+  retry?: boolean;
 }
 
 export interface RouteDecision { cli: CliId; model: string; effort: Effort; reason: string }
@@ -39,6 +41,13 @@ export interface RouterInput {
 }
 
 const LEVEL_PENALTY: Record<UsageLevel, number> = { plenty: 0, limited: 10, low: 30, exhausted: 1000 };
+/**
+ * Between otherwise equal options the less used subscription wins: 2 points per full 10% used. Steps, not a smooth
+ * slope, so one extra run does not flip the choice back and forth between two CLIs.
+ */
+const usagePenalty = (pct: number) => 2 * Math.floor(pct / 10);
+/** A missing strength must cost less than overspending a tier (8), or one unmet need buys the strongest model. */
+const MISSING_NEED = 4;
 
 export function tierFor(role: AgentRole, c: Complexity): Tier {
   if (role === 'planner' || c === 'high') return 'strong';
@@ -53,13 +62,17 @@ function tierPenalty(want: Tier, have: Tier): number {
 
 function needsFit(needs: Need[] | undefined, e: CatalogEntry): number {
   if (!needs?.length) return 0;
-  return needs.reduce((s, n) => s + (e.strengths.includes(n) ? 4 : -12), 0);
+  return needs.reduce((s, n) => s + (e.strengths.includes(n) ? 4 : -MISSING_NEED), 0);
 }
 
-function baseEffort(role: AgentRole, c: Complexity): Effort {
-  if (role === 'main') return 'low';
-  if (role === 'planner') return c === 'low' ? 'medium' : 'high';
-  return c;
+/**
+ * Hard work already gets a stronger model; high effort on top doubles the cost. Only planners on hard problems and
+ * retries of failed work get high effort; everything else tops out at medium.
+ */
+export function effortFor(role: AgentRole, c: Complexity, retry = false): Effort {
+  if (retry) return 'high';
+  if (role === 'planner') return c === 'high' ? 'high' : 'medium';
+  return c === 'high' ? 'medium' : c;
 }
 
 const stepDown = (e: Effort): Effort => (e === 'high' ? 'medium' : 'low');
@@ -85,7 +98,7 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
       // Per entry: Opus or Fable can be capped while Sonnet on the same account is fine.
       const p = inp.ledger.pressure(c.id, entry.model), level = p.level;
       if (level === 'exhausted') { notes.push(`${c.id}/${entry.model} skipped: allowance exhausted or rate limited`); continue; }
-      let score = 100 - LEVEL_PENALTY[level] - 5 * inp.load(c.id) - tierPenalty(want, entry.tier) + needsFit(req.needs, entry);
+      let score = 100 - LEVEL_PENALTY[level] - usagePenalty(p.pct) - 5 * inp.load(c.id) - tierPenalty(want, entry.tier) + needsFit(req.needs, entry) - (entry.cost ?? 0);
       if (c.authState === 'unknown') score -= 15; // sign-in unverified: usable, but prefer confirmed ones
       if (req.continuity === c.id) score += 25;
       if (inp.verified?.(c.id)) score += 2;
@@ -97,7 +110,7 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
   const best = cands[0];
   if (!best) return undefined;
 
-  let effort = req.effort ?? baseEffort(req.role, req.complexity);
+  let effort = req.effort ?? effortFor(req.role, req.complexity, req.retry);
   const why = [`${best.cli.id}/${best.entry.model} (${best.entry.tier}) for ${want}${req.needs?.length ? ` [${req.needs.join(', ')}]` : ''}: ${best.cli.authState === 'signedIn' ? 'signed in' : 'sign-in unverified'}, usage ${best.level} (~${best.pct}%${best.projected !== undefined ? `, pace → ~${best.projected}% at reset` : ''})`];
   if (req.continuity === best.cli.id) why.push('continues existing session');
   if (best.level === 'low' && effort !== 'low') { effort = stepDown(effort); why.push('effort lowered: allowance low'); }

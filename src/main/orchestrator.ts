@@ -8,10 +8,10 @@ import { breakCycles } from './graph';
 import { Journal, journalDigest, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, clip, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, parseConcierge, parseProtocol, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type LeadTrigger, type PlannedTask
 } from './prompts';
-import { route, type Complexity, type RouteDecision } from './router';
+import { effortFor, route, type Complexity, type RouteDecision } from './router';
 import { newId, type Store } from './store';
 import type { AgentRecord } from './types';
 import type { FreeResetCoordinator, UsageLedger } from './usage';
@@ -67,6 +67,7 @@ interface RoutedOptions {
   tier?: Tier;
   needs?: Need[];
   effort?: Effort;
+  retry?: boolean;
   permission: 'read-only' | 'edit';
   cwd: string;
   signal: AbortSignal;
@@ -282,8 +283,11 @@ export class Orchestrator {
         const deep = /^\/deep\b\s*/i.exec(trigger.text);
         if (deep) {
           // "/deep" skips the front desk and gives the lead a strong model.
-          plan = { complexity: 'high', needs: ['planning', 'code'], ack: '' };
+          plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high' };
           trigger = { kind: 'user', text: trigger.text.slice(deep[0].length) || trigger.text };
+        } else if (this.plans.has(conversationId) && isApproval(trigger.text)) {
+          // A go-ahead continues the last request at its size: no front-desk call, no fresh guess. A one-off "/deep" is not inherited.
+          plan = { ...plan, effort: undefined };
         } else if (!this.leadAsked.has(conversationId)) {
           const c = await this.concierge(project, main, conversationId, trigger.text, ctl.signal);
           if (c === 'handled') return;
@@ -342,7 +346,7 @@ export class Orchestrator {
     const out = await this.runRouted(main, {
       prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes }), system: LEAD_SYSTEM,
       contextIfNoResume: history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : undefined,
-      role: 'main', complexity: plan.complexity, tier, effort: plan.complexity, needs: plan.needs, permission: 'edit', cwd: project.path,
+      role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), needs: plan.needs, permission: 'edit', cwd: project.path,
       signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`
     });
     if (!out.ok) {
@@ -399,7 +403,7 @@ export class Orchestrator {
       if (rejected && complexity !== t.complexity) this.post(conversationId, 'system', `Retrying "${t.title}" with a stronger model (${t.complexity} → ${complexity}) because "${prior.title}" did not succeed.`);
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
-        effort: complexity, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
+        effort: effortFor(t.role, complexity, !!rejected), retry: rejected ? true : undefined, task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
         needs: t.needs, readOnly: t.access === 'read',
         helpFor: t.helpFor ?? requester, revision: 1, complexity,
         parentConversationId: conversationId, attempts: 0, created: Date.now(),
@@ -535,7 +539,7 @@ export class Orchestrator {
   private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean }): Promise<RoutedRun> {
     const ctl = this.controllers.get(a.id) ?? new AbortController();
     return this.runRouted(a, {
-      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs,
+      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
       permission: this.canEdit(a) ? 'edit' : 'read-only', cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true
     });
@@ -697,7 +701,7 @@ export class Orchestrator {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const link = store.getSession(key);
-      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, continuity: o.resume ? link?.cli : undefined, exclude }, {
+      const decision = route({ role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, effort: o.effort, retry: o.retry, continuity: o.resume ? link?.cli : undefined, exclude }, {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
         verified: this.d.verified, catalog: this.d.catalog

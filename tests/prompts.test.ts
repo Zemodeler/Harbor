@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractJson, imageBriefText, parseConcierge, parseProtocol, stripProtocol } from '../src/main/prompts';
+import { extractJson, imageBriefText, isApproval, parseConcierge, parseProtocol, stripProtocol } from '../src/main/prompts';
 
 describe('prompt parsing', () => {
   it('extracts JSON from fences and chatter, handling braces inside strings', () => {
@@ -66,6 +66,13 @@ describe('image briefs', () => {
     expect(text).toContain("can't generate images");
     expect(text).toContain('```text\nA lighthouse at dusk, watercolor, 16:9\n```');
     expect(text).toContain('watercolor');
+  });
+});
+
+describe('go-ahead messages', () => {
+  it('recognises short approvals but not small talk or new requests', () => {
+    for (const t of ['yes', 'Yes, build the panel', 'go ahead', 'ok, do it', 'Implement it', 'continue', 'lgtm']) expect(isApproval(t), t).toBe(true);
+    for (const t of ['ok', 'thanks', 'yes thanks!', 'what about the router?', 'go ahead and refactor the whole storage layer to use sqlite instead']) expect(isApproval(t), t).toBe(false);
   });
 });
 

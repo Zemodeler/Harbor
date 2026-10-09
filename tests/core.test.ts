@@ -7,7 +7,7 @@ import type { ResolvedCli } from '../src/main/clis/discovery';
 import { DEFAULT_CATALOG, loadCatalog } from '../src/main/clis/capabilities';
 import { Git } from '../src/main/git';
 import { LockTable, WHOLE_PROJECT } from '../src/main/locks';
-import { route } from '../src/main/router';
+import { route, type RouteRequest } from '../src/main/router';
 import { Store } from '../src/main/store';
 import { COOLDOWN_MS, FreeResetCoordinator, UsageLedger, WINDOW_MS } from '../src/main/usage';
 
@@ -155,7 +155,7 @@ describe('router', () => {
     const t = { now: 1 };
     const { ledger, run } = ledgerAt(t, 10);
     for (let i = 0; i < 8; i++) run('claude');
-    const d = route({ role: 'implementer', complexity: 'high' }, base([cli('claude')], ledger))!;
+    const d = route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledger))!;
     expect(d.effort).toBe('medium');
     expect(d.reason).toMatch(/effort lowered/);
     expect(route({ role: 'planner', complexity: 'low' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('opus');
@@ -190,6 +190,47 @@ describe('router: capability catalog', () => {
     const inp = base([cli('claude'), cli('codex')], ledger, { catalog });
     expect(route({ role: 'main', complexity: 'low', tier: 'cheap', needs: ['code'] }, inp)!.cli).toBe('codex');
     expect(route({ role: 'main', complexity: 'low', tier: 'cheap', needs: ['chat'] }, inp)!.cli).toBe('claude');
+  });
+
+  // The routing outcomes the weights are tuned for, with both subscriptions signed in and verified.
+  it.each([
+    ['front desk', { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'] }, 'claude/haiku', 'low'],
+    ['plain medium work goes to a standard model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'] }, 'claude/sonnet', 'medium'],
+    ['planning alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'planning'] }, 'claude/sonnet', 'medium'],
+    ['a long context alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'long-context'] }, 'claude/sonnet', 'medium'],
+    ['hard work: strong model at medium effort', { role: 'main', complexity: 'high', tier: 'strong', needs: ['code'] }, 'claude/opus', 'medium'],
+    ['hard planning keeps high effort', { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/opus', 'high'],
+    ['a retry gets high effort', { role: 'implementer', complexity: 'medium', needs: ['code'], retry: true }, 'claude/sonnet', 'high'],
+    ['a review', { role: 'reviewer', complexity: 'medium', needs: ['review'] }, 'claude/sonnet', 'medium']
+  ] as const)('scenario: %s', (_name, req, pick, effort) => {
+    const inp = base([cli('claude'), cli('codex')], ledgerAt({ now: 1 }).ledger, { verified: () => true });
+    const d = route({ ...req, needs: [...req.needs] } as RouteRequest, inp)!;
+    expect(`${d.cli}/${d.model}`).toBe(pick);
+    expect(d.effort).toBe(effort);
+  });
+
+  it('balances subscriptions: medium work moves to the less used one', () => {
+    const t = { now: 1 };
+    const { ledger, run } = ledgerAt(t, 20);
+    for (let i = 0; i < 13; i++) run('claude'); // ~65% of the window
+    for (let i = 0; i < 2; i++) run('codex'); // ~10%
+    const inp = base([cli('claude'), cli('codex')], ledger, { verified: () => true });
+    for (const needs of [['code'], ['code', 'planning'], ['review']] as const)
+      expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: [...needs] }, inp)!.cli).toBe('codex');
+    // A small difference does not flip the choice, and the session the lead already holds still wins.
+    const close = ledgerAt({ now: 1 }, 40);
+    close.run('claude');
+    expect(route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, base([cli('claude'), cli('codex')], close.ledger, { verified: () => true }))!.cli).toBe('claude');
+    expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'], continuity: 'claude' }, inp)!.cli).toBe('claude');
+  });
+
+  it('a catalog cost makes a pricier model lose close calls', () => {
+    const { ledger } = ledgerAt({ now: 1 });
+    const catalog = [
+      { cli: 'claude', model: 'sonnet', tier: 'standard' as const, strengths: ['code' as const], cost: 3 },
+      { cli: 'codex', model: 'default', tier: 'standard' as const, strengths: ['code' as const] }
+    ];
+    expect(route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, base([cli('claude'), cli('codex')], ledger, { catalog }))!.cli).toBe('codex');
   });
 
   it('uses a CLI that is missing from the catalog with its default model', () => {
