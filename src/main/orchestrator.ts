@@ -67,6 +67,18 @@ const defaultTimer = (fn: () => void, ms: number): (() => void) => {
   return () => clearTimeout(t);
 };
 
+/**
+ * Failures the CLI itself calls temporary (Claude's OAuth refresh race when another Claude process refreshes the
+ * shared token). Retrying the same CLI after a short wait keeps the run on the routed model instead of falling back.
+ */
+const TRANSIENT_CLI_ERRORS: RegExp[] = [
+  /failed to refresh oauth token/i,
+  /another claude code process is refreshing/i
+];
+export const isTransientCliError = (error: string | undefined): boolean => !!error && TRANSIENT_CLI_ERRORS.some((r) => r.test(error));
+/** Waits before each same-CLI retry of a transient failure; the CLI suggests about a minute. */
+export const TRANSIENT_RETRY_DELAYS_MS = [20_000, 45_000];
+
 /** A tool call waiting for the user's answer. In memory only: a restart ends the run that asked. */
 interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; event: PendingPermission; settle(d: ToolPermissionDecision): void }
 
@@ -1706,6 +1718,16 @@ export class Orchestrator {
     }
   }
 
+  /** Resolves true after `ms`, or false as soon as `signal` aborts. */
+  private waitFor(ms: number, signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const onAbort = () => { cancel(); resolve(false); };
+      const cancel = (this.d.setTimer ?? defaultTimer)(() => { signal.removeEventListener('abort', onAbort); resolve(true); }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
   private async runAttempts(agent: AgentRecord, o: RoutedOptions,
     onToolPermission: ((req: ToolPermissionRequest, signal: AbortSignal) => Promise<ToolPermissionDecision>) | undefined): Promise<RoutedRun> {
     const { store, ledger } = this.d;
@@ -1715,6 +1737,8 @@ export class Orchestrator {
     let lastError = 'No eligible CLI is available. Open Settings to install or sign in to a supported CLI.';
     // A rate limit now cools down one model, not the CLI, so a CLI may be tried again with a cheaper model before another CLI.
     const maxAttempts = Math.max(1, this.d.getClis().length * 3);
+    const transientRetries = new Map<CliId, number>();
+    let retryCli: CliId | undefined; // set for one attempt after a transient failure
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const link = store.getSession(key);
@@ -1729,7 +1753,10 @@ export class Orchestrator {
           preference: o.role === 'main' ? undefined : eff.rolePreferences[o.role]
         }
       });
-      let decision = routeWith(pinned);
+      const retrying = retryCli;
+      retryCli = undefined;
+      let decision = routeWith(retrying ?? pinned);
+      if (!decision && retrying) decision = routeWith(pinned);
       if (!decision && pinned) {
         // A pin is a preference, not a requirement: never leave the helper without a model because one CLI is missing or exhausted.
         this.post(o.conversationId, 'system', `${agent.title}: pinned CLI ${pinned} is unavailable, using normal routing.`, { agentId: agent.id });
@@ -1746,7 +1773,7 @@ export class Orchestrator {
         if (c?.activity) store.patchConversation(c.id, { activity: { ...c.activity, cli: decision.cli, model: decision.model, complexity: o.complexity, effort: decision.effort } });
         this.sessionState(o.conversationId, 'working', o.sessionKey?.startsWith('concierge:') ? 'First pass: checking your request.' : 'Lead agent: working on your request.');
       }
-      if (attempt > 0) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
+      if (attempt > 0 && decision.cli !== retrying) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
       const prompt = !resumeId && o.contextIfNoResume ? `${o.contextIfNoResume}\n\n${o.prompt}` : o.prompt;
 
       // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
@@ -1784,6 +1811,17 @@ export class Orchestrator {
       if (ok) return { ok: true, text: final || text, allText: text, decision };
       if (stopped) return { ok: false, text, stopped: true, decision, error: 'stopped' };
       lastError = `${decision.cli} failed${rateLimited ? ' (rate limit)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
+      const retried = transientRetries.get(decision.cli) ?? 0;
+      if (!rateLimited && isTransientCliError(error) && retried < TRANSIENT_RETRY_DELAYS_MS.length) {
+        // Not the CLI's fault and not a quota: wait and run the same CLI again rather than excluding it.
+        transientRetries.set(decision.cli, retried + 1);
+        const wait = TRANSIENT_RETRY_DELAYS_MS[retried]!;
+        this.post(o.conversationId, 'system', `${agent.title}: ${decision.cli} had a temporary sign-in refresh problem; retrying in ${Math.round(wait / 1000)}s.`, { agentId: agent.id });
+        if (!(await this.waitFor(wait, o.signal))) return { ok: false, text, stopped: true, decision, error: 'stopped' };
+        retryCli = decision.cli;
+        attempt--; // the retry does not use up a fallback attempt
+        continue;
+      }
       // A rate limit is held against the model in the ledger (it may be a per-model cap); anything else is a CLI-level failure.
       if (!rateLimited) exclude.push(decision.cli);
       store.patchAgent(agent.id, { attempts: attempt + 1 });
