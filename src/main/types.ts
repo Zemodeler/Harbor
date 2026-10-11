@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
+import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Complexity } from './router';
 
@@ -52,8 +52,37 @@ export interface AgentRecord extends Agent {
   byUser?: boolean;
   /** What each run committed on the helper's branch (newest last, at most 5). Evidence for rollback; reversal always uses git objects. */
   snapshots?: TaskSnapshot[];
+  /** What Harbor knows about handing this helper's latest result to the lead; absent for the current result means pending. */
+  reportDelivery?: ReportDelivery;
+  /**
+   * Delivery generation of the current result (absent = 0). Bumped when a stopped helper is resumed in place: the resumed
+   * run keeps its revision and may end in the same state, so a late mark from a turn carrying the old result must not count.
+   */
+  reportGen?: number;
 }
 type Id = string;
+
+/**
+ * Delivery of one helper result (revision + delivery generation + terminal state) to the lead. A mark for another result says nothing
+ * about the current result, which is then pending. Statuses:
+ * - `attempted`: a lead turn carrying it handed its prompt to a CLI but was not seen to finish (stopped, failed after output,
+ *   or Harbor restarted).
+ *   Uncertain: the lead may or may not have read it. No CLI acknowledges receipt, so this is never upgraded by guessing.
+ * - `confirmed`: a lead turn carrying it finished successfully.
+ * - `skipped`: deliberately not sent (a batch of only stopped helpers, so a stop-all does not start lead turns).
+ * - `unknown`: the result predates delivery tracking (upgraded state file); treated like `attempted`.
+ */
+export interface ReportDelivery {
+  v: 1;
+  revision: number;
+  /** `AgentRecord.reportGen` of the result (absent = 0). */
+  gen?: number;
+  state: AgentState;
+  status: 'attempted' | 'confirmed' | 'skipped' | 'unknown';
+  time: number;
+  /** When the user was told this delivery is uncertain (once, so restarts do not repeat the notice). */
+  noticed?: number;
+}
 
 /** One recorded state of a helper branch after Harbor's checkpoint: `base..head` and the files it changed. */
 export interface TaskSnapshot {

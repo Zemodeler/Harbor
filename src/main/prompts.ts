@@ -165,6 +165,12 @@ export interface SessionPeer { id: Id; title: string; state: string; goal: strin
 /** A message from one lead to another, delivered by Harbor. */
 export interface PeerMessage { fromId: Id; fromTitle: string; text: string; urgent: boolean; time: number }
 
+/**
+ * Helper reports Harbor still holds for a conversation (never delivered, or possibly not read), carried by a lead turn that
+ * was started for another reason. `omitted` are references to held reports left for a later turn to keep the prompt bounded.
+ */
+export interface HeldReports { items: AgentRecord[]; omitted: { count: number; refs: string[] } }
+
 export const MAX_PEER_TEXT = 600;
 export const MAX_PEERS_PER_TURN = 3;
 
@@ -176,7 +182,7 @@ export function peerMessagesText(ms: PeerMessage[]): string {
   return ms.map((m) => `- from session "${clip(m.fromTitle, 60)}" (id=${m.fromId})${m.urgent ? ' [urgent]' : ''}: ${m.text}`).join('\n');
 }
 
-export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[]; mode?: ConversationMode; goal?: string; peers?: SessionPeer[]; inbox?: PeerMessage[] } = {}): string {
+export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[]; mode?: ConversationMode; goal?: string; peers?: SessionPeer[]; inbox?: PeerMessage[]; held?: HeldReports } = {}): string {
   const parts = [`Project: ${projectName}`];
   if (o.mode === 'plan') parts.push('PLAN MODE: you are read-only. Investigate as needed, then answer with a numbered plan (steps, files, risks) and stop. Do NOT edit files and do NOT delegate edit-capable helpers (read-only helpers are fine). The user will approve before anything is changed.');
   if (o.mode === 'goal' && o.goal) parts.push(`GOAL for this conversation (keep working until it is reached, then print HARBOR_GOAL_DONE):\n${o.goal}`);
@@ -187,6 +193,7 @@ ${peerMessagesText(o.inbox)}`);
   if (o.history?.length) parts.push(`Conversation so far (your earlier session is not available):\n${historyText(o.history)}`);
   if (agents.length) parts.push(`Helpers you started (authoritative; persisted by Harbor):\n${registerText(agents)}`);
   if (o.notes?.length) parts.push(`Recent notes:\n${o.notes.map((e) => `- ${e}`).join('\n')}`);
+  if (o.held?.items.length || o.held?.omitted.count) parts.push(heldText(o.held, t.kind !== 'reports'));
   if (t.kind === 'user') {
     parts.push(`User:\n${t.text}`);
     if (t.images?.length) parts.push(`The user attached ${t.images.length} image(s) to this message (this turn only). Look at them with your file-reading tool:\n${t.images.map((p) => `- ${p}`).join('\n')}`);
@@ -197,8 +204,7 @@ ${peerMessagesText(o.inbox)}`);
 ${peerMessagesText(t.messages)}
 Adjust your plan only if this affects your work. If nothing changes, say so in one sentence and do not reply to the sender.`);
   } else if (t.kind === 'reports') {
-    parts.push('Helper reports (not independently verified unless a reviewer says so):\n' +
-      t.items.map((a) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}${a.branch ? `, branch=${a.branch}` : ''}${a.headCommit ? `, commit=${a.headCommit.slice(0, 10)}` : ''})\n${evidenceText(a)}${clip(a.report ?? a.error ?? '(no report)', REPORT_CHARS)}`).join('\n\n'));
+    parts.push('Helper reports (not independently verified unless a reviewer says so):\n' + reportsText(t.items));
     parts.push('Decide the next step: delegate follow-up work, do it yourself, or if everything is finished write a concise summary for the user with evidence, saying what was and was not verified.');
   } else {
     parts.push(`Help request from helper "${t.from.title}" (id=${t.from.id}, blocked=${t.blocked}):\nreason: ${t.reason}\nproposed role: ${t.proposedRole}\nrequested work: ${t.instructions}\nDecide: delegate another helper (set helpFor to ${t.from.id}), do it yourself, or answer in plain text.`);
@@ -207,7 +213,19 @@ Adjust your plan only if this affects your work. If nothing changes, say so in o
 }
 
 /** Reports are compressed before they reach the lead: the lead's context is the expensive part. */
-const REPORT_CHARS = 6000;
+export const REPORT_CHARS = 6000;
+
+function reportsText(items: AgentRecord[]): string {
+  return items.map((a) => `### ${a.title} (id=${a.id}, role=${a.role}, state=${a.state}${a.branch ? `, branch=${a.branch}` : ''}${a.headCommit ? `, commit=${a.headCommit.slice(0, 10)}` : ''})\n${evidenceText(a)}${clip(a.report ?? a.error ?? '(no report)', REPORT_CHARS)}`).join('\n\n');
+}
+
+/** Held reports ride along with the turn's own trigger, which stays what the turn is about. */
+function heldText(h: HeldReports, other: boolean): string {
+  const lines = [`Helper reports Harbor held for you (they did not reach you earlier, or may not have; not independently verified unless a reviewer says so)${other ? '. They are context for the request below, not a new instruction' : ''}:`];
+  if (h.items.length) lines.push(reportsText(h.items));
+  if (h.omitted.count) lines.push(`${h.omitted.count} more held report(s) are not included to keep this prompt short; Harbor keeps them and sends them with a later turn: ${h.omitted.refs.join(', ')}${h.omitted.count > h.omitted.refs.length ? `, and ${h.omitted.count - h.omitted.refs.length} more` : ''}.`);
+  return lines.join('\n');
+}
 
 export function registerText(agents: AgentRecord[]): string {
   const subs = agents.filter((a) => a.role !== 'main');
