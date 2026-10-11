@@ -1,0 +1,101 @@
+import { useEffect, useRef, useState } from 'react';
+import type { Conversation } from '../../shared/api';
+import type { HarborState, Permission } from '../hooks/useHarbor';
+import s from './PermissionRequests.module.css';
+
+const KIND = { tool: 'Tool permission', conflict: 'File conflict', freeReset: 'Optional free reset' } as const;
+const titleFor = (p: Permission) => p.kind === 'tool' ? `Allow ${p.tool || 'this tool call'}?` : p.kind === 'conflict' ? 'Allow parallel editing?' : 'Approve optional free reset?';
+
+function remaining(ms: number) {
+  if (ms < 60_000) return 'less than a minute left';
+  const min = Math.ceil(ms / 60_000);
+  return `${min} min left`;
+}
+
+/**
+ * Pending approvals as cards above the workspace, never a blocking dialog: navigation and the composer stay usable.
+ * Nothing here answers on its own; an expired card is removed by useHarbor because Harbor has already denied it.
+ */
+export function PermissionRequests({ state, openConversation, fallbackFocus }: { state: HarborState; openConversation: (c: Conversation) => void; fallbackFocus: () => void }) {
+  const { permissions, permissionAnswering: answering, permissionErrors: errors, permissionSyncError: syncError, permissionNotice: notice } = state;
+  const [confirming, setConfirming] = useState<string>();
+  const [now, setNow] = useState(() => Date.now());
+  const [collapsed, setCollapsed] = useState(false);
+  const count = useRef(0);
+  const list = useRef<HTMLDivElement>(null);
+  const focused = useRef<number | undefined>(undefined);
+  const resetReturn = useRef<string | undefined>(undefined);
+  const back = useRef<HTMLButtonElement>(null);
+  const timed = permissions.some(p => p.expiresAt !== undefined);
+  useEffect(() => {
+    if (!timed) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [timed]);
+  // A card that held focus disappeared (answered, expired or withdrawn): move to the card now in its place, never to <body>.
+  const ids = permissions.map(p => p.requestId).join();
+  useEffect(() => {
+    const index = focused.current, active = document.activeElement;
+    if (index === undefined || active && active !== document.body && document.contains(active)) return;
+    focused.current = undefined;
+    const cards = list.current?.querySelectorAll<HTMLElement>('[data-card]');
+    const next = cards?.[Math.min(index, cards.length - 1)];
+    if (next) next.focus(); else fallbackFocus();
+  }, [ids, fallbackFocus]);
+  // Hiding makes room to read the conversation; a new request shows the cards again.
+  useEffect(() => { if (permissions.length > count.current) setCollapsed(false); count.current = permissions.length; }, [permissions.length]);
+  useEffect(() => {
+    if (confirming) back.current?.focus();
+    else if (resetReturn.current) list.current?.querySelector<HTMLElement>(`[data-request="${CSS.escape(resetReturn.current)}"] [data-reset]`)?.focus();
+    resetReturn.current = undefined;
+  }, [confirming]);
+  if (!permissions.length && !syncError && !notice) return null;
+  // Busy buttons stay focusable (aria-disabled), so focus survives a failed answer; useHarbor ignores repeat clicks.
+  const answer = (p: Permission, choice: 'allow' | 'always' | 'deny') => { if (!answering[p.requestId]) void state.answerPermission(p.requestId, choice); };
+  const locate = (target: EventTarget | null) => target instanceof Element ? target.closest<HTMLElement>('[data-card]') : null;
+  return <section className={s.panel} aria-labelledby="permission-requests-title">
+    <div className={s.panelHeader}>
+      <h2 id="permission-requests-title" className={s.panelTitle}>{permissions.length ? <>Waiting for your answer <span className={s.count}>{permissions.length}</span></> : 'Approval requests'}</h2>
+      {permissions.length ? <button className={s.toggle} aria-expanded={!collapsed} aria-controls="permission-requests-cards" onClick={() => setCollapsed(!collapsed)}>{collapsed ? 'Show requests' : 'Hide'}</button> : null}
+      <div className={s.status} role="status">{notice ? <><span>{notice}</span><button className={s.linkButton} onClick={state.dismissPermissionNotice}>Dismiss</button></> : null}</div>
+    </div>
+    {syncError ? <p className={s.syncError} role="alert">{syncError} <button className={s.linkButton} onClick={() => void state.refreshPermissions()}>Check again</button></p> : null}
+    {permissions.length && !collapsed ? <div id="permission-requests-cards" className={s.cards} ref={list}
+      onFocus={e => { const card = locate(e.target); if (card) focused.current = Number(card.dataset.index); }}
+      onBlur={e => { if (e.relatedTarget && !list.current?.contains(e.relatedTarget as Node)) focused.current = undefined; }}>
+      {permissions.map((p, index) => {
+        const busy = answering[p.requestId];
+        const agent = state.agents.find(a => a.id === p.agentId);
+        const target = p.conversationId ? state.conversations.find(c => c.id === p.conversationId) : undefined;
+        const titleId = `permission-${p.requestId}-title`, promptId = `permission-${p.requestId}-prompt`;
+        const left = p.expiresAt !== undefined ? p.expiresAt - now : undefined;
+        return <article key={p.requestId} className={s.card} data-card data-index={index} data-request={p.requestId} data-kind={p.kind} tabIndex={-1} aria-labelledby={titleId} aria-describedby={promptId} aria-busy={busy ? true : undefined}>
+          <div className={s.cardTop}>
+            <span className={s.kind}>{KIND[p.kind]}</span>
+            {p.expiresAt !== undefined ? <span className={s.expiry} data-soon={left !== undefined && left < 60_000 || undefined}>Denied automatically at <time dateTime={new Date(p.expiresAt).toISOString()}>{new Date(p.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time> · {remaining(Math.max(0, left ?? 0))}</span> : null}
+          </div>
+          <h3 id={titleId} className={s.title}>{titleFor(p)}</h3>
+          <p id={promptId} className={s.prompt}>{p.prompt}</p>
+          {agent || p.conversationId ? <p className={s.meta}>
+            {agent ? <span>Asked by {agent.title}</span> : null}
+            {target ? target.id === state.conversation?.id ? <span>In this conversation</span> : <span>In <button className={s.linkButton} onClick={() => openConversation(target)}>{target.title}</button></span>
+              : p.conversationId ? <span>In a conversation outside this project</span> : null}
+          </p> : null}
+          {p.kind === 'tool' && !p.alwaysAllow ? <p className={s.hint}>This call can only be allowed once; Harbor will ask again next time.</p> : null}
+          {p.kind === 'conflict' ? <p className={s.hint}>Allowing lets both agents work in separate worktrees; their results will need integration. Deny makes this agent wait.</p> : null}
+          {confirming === p.requestId ? <div className={s.confirm}>
+            <p className={s.confirmText}>Use one free reset now? Harbor will not use a reset without this confirmation.</p>
+            <div className={s.actions}><button ref={back} aria-disabled={!!busy} onClick={() => { if (busy) return; resetReturn.current = p.requestId; setConfirming(undefined); }}>Back</button><button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Confirming…' : 'Confirm free reset'}</button></div>
+          </div> : <div className={s.actions}>
+            <button aria-disabled={!!busy} onClick={() => answer(p, 'deny')}>{busy === 'deny' ? 'Denying…' : 'Deny'}</button>
+            {p.kind === 'tool' && p.alwaysAllow ? <button aria-disabled={!!busy} onClick={() => answer(p, 'always')}>{busy === 'always' ? 'Saving rule…' : 'Always allow for this project'}</button> : null}
+            {p.kind === 'freeReset' ? <button className={s.primary} data-reset aria-disabled={!!busy} onClick={() => { if (!busy) setConfirming(p.requestId); }}>Use free reset…</button>
+              : <button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Allowing…' : p.kind === 'conflict' ? 'Allow in parallel' : 'Allow once'}</button>}
+          </div>}
+          {errors[p.requestId] ? <p className={s.error} role="alert">{errors[p.requestId]}</p> : null}
+        </article>;
+      })}
+    </div> : null}
+  </section>;
+}

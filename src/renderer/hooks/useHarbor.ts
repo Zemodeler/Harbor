@@ -3,7 +3,10 @@ import type { Agent, CliStatus, Conversation, ConversationMode, HarborEvent, Mes
 
 export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
-type Permission = Extract<HarborEvent, { type: 'permission' }>;
+export type Permission = Extract<HarborEvent, { type: 'permission' }>;
+export type PermissionAnswer = 'allow' | 'always' | 'deny';
+/** Reconcile pending permissions only while some remain; slower after a failed check so a broken bridge is not hammered. */
+export const PERMISSION_POLL_MS = 5000, PERMISSION_POLL_MAX_MS = 30000;
 export type Question = Extract<HarborEvent, { type: 'question' }>;
 export function useHarbor() {
   const api = window.harbor;
@@ -17,6 +20,10 @@ export function useHarbor() {
   const [projectId, setProjectId] = useState('');
   const [conversation, setConversation] = useState<Conversation>();
   const [permissions, setPermissions] = useState<Permission[]>([]);
+  const [permissionAnswering, setPermissionAnswering] = useState<Record<string, PermissionAnswer>>({});
+  const [permissionErrors, setPermissionErrors] = useState<Record<string, string>>({});
+  const [permissionSyncError, setPermissionSyncError] = useState('');
+  const [permissionNotice, setPermissionNotice] = useState('');
   const [questions, setQuestions] = useState<Question[]>([]);
   const [loading, setLoading] = useState(true);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -28,6 +35,46 @@ export function useHarbor() {
   const projectRevision = useRef(0), messageRevision = useRef(0);
   const cachedMessages = useRef(new Map<string, Message>());
   const remembered = useRef(new Map<string, string>());
+  // Race guards for permissions: `seen` = event order a request was received in, `settled` = answered, expired or
+  // withdrawn here (a stale snapshot must not bring it back), `sync` = only the newest listPendingPermissions applies.
+  const permissionOrder = useRef(0), permissionSync = useRef(0);
+  const seenPermissions = useRef(new Map<string, number>());
+  const settledPermissions = useRef(new Set<string>());
+  const answeringPermissions = useRef(new Set<string>());
+  const permissionList = useRef<Permission[]>([]);
+  permissionList.current = permissions;
+  const forgetPermissions = useCallback((ids: string[]) => {
+    if (!ids.length) return;
+    ids.forEach(id => { settledPermissions.current.add(id); seenPermissions.current.delete(id); });
+    const gone = new Set(ids);
+    permissionList.current = permissionList.current.filter(p => !gone.has(p.requestId));
+    setPermissions(ps => ps.filter(p => !gone.has(p.requestId)));
+    setPermissionErrors(es => Object.fromEntries(Object.entries(es).filter(([id]) => !gone.has(id))));
+  }, []);
+  const receivePermission = useCallback((p: Permission) => {
+    if (settledPermissions.current.has(p.requestId) || p.expiresAt !== undefined && p.expiresAt <= Date.now()) return;
+    seenPermissions.current.set(p.requestId, ++permissionOrder.current);
+    permissionList.current = [...permissionList.current.filter(x => x.requestId !== p.requestId), p];
+    setPermissions(ps => ps.some(x => x.requestId === p.requestId) ? ps.map(x => x.requestId === p.requestId ? p : x) : [...ps, p]);
+  }, []);
+  /** Merge Harbor's pending list: add what is missing; drop only requests received before this check began (newer events win). */
+  const refreshPermissions = useCallback(async () => {
+    const sync = ++permissionSync.current, startedAt = permissionOrder.current;
+    try {
+      const pending = await api.listPendingPermissions();
+      if (sync !== permissionSync.current) return true;
+      const listed = new Set(pending.map(p => p.requestId));
+      const withdrawn = permissionList.current.filter(p => !listed.has(p.requestId) && (seenPermissions.current.get(p.requestId) ?? 0) <= startedAt).map(p => p.requestId);
+      if (withdrawn.length) setPermissionNotice(withdrawn.length === 1 ? 'A request no longer needs an answer: Harbor withdrew it or it was answered elsewhere.' : `${withdrawn.length} requests no longer need an answer: Harbor withdrew them or they were answered elsewhere.`);
+      forgetPermissions(withdrawn);
+      pending.forEach(p => { if (!seenPermissions.current.has(p.requestId)) receivePermission(p); });
+      setPermissionSyncError('');
+      return true;
+    } catch (e) {
+      if (sync === permissionSync.current) setPermissionSyncError(`Could not check which requests are still waiting${e instanceof Error && e.message ? ` (${e.message})` : ''}. Requests shown here may be out of date.`);
+      return false;
+    }
+  }, [api, forgetPermissions, receivePermission]);
   const run = useCallback(async <T,>(work: () => Promise<T>): Promise<T | undefined> => {
     try { setError(''); return await work(); }
     catch (e) { setError(e instanceof Error ? e.message : 'Something went wrong. Please try again.'); }
@@ -71,7 +118,13 @@ export function useHarbor() {
     setLoading(false);
   }, [api, run, selectProject]);
   useEffect(() => { void reload(); }, [reload]);
-  useEffect(() => api.onEvent(e => {
+  useEffect(() => {
+    const unsubscribe = api.onEvent(onEvent);
+    // Only after subscribing: a reloaded renderer missed the original events, and nothing can fall between the two.
+    void refreshPermissions();
+    return () => { unsubscribe(); ++permissionSync.current; };
+  }, [api, refreshPermissions]);
+  function onEvent(e: HarborEvent) {
     if (e.type === 'conversation' && e.conversation.projectId === current.current.projectId) {
       setConversations(cs => [e.conversation, ...cs.filter(c => c.id !== e.conversation.id)].sort((a, b) => b.updated - a.updated));
       if (current.current.conversationId === e.conversation.id) setConversation(e.conversation);
@@ -91,8 +144,34 @@ export function useHarbor() {
     if (e.type === 'usage') setUsage(e.windows);
     if (e.type === 'cli') setClis(cs => [...cs.filter(c => c.id !== e.cli.id), e.cli]);
     if (e.type === 'question') setQuestions(qs => qs.some(q => q.requestId === e.requestId) ? qs : [...qs.filter(q => q.agentId !== e.agentId || !e.agentId), e]);
-    if (e.type === 'permission') setPermissions(ps => ps.some(p => p.requestId === e.requestId) ? ps : [...ps, e]);
-  }), [api]);
+    if (e.type === 'permission') receivePermission(e);
+  }
+  // Harbor has no resolution event: poll while requests are shown so withdrawn ones disappear. Stops when none remain.
+  const hasPermissions = permissions.length > 0;
+  useEffect(() => {
+    if (!hasPermissions) return;
+    let cancelled = false, delay = PERMISSION_POLL_MS, timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      const ok = await refreshPermissions();
+      if (cancelled) return;
+      delay = ok ? PERMISSION_POLL_MS : Math.min(delay * 2, PERMISSION_POLL_MAX_MS);
+      timer = setTimeout(() => void tick(), delay);
+    };
+    timer = setTimeout(() => void tick(), delay);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [hasPermissions, refreshPermissions]);
+  // An expired request was already denied by Harbor: remove it without answering it a second time.
+  const nextExpiry = permissions.reduce((min, p) => p.expiresAt !== undefined && p.expiresAt < min ? p.expiresAt : min, Infinity);
+  useEffect(() => {
+    if (nextExpiry === Infinity) return;
+    const timer = setTimeout(() => {
+      const expired = permissionList.current.filter(p => p.expiresAt !== undefined && p.expiresAt <= Date.now());
+      if (!expired.length) return;
+      setPermissionNotice(expired.length === 1 ? `The request${expired[0].tool ? ` to run ${expired[0].tool}` : ''} expired without an answer. Harbor denied it and told the agent.` : `${expired.length} requests expired without an answer. Harbor denied them and told the agents.`);
+      forgetPermissions(expired.map(p => p.requestId));
+    }, Math.min(Math.max(nextExpiry - Date.now(), 0), 2 ** 31 - 1));
+    return () => clearTimeout(timer);
+  }, [nextExpiry, forgetPermissions]);
   async function newConversation() {
     if (!projectId) return;
     const id = projectId;
@@ -158,8 +237,28 @@ export function useHarbor() {
     setSending(s => { const next = new Set(s); next.delete(c.id); return next; });
     return success;
   }
-  async function answerPermission(requestId: string, allow: boolean) {
-    await run(async () => { await api.answerPermission(requestId, allow); setPermissions(ps => ps.filter(p => p.requestId !== requestId)); });
+  /** Per request, so one failed answer never blocks the others; the request stays visible until Harbor has the answer. */
+  async function answerPermission(requestId: string, answer: PermissionAnswer) {
+    const p = permissionList.current.find(x => x.requestId === requestId);
+    if (!p || answeringPermissions.current.has(requestId)) return false;
+    // "Always" is only ever sent for a tool request that offered it; anything else is a plain answer.
+    const always = answer === 'always' && p.kind === 'tool' && p.alwaysAllow === true;
+    if (answer === 'always' && !always) return false;
+    answeringPermissions.current.add(requestId);
+    setPermissionAnswering(a => ({ ...a, [requestId]: answer }));
+    setPermissionErrors(({ [requestId]: _, ...rest }) => rest);
+    try {
+      await (always ? api.answerPermission(requestId, true, { always: true }) : api.answerPermission(requestId, answer === 'allow'));
+      forgetPermissions([requestId]);
+      return true;
+    } catch (e) {
+      if (!settledPermissions.current.has(requestId)) setPermissionErrors(es => ({ ...es, [requestId]: `Harbor did not accept your answer${e instanceof Error && e.message ? `: ${e.message}` : '.'} Try again while the request is shown here.` }));
+      void refreshPermissions();
+      return false;
+    } finally {
+      answeringPermissions.current.delete(requestId);
+      setPermissionAnswering(({ [requestId]: _, ...rest }) => rest);
+    }
   }
   // Dismissing only hides the pop-up; the question stays in the chat and can be answered there.
   const dismissQuestion = (requestId: string) => setQuestions(qs => qs.filter(q => q.requestId !== requestId));
@@ -183,7 +282,8 @@ export function useHarbor() {
   }
   return { api, projects, clis, conversations, agents, messages, usage, settings, projectId, conversation,
     lastActivity, updateConversation, openConversation,
-    permissions, questions, dismissQuestion, answerQuestion, loading, messagesLoading, projectLoading, error, sending, run, reload, selectProject, selectConversation,
+    permissions, permissionAnswering, permissionErrors, permissionSyncError, permissionNotice, dismissPermissionNotice: () => setPermissionNotice(''), refreshPermissions,
+    questions, dismissQuestion, answerQuestion, loading, messagesLoading, projectLoading, error, sending, run, reload, selectProject, selectConversation,
     newConversation, deleteConversation, openAgent, addProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
