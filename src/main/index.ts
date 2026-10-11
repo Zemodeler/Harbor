@@ -1,10 +1,11 @@
 import { join } from 'node:path';
 import { statSync } from 'node:fs';
-import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, shell, Tray } from 'electron';
-import { registerIpc } from './ipc';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron';
+import { registerIpc, type IpcHost } from './ipc';
 import { readCodexLimits } from './codexLimits';
 import { createHarborService } from './service';
 import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
+import { appDocument, hardenContents } from './windowSecurity';
 
 let win: BrowserWindow | undefined;
 let quitting = false;
@@ -25,6 +26,14 @@ function iconPath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico');
 }
 
+// A packaged build always shows its bundled renderer; only an unpackaged dev run may point at the dev server.
+const devRendererUrl = app.isPackaged ? undefined : process.env['ELECTRON_RENDERER_URL'];
+const rendererFile = join(__dirname, '../renderer/index.html');
+const appDoc = appDocument(rendererFile, devRendererUrl);
+
+// Every WebContents (including any a compromised page might try to create) gets the window policy before it loads.
+app.on('web-contents-created', (_event, contents) => hardenContents(contents, appDoc, url => { void shell.openExternal(url); }));
+
 function createWindow(hideOnClose: () => boolean): void {
   win = new BrowserWindow({
     width: 1280, height: 820, minWidth: 420, minHeight: 480,
@@ -32,7 +41,7 @@ function createWindow(hideOnClose: () => boolean): void {
     icon: iconPath(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true, nodeIntegration: false, sandbox: false
+      contextIsolation: true, nodeIntegration: false, sandbox: true
     }
   });
   const window = win;
@@ -42,8 +51,8 @@ function createWindow(hideOnClose: () => boolean): void {
     window.hide();
   });
   window.on('closed', () => { if (win === window) win = undefined; });
-  if (process.env['ELECTRON_RENDERER_URL']) void win.loadURL(process.env['ELECTRON_RENDERER_URL']);
-  else void win.loadFile(join(__dirname, '../renderer/index.html'));
+  if (devRendererUrl) void win.loadURL(devRendererUrl);
+  else void win.loadFile(rendererFile);
 }
 
 const startupAction = instanceStartupAction(app.requestSingleInstanceLock());
@@ -105,7 +114,12 @@ if (startupAction === 'start') app.whenReady().then(() => {
     syncTray();
     return settings;
   };
-  registerIpc(service, () => win?.webContents);
+  // ipcMain is reached lazily so ipc.ts stays Electron-free and testable.
+  const ipcHost: IpcHost = {
+    handle: (name, listener) => ipcMain.handle(name, listener),
+    removeHandler: name => ipcMain.removeHandler(name)
+  };
+  registerIpc(service, ipcHost, () => win?.webContents, appDoc);
   // A question must not wait unseen behind other windows: bring Harbor forward (the pop-up itself is in the renderer).
   service.onEvent((e) => {
     if (e.type === 'agent' || e.type === 'conversation') syncTray();
