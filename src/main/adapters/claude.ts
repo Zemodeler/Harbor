@@ -106,7 +106,7 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   // must be followed by another flag (--disallowedTools below).
   const dirs = [...new Set([...(o.images ?? []).map((p) => dirname(p)), ...(o.writableDirs ?? [])])];
   if (dirs.length) a.push('--add-dir', ...dirs);
-  // Subagents must not spawn agents (docs/project-agents.md): block native delegation tools.
+  // Subagents must not spawn agents (docs/architecture.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');
   a.push(...claudeDenyRules(o));
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.

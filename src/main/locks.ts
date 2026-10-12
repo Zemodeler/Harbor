@@ -8,7 +8,7 @@ export interface LockConflict { file: string; holder: Id }
 export interface AcquireResult { ok: boolean; conflicts: LockConflict[] }
 
 /**
- * Whole-file write ownership per project (docs/agent-collaboration.md). A lock on '*' means the holder
+ * Whole-file write ownership per project (docs/architecture.md). A lock on '*' means the holder
  * edits the shared checkout directly, which excludes every other writer. Locks are only released by an
  * explicit call after the owner's process has stopped; nothing is granted by timeout.
  */
