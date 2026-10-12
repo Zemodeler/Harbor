@@ -2,7 +2,7 @@
 
 ## How it works
 - Every push to `main` runs `.github/workflows/release.yml` on `windows-latest`: `npm ci`, packaging deps (`npm install --prefix build`), then `npm test`, `npm run typecheck`, `npm run build`. Only if all pass does it package and publish.
-- Version is `0.1.<GitHub run number>`, set in the runner with `npm version --no-git-tag-version` (never committed). The release tag is `v<version>`. Assets: `Harbor-Setup-<version>.exe`, its `.blockmap`, and `latest.yml`. Release notes are generated from the commits since the previous release.
+- Version is `0.1.<GitHub run number>`, set in the runner with `npm version --no-git-tag-version` (never committed). The release tag is `v<version>`. Assets: `Harbor-Setup-<version>.exe`, its `.blockmap`, and `latest.yml`. Release notes are generated from the commits since the previous release. The workflow first creates a draft release for the tag, electron-builder uploads the assets into it (creating the release itself races, because it uploads in parallel), and the last step publishes the draft with its notes; installed copies only see a version once it is published.
 - Installed copies (`electron-updater`, `src/main/updater.ts`) check GitHub Releases 30 s after launch and every 4 hours, download in the background, then ask "Restart now / Later". The prompt never appears, and Harbor never restarts, while agents are running (it re-checks every minute). "Later" installs on the next normal quit.
 - The repository must be public: update checks are unauthenticated.
 

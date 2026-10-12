@@ -33,15 +33,24 @@ jobs:
       - run: npm run build
       # Unique version per build, not committed: 0.1.<run number>.
       - run: npm version 0.1.${{ github.run_number }} --no-git-tag-version
+      # Create the draft release first: electron-builder uploads files in parallel and, when it has to create the
+      # release itself, two uploads race and GitHub answers 422 "Published releases must have a valid tag".
+      # With the draft already there it only uploads into it. A draft is invisible to updaters until published below.
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "v0.1.${{ github.run_number }}" --draft --target "${{ github.sha }}" --title "v0.1.${{ github.run_number }}" --notes "Building..."
       - run: node build/dist.mjs --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # electron-builder uploads the assets; fill in the notes from the commits since the previous release.
-      - name: Release notes
+      # All assets (installer, blockmap, latest.yml) are uploaded: add notes from the commits since the previous release
+      # and publish. Only now do installed copies see this version.
+      - name: Publish release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="v0.1.${{ github.run_number }}"
           NOTES=$(gh api "repos/${{ github.repository }}/releases/generate-notes" -f tag_name="$V" -f target_commitish="${{ github.sha }}" --jq .body)
-          gh release edit "$V" --notes "$NOTES"
+          gh release edit "$V" --draft=false --latest --notes "$NOTES"
