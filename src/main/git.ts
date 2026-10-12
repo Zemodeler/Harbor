@@ -162,7 +162,9 @@ export class Git {
       return r.code === 0 && r.stdout.trim() ? r.stdout.trim() : head;
     };
     const where = await this.worktreeOf(repo, branch);
-    if (where) return isInside(where, worktreesRoot) && existsSync(where) ? { path: resolve(where), branch, baseCommit: await base() } : undefined;
+    // Report the spelling this worktree was created with when git names the same folder (long vs 8.3 short name), so the
+    // path stored on the agent keeps comparing equal.
+    if (where) return isInside(where, worktreesRoot) && existsSync(where) ? { path: guardPath(where) === guardPath(path) ? path : resolve(where), branch, baseCommit: await base() } : undefined;
     await this.git(repo, ['worktree', 'prune']);
     if (existsSync(path)) return undefined; // a directory Harbor does not know as a worktree is not ours to reuse
     mkdirSync(join(worktreesRoot, projectKey), { recursive: true });
