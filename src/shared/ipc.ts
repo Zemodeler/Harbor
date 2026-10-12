@@ -7,7 +7,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listClis', 'refreshClis', 'openLogin',
   'listProjects', 'addProject', 'removeProject', 'setProjectImage',
   'listConversations', 'newConversation', 'deleteConversation',
-  'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder',
+  'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder', 'openWorkspace',
   'getGitOverview', 'getGitLog', 'getGitLogPage', 'getGitChanges', 'getGitDiff',
   'listMessages', 'send', 'setConversationMode',
   'listAgents', 'openAgentConversation', 'stopAgent',

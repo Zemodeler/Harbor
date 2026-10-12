@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, ConversationMode, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -11,6 +11,7 @@ import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
 import { Git } from './git';
 import { GitView } from './gitView';
+import { isEditorId } from './launcher';
 import { Orchestrator, toAgent, type OrchestratorDeps } from './orchestrator';
 import type { ProcessKiller } from './proc';
 import { newId, Store } from './store';
@@ -22,7 +23,8 @@ import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace'> & {
+  openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
   getGitLogPage(projectId: Id, opts?: { branch?: string; limit?: number; skip?: number }): Promise<{ commits: GitCommit[]; hasMore: boolean; note?: string }>;
   onEvent(cb: (e: HarborEvent) => void): () => void;
@@ -47,6 +49,8 @@ export interface ServiceOptions {
   /** Folder picker for addProject(); injected so this module never imports electron. */
   pickFolder?: () => Promise<string | undefined>;
   openFolder?: (path: string) => Promise<void>;
+  /** Opens a terminal or the editor on a folder (and optionally one file inside it); injected so this module never imports electron. */
+  launch?: (kind: 'terminal' | 'editor', target: { dir: string; file?: string }, editor?: EditorId) => Promise<void>;
   /** Replace discovery (tests). */
   discover?: () => Promise<ResolvedCli[]>;
   /** Replace adapter construction (tests). */
@@ -351,6 +355,35 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const project = needProject(id);
       if (!opts.openFolder) throw new Error('Opening folders is available in the desktop app.');
       await opts.openFolder(project.path);
+    },
+    async openWorkspace(projectId, action, o) {
+      const project = needProject(projectId);
+      if (action !== 'terminal' && action !== 'editor' && action !== 'folder') throw new Error('Unknown workspace action.');
+      let dir = project.path;
+      if (o?.agentId) {
+        const a = store.getAgent(o.agentId);
+        if (!a || a.projectId !== projectId) throw new Error('That helper does not belong to this project.');
+        if (!a.worktree) throw new Error('That helper has no worktree of its own.');
+        dir = a.worktree;
+      }
+      if (!existsSync(dir)) throw new Error('That folder no longer exists.');
+      let file: string | undefined;
+      if (o?.file !== undefined && o.file !== '') {
+        if (action === 'terminal') throw new Error('A terminal opens on a folder, not a file.');
+        if (typeof o.file !== 'string' || /[\0\r\n]/.test(o.file) || isAbsolute(o.file)) throw new Error('The file must be a path inside the folder.');
+        const rel = relative(dir, resolve(dir, o.file));
+        if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('The file must be a path inside the folder.');
+        if (!existsSync(join(dir, rel))) throw new Error('That file does not exist.');
+        file = rel;
+      }
+      if (action === 'folder') {
+        if (!opts.openFolder) throw new Error('Opening folders is available in the desktop app.');
+        await opts.openFolder(file ? join(dir, file) : dir);
+        return;
+      }
+      if (!opts.launch) throw new Error('Opening a terminal or editor is available in the desktop app.');
+      const configured = store.getSettings().editor;
+      await opts.launch(action, { dir, file }, isEditorId(configured) ? configured : undefined);
     },
     async getGitOverview(projectId) {
       const view = await GitView.open(needProject(projectId).path);

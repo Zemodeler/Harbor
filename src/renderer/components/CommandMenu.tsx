@@ -40,6 +40,10 @@ export function CommandMenu({ state, history, close, settings, add, review, acti
       <button hidden={!'review changes'.includes(query.toLowerCase())} disabled={!state.conversation} onClick={() => execute(review)}>Review changes</button>
       {git ? <button hidden={!'git branches and changes'.includes(query.toLowerCase())} disabled={!state.projectId} onClick={() => execute(git)}>Git branches and changes</button> : null}
       <button hidden={!'open project folder'.includes(query.toLowerCase())} disabled={!state.projectId} onClick={() => execute(() => void state.run(() => state.api.openProjectFolder(state.projectId)))}>Open project folder</button>
+      {state.api.openWorkspace ? <>
+        <button hidden={!'open terminal here'.includes(query.toLowerCase())} disabled={!state.projectId} onClick={() => execute(() => void state.run(() => state.api.openWorkspace!(state.projectId, 'terminal')))}>Open terminal here</button>
+        <button hidden={!'open in editor'.includes(query.toLowerCase())} disabled={!state.projectId} onClick={() => execute(() => void state.run(() => state.api.openWorkspace!(state.projectId, 'editor')))}>Open in editor</button>
+      </> : null}
     </div> : null}
     {!history && projects.length ? <><h3 className={s.resultHeading}>Projects</h3><div className={s.switchList}>{projects.map(p => <button key={p.id} onClick={() => execute(() => void state.selectProject(p.id))}>{p.name}<small>{p.path}</small></button>)}</div></> : null}
     {(history || query) ? <><h3 className={s.resultHeading}>{history ? 'Conversation history' : 'Conversations'}</h3>

@@ -5,6 +5,7 @@ import { registerIpc, type IpcHost } from './ipc';
 import { readCodexLimits } from './codexLimits';
 import { createLogger } from './logger';
 import { createHarborService } from './service';
+import { editorUrl, launchTerminal } from './launcher';
 import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
 import { appDocument, hardenContents } from './windowSecurity';
 import { autoUpdater } from 'electron-updater';
@@ -88,6 +89,10 @@ if (startupAction === 'start') app.whenReady().then(() => {
     dataDir,
     appVersion: app.getVersion(),
     openFolder: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
+    launch: async (kind, target, editor) => {
+      if (kind === 'editor') { await shell.openExternal(editorUrl(editor, target.file ? join(target.dir, target.file) : target.dir)); return; }
+      await launchTerminal(target.dir);
+    },
     // Codex logs its real 5h/weekly limits locally. Claude's come from the rate_limit_event in its own stream
     // during Harbor runs (see usage.ts), so they appear after the first Claude run and are estimates before that.
     ledger: { reported: (cli) => (cli === 'codex' ? readCodexLimits() : []) },
