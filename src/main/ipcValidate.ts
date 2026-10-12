@@ -38,6 +38,17 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!Array.isArray(args[1]) || args[1].length < 1 || args[1].length > 50 || !args[1].every(isId)) bad('agentIds must be a list of 1 to 50 agent ids');
       if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'string' || !args[2].trim() || args[2].length > 250 || CONTROL.test(args[2]))) bad('target must be a branch name');
       break;
+    case 'openWorkspace': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (args[1] !== 'terminal' && args[1] !== 'editor' && args[1] !== 'folder') bad('action must be terminal, editor or folder');
+      const o = args[2] as { agentId?: unknown; file?: unknown } | undefined | null;
+      if (o !== undefined && o !== null) {
+        if (typeof o !== 'object') bad('options must be an object');
+        if (o.agentId !== undefined && !isId(o.agentId)) bad('agent id must be a short non-empty string');
+        if (o.file !== undefined && (typeof o.file !== 'string' || o.file.length > MAX_PATH || CONTROL.test(o.file))) bad('file must be a relative path');
+      }
+      break;
+    }
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

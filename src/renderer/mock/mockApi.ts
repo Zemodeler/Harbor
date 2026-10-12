@@ -127,6 +127,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     },
     async getReview(conversationId) { requireConversation(conversationId); return { conversationId, capturedAt: Date.now(), files: [], notes: ['Demo only. No project files have been changed.', 'Verification has not been tied to this snapshot.'] }; },
     async openProjectFolder() { throw new Error('Opening folders is available in the desktop app.'); },
+    async openWorkspace() { throw new Error('Opening a terminal or editor is available in the desktop app.'); },
     async getGitOverview(projectId) {
       const p = data.projects.find(x => x.id === projectId);
       if (!p) throw new Error(`Unknown project ${projectId}`);
