@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -109,7 +109,7 @@ describe('H1: target branch case', () => {
     expect(await cs.resolveBranch(repo, 'Main')).toBeUndefined();
     expect(ci.sameBranch('Main', 'main')).toBe(true);
     expect(cs.sameBranch('Main', 'main')).toBe(false);
-    expect((await ci.worktreeOf(repo, 'FEATURE'))?.replace(/\\/g, '/').toLowerCase()).toBe(wt.replace(/\\/g, '/').toLowerCase());
+    expect((await ci.worktreeOf(repo, 'FEATURE'))?.replace(/\\/g, '/').toLowerCase()).toBe(realpathSync.native(wt).replace(/\\/g, '/').toLowerCase());
   });
 
   // One setup for the three cases: helper runs and real git are slow, and the whole suite shares the machine.

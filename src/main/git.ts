@@ -1,5 +1,5 @@
-import { existsSync, lstatSync, mkdirSync, rmSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, rmdirSync, symlinkSync, unlinkSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { GitFileChange } from '../shared/api';
 import { parseChanges, parseWorktrees } from './gitView';
 import { gitEnv, runProcess, type RunResult, type Runner } from './proc';
@@ -16,8 +16,26 @@ const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 /** Largest binary patch kept in memory. */
 const MAX_PATCH_CHARS = 16 * 1024 * 1024;
 
-/** Resolved, slash-normalised, lower-case form for path-prefix guards (Windows paths are case-insensitive). */
-const guardPath = (p: string): string => resolve(p).split(String.fromCharCode(92)).join('/').replace(/\/+$/, '').toLowerCase();
+/**
+ * Absolute path with symlinks and Windows 8.3 short names (C:\Users\RUNNER~1) expanded, so the same folder compares equal
+ * however it was spelled (git reports the long form, os.tmpdir() may report the short one). A path that does not exist yet
+ * is canonicalised through its nearest existing parent.
+ */
+function canonicalPath(p: string): string {
+  const abs = resolve(p);
+  let head = abs, tail = '';
+  for (let i = 0; i < 64; i++) {
+    try { return tail ? join(realpathSync.native(head), tail) : realpathSync.native(head); } catch {
+      const parent = dirname(head);
+      if (parent === head) return abs;
+      tail = tail ? join(basename(head), tail) : basename(head);
+      head = parent;
+    }
+  }
+  return abs;
+}
+/** Canonical, slash-normalised, lower-case form for path-prefix guards (Windows paths are case-insensitive). */
+const guardPath = (p: string): string => canonicalPath(p).split(String.fromCharCode(92)).join('/').replace(/\/+$/, '').toLowerCase();
 /** Whether `path` is strictly inside `root` after resolving both (so `..` segments cannot slip through). */
 export const isInside = (path: string, root: string): boolean => guardPath(path).startsWith(guardPath(root) + '/');
 
