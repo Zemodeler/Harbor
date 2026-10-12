@@ -42,7 +42,7 @@ async function setup(checks?: string[]) {
   };
   const adapter = new FakeAdapter('claude', script);
   const cli: ResolvedCli = { id: 'claude', name: 'claude', installed: true, signedIn: true, authState: 'signedIn', models: ['default'], path: '/fake/claude' };
-  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3 });
+  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, autoApproveChecks: true, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3 });
   const project = (await svc.addProject(repo))!;
   const [conv] = await svc.listConversations(project.id);
   await svc.send(conv!.id, 'add login and review it');

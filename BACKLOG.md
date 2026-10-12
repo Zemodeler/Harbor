@@ -7,7 +7,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 ### P0 — make the self-host loop trustworthy
 1. **Verify the Codex adapter on a real install** (S). `adapters/codex.ts` flags and JSONL event shapes are from public docs, not verified here. Run `npm run smoke -- codex --full`, fix `codexArgs` / `parseCodexLine`, confirm resume (`codex exec resume`), effort (`-c model_reasoning_effort`), read-only sandbox, and that stdin `-` works. Update the file header from "NOT VERIFIED" to the verified version.
 2. **Run `npm run smoke -- claude --full` signed in** (S). The first full run was never executed (no signed-in CLI in the dev environment). Fix whatever it reveals; add a regression test with a recorded transcript fixture.
-3. **Auth-failure handling** (S). When a run fails with "Not logged in" (see `parseClaudeLine`), mark that CLI `authState: signedOut`, emit a `cli` event, and exclude it from routing until `refreshClis()`. Today it only falls back for that task.
+3. ~~**Auth-failure handling** (S).~~ **Done:** `watchAuth`/`markSignedOut` in `service.ts` mark the CLI `signedOut`, emit a `cli` event and drop it from routing until `refreshClis()`. Original note: When a run fails with "Not logged in" (see `parseClaudeLine`), mark that CLI `authState: signedOut`, emit a `cli` event, and exclude it from routing until `refreshClis()`. Today it only falls back for that task.
 4. **Integration of finished branches** (L, core done, contract 0.1.15). Harbor runs integrators itself (`runIntegration` in `orchestrator.ts`): gated on current reviewer approval, merged by pinned SHA into `harbor/integrate-*`, checks on the combined head, and `applyIntegration` fast-forwards the user's branch only. Remaining: stop the lead from merging itself (`LEAD_SYSTEM`, `adapters/claude.ts`; separate task), tell the lead about the `"role":"integrator"` delegate form, and the UI (see UI requests).
 5. **Streaming deltas** (M). Use `--include-partial-messages` for Claude (and codex equivalents) so `messageDelta` carries tokens, not whole turns.
 
@@ -16,7 +16,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 7. **Queue controls** (M). Priority, "do this next", pause/resume/cancel of queued assignments across projects (`docs/background-routing.md`). Needs contract additions (`setAgentPriority`, `pauseAgent`, `resumeAgent`).
 8. **Interactive headroom** (M). Reserve one concurrency slot and allowance for user-facing replies; checkpoint/pause background work when the user messages and capacity is tight.
 9. **Settings that the docs promise** (M, done in core, contract 0.1.12): concurrency limit, allowed models, role preferences, effort policy, low-allowance policy (`reduceEffort`|`switch`), subscription reserve and per-project overrides are optional `Settings` fields, validated in `normalizeSettingsPatch` and resolved by `effectiveSettings` (`store.ts`); the scheduler and `route()` use them. Remaining: low-allowance "defer" and "ask the user" (need scheduler and permission flow), per-project allowed CLIs, conversation and task-level overrides, and native effort-control mapping notes per adapter.
-10. **Real allowance signals** (M, partly done). Codex limits are read from `~/.codex/sessions` (`codexLimits.ts`) and Claude's from `rate_limit_event` in its stream (persisted on usage events); `usage.ts` prefers them (`source: 'reported'`) and falls back to the 5h/40-run and weekly/300-run estimates. Remaining: Claude limits are only seen when Harbor itself runs Claude (no status command is read), so they can be stale; other CLIs have none.
+10. **Real allowance signals** (M, partly done). Codex limits are read from `~/.codex/sessions` (`codexLimits.ts`) and Claude's from `rate_limit_event` in its stream (persisted on usage events); `usage.ts` prefers them (`source: 'reported'`) and falls back to Harbor's own cost-weighted estimate (budget calibrated from two provider readings, else a flagged fallback of 200 average runs per 5h and 120 per week). Remaining: Claude limits are only seen when Harbor itself runs Claude (no status command is read), so they can be stale; other CLIs have none.
 11. **Dependency-aware reuse of idle workers** (M). Main agent can reuse a finished compatible agent for follow-ups (resume its session) instead of creating a new one.
 12. **Recovery depth** (M, done in core). Harbor persists the PID/name/start time of every CLI it spawns (`proc.ts` observer -> `Store.trackProcess`); on startup `recover()` kills leftover trees (taskkill) only for recorded PIDs whose live process still matches name and start time, and `resumeAgent(agentId)` (contract 0.1.9) continues a stopped helper in its saved session with a no-replay prompt. Remaining: surface the sweep result to the user; the lead agent itself is resumed by sending a message.
 13. **Task-scoped rollback** (L, core done, contracts 0.1.17 preview and 0.1.18 reversal). `rollbackTask` queues a Harbor-run rollback agent (`runRollback` in `orchestrator.ts`). The preview gates it. It reverts the task's merges newest first on a `harbor/rollback-*` worktree, runs the checks, and `applyIntegration` fast-forwards the target; after apply, verification is marked outdated and a journal entry is written. Remaining: a `rollback` journal kind (it uses `triage` for now; `journal.ts` is owned elsewhere), the lead cannot start a rollback (no delegate form), the outdated flag can flip back if the reverted task re-runs on the same head (`markOutdated` recomputes it), and the UI (see UI requests). Earlier notes: Edit helpers record `AgentRecord.snapshots` (newest 5: base, head, files, and a credential-free `git diff --binary` under `<data>/patches` as evidence); integrators record `IntegrationSource.merge`; `rollback.ts` finds a task's merges on a branch (recorded merges, then a merge-history fallback) and `previewRollback` simulates the reverts with `git merge-tree` without touching refs, index or files. Remaining: the reversal itself (revert the merges on a `harbor/rollback-*` branch, checks, then fast-forward like `applyIntegration`), a running-rollback blocker once rollbacks exist, and the UI (see UI requests).
@@ -30,7 +30,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 19. **API fallback** (L): key storage (OS credential store), ask-before-use, hard per-task/per-period limits.
 20. **Storage**: split messages per conversation file or move to SQLite when `state.json` grows; add pagination to `listMessages`.
 21. **Archive conversations**, history search.
-22. **`CLAUDE.md` containing `@AGENTS.md`** (S) so Claude Code subagents read these rules automatically (Codex already reads `AGENTS.md`). Not done because it was outside the original ownership list.
+22. ~~**`CLAUDE.md` containing `@AGENTS.md`** (S)~~ **Done:** `CLAUDE.md` exists and imports `AGENTS.md`. Original note: so Claude Code subagents read these rules automatically (Codex already reads `AGENTS.md`). Not done because it was outside the original ownership list.
 23. **Tray / background-on-close preference** (UI + main).
 
 ## Lead rework (concierge + lead) — what is done and what is next
@@ -58,6 +58,23 @@ Next:
 - Pending permissions (contract 0.1.20): after subscribing to events (and after a renderer reload) call `listPendingPermissions()` once and show each returned request like a `permission` event. Add it to `mockApi.ts` too. Conflict questions are now withdrawn by Harbor when moot (the waiting agent got its files or ended), so a listed request can disappear without an answer.
 - Build (resolved: `npm run build` passes): the renderer imports `@phosphor-icons/react` (`components/Icons.tsx`) but `package.json` does not list it and it is not installed, so `npm run build` fails at the renderer step (main and preload build). Add the dependency.
 
+### Review findings (hardening review; renderer is owned by the UI team, file:line are from the review and may have drifted)
+
+- Safety: auto mode needs a confirmation step before it is enabled (`ModePicker.tsx:18-22`); `auto` removes permission prompts.
+- Usage must show the source (`reported` vs `estimated`) and `projectedPct` (`Settings.tsx:57-61`); never present estimates as provider quota.
+- Helper cards must show `Agent.result`, `Agent.checks`, `outdated` and `testedCommit` (contract 0.1.14).
+- There is no UI for integrate / apply / rollback / queue controls / resume / tool rules (contracts 0.1.9, 0.1.15, 0.1.17-0.1.19).
+- Performance: typing re-renders the whole conversation, nothing is memoized (`Conversation.tsx:121`, `Markdown.tsx:143`); stream deltas rebuild arrays and nothing is virtualized (`useHarbor.ts:141`, `Conversation.tsx:94`); unbounded diff/tool output rendering (`ReviewPanel.tsx:25`, `ToolActivity.tsx:28`, `GitPanel.tsx`); `cachedMessages` grows forever (`useHarbor.ts:134`).
+- State handling: updated messages jump to the bottom and agents/clis reorder on update (`useHarbor.ts:135,143,145`); queued follow-ups may burst when the session ends (`Conversation.tsx:47-54`, a guess, verify); pending questions have no resolve path (`useHarbor.ts:146`, `App.tsx:84,114`); the question dialog unmounts other dialogs and loses typed text (`App.tsx:107-114`); a startup failure looks like a first run (`useHarbor.ts:111-118`); removing the last project leaves stale state (`App.tsx:111`); deleting a conversation is unguarded while it is running (`Sidebar.tsx:86-88`).
+- Missing settings: routing and per-project settings (contract 0.1.12) are not in `Settings.tsx:50-56`.
+- Messages: peer system messages are not rendered distinctly; attached images show only the filename and the CSP blocks `file://` (show thumbnails through a main-side read or a Harbor-served URL); an empty assistant text shows "Working..." forever (`Conversation.tsx:98`).
+- Errors and gating: send is not gated while loading; the error banner has no dismiss; there is a single global error string (use per-area errors).
+- Accessibility gaps (labels, focus handling in dialogs, keyboard navigation); run an audit.
+- Markdown: fence parsing is fragile; italic and blockquote are not supported.
+- Mock and CSP: the mock API is installed unconditionally in production (`main.tsx:7`); mock `setSettings` does not validate; the CSP allows `connect-src ws://127.0.0.1:*` in production (`index.html:6`), restrict it to dev.
+- Diagnostics: add an "Export diagnostics" action in Settings calling `exportDiagnostics()` (contract 0.1.21; optional, so check it exists) and let the user save or copy the text.
+- Packaging (`build/**`, UI-owned): the signing path is blocked by `build/dist.mjs`; there is no auto-update; `build/package.json` has its own lockfile.
+
 Behavior the core already provides that the UI should surface or respect:
 
 1. **Add project**: call `addProject()` with no argument; the main process shows the native folder dialog and returns `null` on cancel.
@@ -83,6 +100,28 @@ Behavior the core already provides that the UI should surface or respect:
 13. **Outdated verification** (contract 0.1.9): `Agent.testedCommit` is the commit a reviewer examined and `Agent.outdated === true` means the reviewed branch has moved since. Show an "outdated" badge on that reviewer's verdict and do not present it as covering the current branch head.
 14. **Background-on-close toggle** (optional `Settings.keepRunningInBackground`, default false): add a Settings switch. When on, closing the window hides Harbor to the tray and running agents keep working; tray menu has Open Harbor and Quit. Explain that Quit from the tray really stops Harbor.
 
+## Product owner requests (README, docs/**, design/** are not edited by core)
+
+- README says "Current stage: Design only" and `docs/*` still describe the old planner/implementer/lead pipeline and sibling messaging; both contradict the app (concierge + lead, `HARBOR_DELEGATE`, `HARBOR_PEER`, integrators, rollback). Reconcile them.
+- Decide the terms-of-service position for driving subscription CLIs (Claude Code, Codex) headlessly and in parallel, and state it in the README.
+- The "free reset" claim: no entitlement source exists (`freeResetAvailable` is never set). Remove or qualify the claim until one does.
+- An eval harness comparing Harbor to a single agent on the same tasks (quality, cost, time) is needed before claiming routing and delegation pay off.
+- macOS and Linux support: `openLogin`, tray, discovery paths, `taskkill` process cleanup and the installer are Windows-only today; decide whether and when to support them.
+- A UI for stored project decisions (`HARBOR_DECISION`, kept as `decision` coordination entries) with delete (needs a core method; ask core when scheduled).
+
+## Hardening wave 2 (core, one agent; details in `HARDENING-PLAN.md`)
+
+- E1 Edit helpers with worktrees take no whole-project lock; release the lock before checks; resumed helpers lock consistently.
+- E2 Concierge bypass for obvious work and small projects (`needsWorkspace` / `requestedCli` before the concierge call).
+- E3 Fallback after a started edit run adds a partial-work note instead of repeating blindly.
+- E4 `HARBOR_DECISION` provenance wording; reviewer verdict only from the final line, documented as advisory.
+- E5 Leads: global and per-project cap, queue extra turns; warn when two leads share a folder.
+- E6 Handoff computed lazily (only when the session cannot resume).
+- E7 Router wiring: `explainNoRoute` text, `required: ['vision']` for images, infra vs quality failure on retry, `avoid` on retry, `rolePreferences` for main.
+- E8 Worktree cleanup on apply/age; `git worktree prune` at startup; trust prompt for `.harbor/checks.json` (hash per project).
+- E9 Paged messages and git log wired through `service.ts`.
+- From wave 1 D3: `orchestrator.ts` still carries the journal cast hacks (`PERMISSION_KIND` and the `'triage'` stand-in for rollback); `JournalKind` now has `permission` and `rollback`, so remove them.
+
 ## API requests (from UI)
 
 - Add assignment/conversation ownership to Agent (or a conversation-scoped listAgents API). The current contract identifies parent agents but cannot distinguish assignments belonging to different main-agent conversations in one project. The UI currently shows all children of the selected main agent.
@@ -100,3 +139,35 @@ Behavior the core already provides that the UI should surface or respect:
 - P0: Codex `workspace-write` sandbox cannot write the worktree's git metadata (`<repo>/.git/worktrees/<name>`), so implementers cannot commit themselves (the checkpoint commit by Harbor rescues it). Pass that dir via `-c sandbox_workspace_write.writable_roots=[...]` (needs a writable-dirs field on RunOptions).
 - P1: Reviewer did not receive the implementer's original specification; reviewer then spawned a "recover spec" agent. Include the spec verbatim in the reviewer assignment.
 - P1 (superseded): sibling-message id addressing. Session-to-session messages now exist (`HARBOR_PEER`, leads only, same project) and accept ids, id prefixes and titles.
+
+## Hardening wave 2 (orchestrator and service)
+
+Done with fake CLIs and real git in temp folders (`tests/orchestratorHardening*.test.ts`). Not verified against real CLIs or a real Electron app:
+- **Protocol tag (nonce)**: real models were not run; if one ignores `nonceInstruction`, its lines are ignored, reported once ("Harbor ignored N protocol line(s)") and the lead is resumed once. Watch the journal (`protocol`) for how often that happens; the instruction text lives in `prompts.ts`.
+- **Exit code 0 without a completion event** is read from a new optional `exitCode` on the adapter `done` chunk (`adapters/types.ts`, set in `claude.ts` and `codex.ts` only for the "no terminal event" fallback). Real streams were not checked.
+- **Stop**: `killTree` now falls back to `child.kill()` when `taskkill` fails, and `streamLines` force-resolves 10 s after an abort and returns `leaked: true`. Windows-only behaviour, no automated test (a process that survives `taskkill` cannot be faked). TODO: surface `leaked` in the journal/UI; the PID stays recorded, so the next start's orphan sweep ends it.
+- **before-quit dialog and sleep/wake** (`index.ts`): `dialog.showMessageBoxSync` and `powerMonitor.on('resume')` are only exercised through the mocked Electron in `tests/trayLifecycle.test.ts`.
+- **Codex `writableDirs`** (`git.worktreeWritableDirs` passed to edit runs) and Claude `allowedCommands` (plain check commands only, no chaining) follow the adapter code from wave 1; neither was run for real.
+- In memory only (lost on restart, by design for now): front-desk exchanges since the lead's last turn, "the lead's last message was a question", the one-time two-leads warning.
+- **Decisions are scoped to the conversation they were noted in** (handoff, `conversationId` on `decision` coordination entries). A new conversation no longer inherits another conversation's decisions; `tests/handoff.test.ts` changed for that. Owner decision needed if project-wide decisions are wanted (an unscoped decision, i.e. one without `conversationId`, is still project-wide).
+- Worktree retention is fixed at 14 days and has no setting; `.harbor/` changes are flagged in the report and chat, not blocked from integration.
+- Checks trust: the prompt reuses the `permission` event of kind `tool` with `tool: 'Harbor checks'` (a new kind would be a contract change). `autoApproveChecks` in `ServiceOptions` exists for tests only.
+
+UI requests from wave 2 (renderer is not core's):
+- `permission` with `tool: 'Harbor checks'`: show the command list from `prompt`; the generic hint "can only be allowed once; Harbor will ask again" is wrong for it (the approval is remembered per file content). Consider a dedicated kind later.
+- Show `Agent.summary === 'possibly stuck'` on helper cards, the `NO VERDICT` report prefix and `result.outcome === 'partial'` for reviewers, and the "Harbor restarted while N helper(s) were running" system message.
+- Use the new paging: `listMessages(id, { limit, before })` and `getGitLogPage(id, { limit, skip })` (`hasMore`, `note`) instead of loading everything.
+- Conversations can now be `queued` with the detail "Waiting for the session ...": only one lead per project edits the folder at a time.
+
+Quota efficiency (wave 2, core), open follow-ups:
+- Codex catalog: add a cheaper Codex entry (and its `costWeight`) once model ids are verified with `codex --help` / `codex exec -m <id>` on a real install (codex was not installed where the quota pass ran, so Codex still has only its default model).
+- Measure the lean concierge (`RunOptions.lean`, flags listed in the `adapters/claude.ts` header): compare `costUsd` of a concierge run before and after with `npm run smoke -- claude`. `--bare` and `--setting-sources` were left out on purpose (unverified; see header).
+- Verify on a real Claude run: `--tools ""` with `--system-prompt-file` and `--no-session-persistence` still returns a normal `result` event, and that `usage.cache_read_input_tokens` / `cache_creation_input_tokens` are the field names (taken from the Anthropic usage object, not seen in Harbor's captured streams).
+- Calibration is Harbor-only: use of the account outside Harbor makes the learned budget look smaller. Consider reading the provider's own figure when a CLI offers one.
+
+UI requests (quota pass):
+- `UsageWindow.calibrated === false`: show the percentage as approximate or "unknown" (the label already says "uncalibrated"); do not draw it like a reading.
+- `Message.details.scored`, `margin`, `tied`, `degraded`, `skipped`: show "why this model" (best three with per-term points, tier loss, what was skipped and until when).
+- Settings: `maxHelpersPerTurn` (1-12, default 4) and `maxPlannersPerTurn` (1-4, default 1); the "held back N helper(s)" system message is the user-visible effect.
+- Headroom routing (contract 0.1.24): `lowAllowancePolicy` absent now means headroom routing, no longer `reduceEffort`. `RoutingSettings.tsx` (the "When allowance runs low" select) labels the unset option "(Reduce effort)": it should read "Headroom: use the CLI with more room (default)" and keep Reduce effort / Switch CLI as explicit choices. `Message.details.scored[].headroom` carries both windows per candidate (remaining %, reset, pace, reported or estimated): show it next to the per-term points. The reason text already lists both windows of every CLI considered.
+- Settings > Usage: show each CLI's weekly pace (used vs. the straight-line budget for the elapsed part of the week, hours to the reset) and "allowance that will be lost" (the surplus, as `terms.pacing` and the reason text describe it). The router now spends a CLI's surplus before a known weekly reset and conserves when over pace (`weeklyPaceOf`, `describePace` in `router.ts`; `Message.details.scored[].terms.pacing`).

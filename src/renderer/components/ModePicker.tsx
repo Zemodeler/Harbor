@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Conversation, ConversationMode } from '../../shared/api';
 import s from '../Harbor.module.css';
+import fx from './Features.module.css';
 
 export const modes: { id: ConversationMode; label: string; hint: string }[] = [
   { id: 'default', label: 'Default', hint: 'Normal behaviour: Harbor asks before risky actions.' },
@@ -14,11 +15,19 @@ export function ModePicker({ conversation, disabled, setMode }: { conversation: 
   const [goalOpen, setGoalOpen] = useState(false);
   const [goal, setGoal] = useState(conversation.goal ?? '');
   const [pending, setPending] = useState(false);
-  useEffect(() => { setGoalOpen(false); setGoal(conversation.goal ?? ''); }, [conversation.id, conversation.goal]);
+  const [confirmAuto, setConfirmAuto] = useState(false);
+  useEffect(() => { setConfirmAuto(false); setGoalOpen(false); setGoal(conversation.goal ?? ''); }, [conversation.id, conversation.goal]);
   async function choose(next: ConversationMode) {
-    if (next === 'goal') { setGoalOpen(true); return; }
+    if (next === 'goal') { setConfirmAuto(false); setGoalOpen(true); return; }
     setGoalOpen(false);
+    // Auto removes permission prompts, so it is never one click away.
+    if (next === 'auto' && mode !== 'auto') { setConfirmAuto(true); return; }
+    setConfirmAuto(false);
     if (next !== mode) { setPending(true); try { await setMode(next); } finally { setPending(false); } }
+  }
+  async function enableAuto() {
+    setPending(true);
+    try { await setMode('auto'); setConfirmAuto(false); } finally { setPending(false); }
   }
   async function saveGoal() {
     if (!goal.trim()) return;
@@ -26,10 +35,15 @@ export function ModePicker({ conversation, disabled, setMode }: { conversation: 
     try { await setMode('goal', goal.trim()); setGoalOpen(false); } finally { setPending(false); }
   }
   const active = goalOpen ? 'goal' : mode;
+  const autoConfirm = confirmAuto ? <div className={fx.fxConfirm} role="group" aria-label="Confirm Auto mode" onKeyDown={e => { if (e.key === 'Escape') setConfirmAuto(false); }}>
+    <p><strong>Turn on Auto mode?</strong> Permission prompts are off for the lead and for edit helpers, so they can run tools and change files without asking you. Reviewers stay read-only.</p>
+    <div className={fx.fxRow}><button autoFocus className={fx.fxPrimary} disabled={pending} onClick={() => void enableAuto()}>Enable Auto mode</button><button disabled={pending} onClick={() => setConfirmAuto(false)}>Cancel</button></div>
+  </div> : null;
   return <div className={s.modePicker}>
     <div role="radiogroup" aria-label="Conversation mode" className={s.modeGroup}>
       {modes.map(m => <button key={m.id} type="button" role="radio" aria-checked={active === m.id} data-mode={m.id} className={s.modeOption} title={m.hint} disabled={disabled || pending} onClick={() => void choose(m.id)}>{m.label}</button>)}
     </div>
+    {autoConfirm}
     {goalOpen ? <form className={s.goalForm} onSubmit={e => { e.preventDefault(); void saveGoal(); }}>
       <label>Goal<input autoFocus value={goal} maxLength={500} placeholder="What should be true when this is done?" onChange={e => setGoal(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setGoalOpen(false); }}/></label>
       <button className={s.primary} disabled={!goal.trim() || pending}>Set goal</button>

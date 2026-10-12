@@ -79,7 +79,7 @@ it('records a snapshot with files and a patch that leaves credential files out',
   expect(a.snapshots).toHaveLength(1);
   const s = a.snapshots![0]!;
   expect(s).toMatchObject({ revision: 1, base: a.baseCommit, head: a.headCommit });
-  expect(s.files.map((f) => [f.path, !!f.hidden]).sort()).toEqual([['.env', true], ['a.txt', false]]);
+  expect(s.files.map((f) => [f.path, !!f.hidden]).sort()).toEqual([['a.txt', false]]); // the checkpoint no longer commits credential files at all
   expect(s.patchPath).toBeDefined();
   expect(s.patchPath!.startsWith(patchesRoot)).toBe(true);
   expect(s.patchPath!.endsWith(`1-${a.headCommit!.slice(0, 7)}.patch`)).toBe(true);

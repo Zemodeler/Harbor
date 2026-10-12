@@ -8,13 +8,13 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listProjects', 'addProject', 'removeProject', 'setProjectImage',
   'listConversations', 'newConversation', 'deleteConversation',
   'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder',
-  'getGitOverview', 'getGitLog', 'getGitChanges', 'getGitDiff',
+  'getGitOverview', 'getGitLog', 'getGitLogPage', 'getGitChanges', 'getGitDiff',
   'listMessages', 'send', 'setConversationMode',
   'listAgents', 'openAgentConversation', 'stopAgent',
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'listPendingPermissions', 'answerQuestion',
-  'listToolRules', 'removeToolRule'
+  'listToolRules', 'removeToolRule', 'exportDiagnostics'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;

@@ -4,6 +4,8 @@ import { elapsed, sessionStatus } from '../session';
 import { ComplexityBadge, SessionStatus } from './SessionStatus';
 import { modes } from './ModePicker';
 import { CloseIcon } from './Icons';
+import { HelperDetails } from './HelperDetails';
+import { IntegrateAction } from './IntegrationPanel';
 import s from '../Harbor.module.css';
 
 export function SessionPanel({ state, close }: { state: HarborState; close: () => void }) {
@@ -40,7 +42,8 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
       {last ? <><dt>Last activity</dt><dd>{['working', 'queued'].includes(status) ? `${elapsed(now - last)} ago` : new Date(last).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</dd></> : null}
     </dl>
     <h3 className={s.resultHeading}>Subagents · {crew.length}</h3>
-    {!crew.length ? <p className={s.muted}>The lead is handling this session directly.</p> : crew.map(a => <div className={s.agentEntry} key={a.id}><button className={s.agentEntryTitle} onClick={() => void state.openAgent(a.id)}>{a.title}</button><SessionStatus status={a.state}/><small>{a.role} · {a.cli} / {a.model}</small>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop this agent</button> : null}</div>)}
+    {!crew.length ? <p className={s.muted}>The lead is handling this session directly.</p> : crew.map(a => <div className={s.agentEntry} key={a.id}><button className={s.agentEntryTitle} onClick={() => void state.openAgent(a.id)}>{a.title}</button><SessionStatus status={a.state}/><small>{a.role} · {a.cli} / {a.model}</small>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop this agent</button> : null}<HelperDetails state={state} agent={a}/></div>)}
+    <IntegrateAction api={state.api} projectId={c.projectId} helpers={crew}/>
     {['working', 'queued', 'waiting'].includes(status) ? <button className={s.stopSession} onClick={() => void state.run(() => state.api.stopConversation(c.id))}>Stop this session</button> : null}
   </>;
 }

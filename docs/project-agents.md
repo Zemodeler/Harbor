@@ -1,170 +1,111 @@
-# Project main agent and focused subagents
+# Concierge, lead and helpers
+
+Status: implemented (`src/main/orchestrator.ts`, `prompts.ts`). This document replaces the earlier "main agent that only delegates, sibling agents that talk to each other" model; see [Superseded](#superseded-from-the-earlier-design) at the end. [Architecture](architecture.md) has the step-by-step path of a prompt.
 
 ## Core model
 
-Every project has one main agent. Its entire job is to assign work, monitor subagents, receive reports, and keep the user informed. It always delegates substantive work and never takes over a subagent's task.
+Every user message goes first to a **concierge**: a cheap, tool-less model that either answers from the conversation or escalates. An escalation starts the conversation's **lead**: a normal working agent session in the project folder that reads, edits and runs commands, and answers you. The lead does the work itself whenever it fits in one focused session. Only when that clearly pays off (independent parts that can run in parallel, long or bulky work such as broad research or many mechanical edits, an independent review) does it delegate to **helpers** by printing `HARBOR_DELEGATE` lines. Harbor, not the lead, creates, schedules, routes and monitors the helpers.
 
-All subagents are siblings under that main agent. Each has one clear responsibility. Users can talk to the main agent or open any subagent's conversation and prompt it directly.
+Helpers never start agents and never message each other. They report to the lead. Leads of different conversations of the same project can send each other one short `HARBOR_PEER` note (see [Agent collaboration](agent-collaboration.md)). You can open any helper's conversation and message it directly.
 
-Sibling agents can also communicate directly. They coordinate shared files, clarify existing contracts, exchange results, and unblock dependencies without routing every message through the main agent. Material agreements and blockers update the coordination record automatically. See [Agent collaboration](agent-collaboration.md).
+This remains a project-first chat experience. Coordination happens behind the familiar interface and needs no setup.
 
-This remains a project-first chat experience. Agent coordination happens behind the familiar interface and requires no setup wizard.
+## Lead
 
-## Main agent responsibilities
+One logical lead agent exists per project (an agent record with role `main`), but each conversation has its own native session, resumed between turns, so conversations do not share context. The lead:
 
-- Receive user requests and maintain the project assignment register.
-- Delegate planning or investigation when a request needs it.
-- Dispatch clear assignments using background routing.
-- Track ownership, dependencies, progress, resource limits, and blockers.
-- Receive progress, completion, and failure reports.
-- Handle requests for sibling agents, reusing an appropriate idle agent or creating one when needed.
-- Relay decisions and relevant context between agents.
-- Monitor direct sibling collaboration and resolve scheduling or ownership disputes; delegate substantive design disputes to a planner.
-- Consolidate reports for the user, preserving their source and evidence.
-- Pause, cancel, retry, or reassign work under the user's instructions and project policy.
+- Answers questions, reads code, edits files and runs commands in the project folder, as any coding assistant would.
+- Delegates with `HARBOR_DELEGATE` lines (at most 8 per turn). It states what the work needs (code, research, planning, review, long-context, vision) and its complexity; Harbor picks the CLI and model. It may pin a CLI only when the task truly needs one.
+- Receives helper reports (compressed), checks them (Harbor-run checks are evidence, a helper's own claims are not), may delegate follow-ups or fix things itself, and tells you what was and was not verified.
+- Requests an integrator (`HARBOR_DELEGATE` with `"role":"integrator"`) to land finished, reviewed branches. It never merges, rebases, cherry-picks, resets or pushes itself; the integrator is Harbor's own code.
+- Asks you a question with `HARBOR_ASK` when it truly cannot proceed (it ends its turn; your answer is its next message), records settled decisions with `HARBOR_DECISION` so they survive a lost session, writes a paste-ready brief with `HARBOR_IMAGE_BRIEF` when asked for an image (Harbor cannot generate images), and in goal mode ends with `HARBOR_GOAL_DONE` when the goal is reached.
+- Is not allowed to use Claude's native `Task` or `Agent` tools or plugins to spawn agents.
 
-The main agent must not write code, research the solution, design features, run verification, review changes, resolve conflicts, or integrate outputs. If such work is needed, it assigns a subagent. Monitoring and summarizing received reports are coordination; independently verifying their claims is a separate review or testing assignment.
+Harbor guards the lead's behavior in code: one lead turn per project edits the folder at a time; a turn is stopped at 60 minutes; at most 12 automatic lead turns follow one user message; protocol lines it got wrong are reported once and the lead gets one chance to correct them; delegations it repeats start once; an edit delegation in plan mode is dropped.
 
-There is one logical main agent per project, even if its underlying CLI session needs to restart or change provider. Its assignment register and report history must survive such changes. Multiple project conversations share that coordinator rather than spawning competing main agents.
+The lead's tier follows the concierge's complexity estimate (low is a cheap model, medium standard, high strong), and its needs always include code. A user can force a strong lead with `/deep`.
 
-## One responsibility per subagent
+## Helper roles
 
-| Role | Single responsibility | Output |
-| --- | --- | --- |
-| Planner | Think through one requested feature or task. | Specification, acceptance criteria, proposed assignments, dependencies, and usage estimates. |
-| Investigator | Answer one bounded technical or factual question. | Findings and supporting evidence. |
-| Feature implementer | Implement one designated feature or bounded change from a specification. | Changes, implementation report, and any unresolved blockers. |
-| Reviewer | Review a defined change against its specification. | Findings or a review result with evidence. |
-| Tester | Verify a defined behavior or change. | Check results and failure evidence. |
-| Integrator | Combine approved changes into a coherent workspace result. | Integrated changes and a report of conflicts or remaining issues. |
+| Role | Single responsibility | Access | Output |
+| --- | --- | --- | --- |
+| Planner | Think through one task and write a specification. | Read-only | Goal, specification, acceptance criteria, risks and open questions. |
+| Implementer | Implement exactly the assigned work. | Edit, in its own git worktree and branch | Committed changes, a report of files changed, checks run and unresolved issues. |
+| Reviewer | Try to show a change does not meet its goal. | Read-only, in the reviewed helper's worktree; cannot run tests | Findings with file and line evidence, then a verdict (approve or changes) on the last line. |
+| Other | One focused job the lead describes (research, investigation, a tester-like read of the code, a mechanical edit). | Read by default; edit when the lead says so | Findings or results with evidence. |
+| Integrator | Merge approved branches of other helpers. | Harbor's own code, no CLI | `harbor/integrate-*` branch and report. See [Agent collaboration](agent-collaboration.md). |
+| Rollback | Revert a task's merges. | Harbor's own code, no CLI | `harbor/rollback-*` branch and report. |
 
-These are available assignment types, not mandatory stages for every request. A small, fully specified change may need only an implementer and appropriate verification. Do not create agents just to fill roles.
-
-An implementation agent receives the feature definition before it starts. “No thinking” means no separate planning, exploratory research, architectural invention, or scope expansion in that assignment. Ordinary reasoning needed to execute the supplied specification is unavoidable; an unresolved design question goes back to the main agent for a planning or investigation assignment.
-
-This restriction applies to implementation work, not to conversation. All subagents can talk normally with the user and other agents: explain their work, answer questions, discuss findings, clarify instructions, and report blockers. Communication does not authorize a different work role or independent scope expansion. Planning subagents explicitly perform the thinking and design needed for their assigned task.
-
-A planner does not implement its plan. An implementer does not become a reviewer or integrator halfway through its assignment. Narrow execution checks may accompany implementation when explicitly included in its scope; independent verification remains a separate role.
+Unknown roles the lead invents (researcher, investigator, analyst, tester, explorer) become read-only `other` helpers. These are available assignment types, not mandatory stages. A small, fully specified change goes to one implementer, or the lead just does it; do not create agents to fill roles. An implementer receives its specification before it starts (a planner's report verbatim, or the lead's instructions) and must not expand scope; an unresolved design question goes back to the lead through `HARBOR_REQUEST_HELP`. This restriction is about work, not conversation: a helper can explain, answer and discuss with you.
 
 ## Small-task fast path
 
-A clear question or small, fully specified edit goes directly from the main agent to one suitable worker. Planning, independent review, and integration are added only when complexity, uncertainty, or the consequences of an error justify them. Required verification still applies; narrow execution checks can be included in the implementer's assignment.
+The default for a clear question or small edit is no helper at all: the concierge escalates, the lead does it in one session. Planning, independent review and integration are added only when complexity or the cost of an error justifies them. A helper that already finished can be followed up (its session is resumed) rather than replaced, by a direct message or a lead instruction; an idle-worker reuse policy beyond that is not built.
 
-Reuse an appropriate worker for related follow-ups when its responsibility, project context, and workspace remain compatible. Record each follow-up as an assignment revision or a new bounded assignment. Reuse does not permit role changes or scope expansion. The main agent remains a coordinator and delegates substantive work even on this fast path.
+## Assignment record
 
-## Assignment contract
+Each helper is an agent record that Harbor persists:
 
-Every assignment records:
+- Identity: id, revision (incremented when you message it directly), project, the conversation it reports to, its title and role.
+- Instructions (`task`), and for implementers a specification (the planner's report, or the instructions themselves).
+- Dependencies (`dependsOn`, `specFrom`), declared file ownership (`files`, informational for worktree helpers), needs, complexity, pinned CLI.
+- Scheduling: state, priority, paused flag, retry marker.
+- Workspace: worktree, branch, base commit, head commit.
+- Evidence: the helper's own `HARBOR_RESULT` (outcome, summary, reviewer verdict, claimed checks), Harbor-run checks with the tested commit, whether that evidence is outdated, per-run snapshots.
+- Routing: CLI, model, effort chosen at run time, with the reason stored on the messages.
 
-- Assignment identifier and revision.
-- Project and parent task.
-- One responsibility and a concrete deliverable.
-- Specification and acceptance criteria.
-- Included scope and explicit exclusions.
-- Relevant context, instructions, skills, and plugins.
-- Dependencies and required inputs.
-- Workspace and file ownership boundaries.
-- Related sibling assignments, shared contracts, and any file handoff dependencies.
-- Automatically selected CLI, model, effort, and resource limits, with the reason for selection.
-- Required reporting and completion evidence.
+## Requesting help
 
-If the assignment is too vague to implement, the main agent sends it to a planner. If it contains several independent features, the planner proposes separate sibling assignments. Do not use prompts such as “handle everything else.”
-
-## Requesting a sibling
-
-A subagent never creates another agent. When it needs help, it sends the main agent a request containing the reason, a proposed single responsibility, required inputs, expected output, and whether its own task is blocked.
-
-The main agent decides whether to reuse a suitable agent, create a sibling, queue the request within concurrency limits, or seek clarification. It informs the requester and records the dependency.
-
-No recursive delegation is allowed, including through native CLI subagent features or plugins. If the adapter cannot enforce that boundary, it must not silently offer the CLI as compatible with this managed mode.
+A helper that needs something it cannot do alone prints `HARBOR_REQUEST_HELP` (reason, proposed role, single-responsibility instructions, whether it is blocked). Harbor wakes the lead with the request. The lead decides: delegate another helper (marked as helping the requester), do it itself, or answer in text. If the lead assigns nobody, Harbor tells the blocked helper to proceed on its own judgment. Requests count toward the same automatic-turn cap as everything else. No recursive delegation exists: helpers cannot create agents, and Claude's native spawning tools are disabled for every run. Whether Codex has a native sub-agent feature that would bypass this is not verified.
 
 ## Direct user access
 
-Users can inspect a subagent's conversation, send context or corrections, pause it, and request a different result within its assignment.
+You can open a helper's conversation, send context or corrections, stop it, resume it from its saved session when it was stopped, and (through the API) pause, prioritize or cancel it while it is queued. A direct message is recorded as a coordination entry, shown in the lead's conversation, passed to the lead as a note on its next turn, and delivered to the helper after its current step. The helper's revision increases so its later reports are attributable.
 
-Direct prompts are delivered to the selected subagent and copied into the project's coordination record. The main agent receives a concise notification of material changes; users do not need to send the same message twice.
-
-An in-scope instruction can proceed immediately. Instructions that affect another agent, conflict with ownership, or materially change the specification trigger coordination before dependent work continues. The main agent delegates substantive replanning instead of solving the new design itself.
-
-Changing an assignment increments its revision. Reports identify the revision they fulfilled, so a result from an older specification cannot be mistaken for completion of the updated request.
-
-### Instructions changed during execution
-
-Record a new instruction before dispatching dependent work. A clarification that preserves the current specification and shared contracts can continue immediately. A change to acceptance criteria, a shared interface, ownership, or required inputs pauses the affected execution and dependent assignments at a safe boundary; unrelated in-scope work can continue.
-
-The main agent coordinates the hold and delegates substantive replanning when needed. Publish the revised assignment and any changed contracts, identify outputs that need reassessment, and obtain acknowledgement from affected workers before resuming dependent work. Notification alone is not acknowledgement. If an adapter cannot interrupt safely, hold dependent work until the current execution has stopped and its output has been reconciled. Preserve the original instruction and revision history.
+Not built: a hold-and-acknowledge protocol that pauses dependents when you change a specification or a shared interface. Today the lead decides what to do about it on its next turn, and dependent work is not automatically held. See [Limitations](limitations.md).
 
 ## Reports
 
-Direct sibling messages complement reports to the main agent. Agents may agree on execution order or exchange outputs within their existing assignments. They cannot use peer messages to create agents, grant themselves a new role, or silently change the specification.
-
-Subagents send reports at meaningful milestones, on blockers or failures, and on completion. Avoid repetitive status messages with no new information.
-
-A report includes the assignment and revision, status, work completed, outputs or changed files, evidence, unresolved issues, and any requested next action. Distinguish work performed from claims verified independently.
-
-The main agent uses these reports to update progress and communicate outcomes. It does not present an unverified completion report as independently checked. Necessary verification is delegated to a reviewer or tester.
+A helper's final message is all the lead receives, so it must contain the findings with file and line evidence. It ends with exactly one `HARBOR_RESULT` line (outcome done, partial or blocked, a summary of at most two sentences, the reviewer's verdict, and the checks it says it ran). A helper that ends without one is recorded as `partial`; a reviewer without a valid final verdict is flagged `NO VERDICT` and counts as neither approval nor rejection. Reports are clipped before they reach the lead. Harbor tracks whether each report reached the lead: confirmed when a lead turn carrying it finished, uncertain when the turn was interrupted, and uncertain reports are re-sent with the next turn. Reports are never presented as independently verified unless a reviewer or Harbor's checks say so.
 
 ### Verification applies to a specific version
 
-Each review or testing report records the assignment revision, exact workspace snapshot or commit tested, relevant dependency versions, checks performed, and their results. A mutable branch name alone is insufficient; uncommitted changes require a snapshot or content fingerprint of the tested inputs.
+A reviewer's approval is recorded with the exact commit it examined (`testedCommit`, taken when its run starts); Harbor-run checks are recorded with the commit they ran on. If the branch later moves, `outdated` becomes true and neither counts for the new head. The integration gate requires a current approval of exactly the head it merges. Evidence from an earlier commit is shown to a lead or a restarted session as covering that earlier commit only. Without a `.harbor/checks.json` Harbor runs no checks and tells the lead so.
 
-Later edits mark affected checks as needing another run. Unrelated checks may remain valid when their recorded inputs are unchanged. Integration requires verification of the resulting combined version where necessary. The main agent must not report current changes as verified using evidence from an older version; a reviewer or tester assesses uncertain impact and reruns the necessary checks.
+## States and lifecycle
 
-## Assignment lifecycle
+Helper states are `queued`, `working`, `waiting`, `done`, `failed` and `stopped`. Queued also means "waiting for a dependency, a file or a free slot", with the reason shown. `waiting` means blocked on a question to you or on help it requested. A paused flag keeps a queued helper from starting. A report alone does not satisfy dependents when checks or integration are outstanding: a dependent runs only when its dependencies are `done`, and a failed or stopped dependency fails its dependents (except one stopped by a Harbor restart, which waits for you to resume it).
 
-Assignments move through queued, running, blocked, paused, ready for verification, complete, failed, or cancelled states as appropriate. A report alone does not complete dependent work if required checks or integration are outstanding.
-
-When a CLI fails or exhausts allowance, the main agent can reassign the same bounded responsibility using the assignment record and latest report. Preserve history and avoid duplicate execution. Stopping an agent must end or confirm the status of its underlying activity before another agent takes its writable workspace.
+When a CLI fails or runs out of allowance, the run is retried or routed to another CLI; the helper's identity, branch and history are unchanged. Stopping a helper aborts its process tree and commits what it left to its branch before anything else touches that worktree.
 
 ## Durable recovery
 
-Persist assignment revisions and states, dependency and ownership records, delivered instructions and acknowledgements, reports, pending user decisions, linked CLI sessions, and references to workspace snapshots. Checkpoint at meaningful milestones and before handoffs or recoverable suspension. Save enough information to distinguish completed work from unfinished work without relying on a model's conversation memory.
-
-After an app crash, restart, or CLI failure, reconcile the saved record with live processes and workspace contents before resuming or reassigning work. Confirm that an earlier writer has stopped before releasing its ownership. Preserve existing changes and reports; resume unfinished authorized work from its latest valid checkpoint using native session resume when supported or a structured handoff otherwise.
-
-Track action identifiers and outcomes for operations that could have external effects. If an operation's outcome is unknown, inspect it before retrying and request input when it cannot be established safely. Never replay completed actions merely because a response was lost. Explicitly paused or cancelled work remains stopped, and pending approvals remain pending after recovery.
+Persisted: agents and their states, dependencies, delivered and uncertain reports, pending-report marks, linked CLI sessions, worktree and branch references, per-run snapshots, decisions, tracked CLI process ids. On startup Harbor kills only the leftover CLI processes it recorded and whose live identity still matches, stops agents that were running (error text says Harbor restarted), commits their uncommitted work, prunes dead worktree records, and posts one summary per conversation. Nothing is replayed automatically: a stopped helper is resumed explicitly in its saved session with a prompt that tells it to inspect its worktree and not repeat completed steps (commits, installs, anything with external effects), or it receives a handoff when its CLI session is gone. Pending permission requests and questions are not persisted. Explicitly stopped work stays stopped.
 
 ## Task-scoped rollback
 
-Record each task's baseline and resulting edits, including added, removed, and uncommitted files, using snapshots or patches. Ownership and integration records identify which task produced each change. A rollback reverses one task's recorded changes while preserving pre-existing user edits and unrelated task changes; it must not reset the whole workspace to an earlier commit.
+Harbor records what each edit run committed on a helper's branch (up to 5 snapshots, with a credential-free patch as evidence) and which merge commit each source produced on an integration branch. A rollback reverses one task's work by reverting those merge commits (newest first) on a new `harbor/rollback-*` branch built from the target's current head; unrelated edits and other tasks are left alone, and your branch is never reset.
 
-Before rollback, stop affected writers and assess later changes and dependent tasks. Where edits overlap, a designated integrator prepares a selective reversal and reports unresolved conflicts. Show a reviewable rollback preview before applying a reversal that could discard work. Preserve a recovery snapshot and invalidate affected verification evidence afterward. External actions such as deployments or sent messages require their own recovery process and must not be presented as undone by a file rollback.
+1. `previewRollback` is read-only. It lists the merge commits, the files they change, later commits on those files (and which helper made them), dependents (waited for it, used its spec, was created to help it, or later work on the same files), whether the reverts apply cleanly (simulated with `git merge-tree`), blockers (the task or a dependent is still running, an integration for that branch is running) and notes (external effects such as deploys, messages and pushes are not undone).
+2. `rollbackTask` re-runs the preview as a gate, then reverts, runs the project checks on the result, and finishes `done` only if everything reverted and the checks pass.
+3. You Apply it like an integration (fast-forward only, refused if your folder is dirty or the branch moved). Afterwards the verification of the reverted task, its helpers, dependents and their reviewers is marked outdated.
+
+Limits: only work that arrived through merge commits (those Harbor's integrator made, or older merges that recognizably contain the task's branch) can be reversed; a fast-forward, squash or cherry-pick is reported as unsupported. One rollback per project at a time; a rollback cannot be rolled back; the lead cannot start one; the rollback screen was in progress in the UI.
 
 ## Example: add project switching
 
-1. The user asks the project's main agent to add project switching.
-2. The main agent assigns a planner to specify behavior and acceptance criteria.
-3. The planner returns a focused specification and proposed assignments.
-4. The main agent assigns one implementer the project picker and another the persistence behavior, if those changes can be isolated cleanly.
-5. An implementer discovers an unresolved storage question and requests an investigation sibling through the main agent. It does not spawn one or redesign storage independently.
-6. The user opens the picker agent and asks it to show the current project more clearly. The correction is recorded and the main agent is notified.
-7. Implementers return reports. The main agent assigns integration and verification where needed.
-8. The main agent summarizes the reported changes and check results for the user.
+1. You ask for project switching in a conversation. The concierge sees it is work and escalates (or, because it names a code concept, Harbor escalates without asking it).
+2. The lead reads the code. The change is two parts that touch different files, so it delegates: an implementer for the picker UI, another for the persistence behavior, each with the files it owns. It tells you what is running.
+3. Harbor creates two worktrees on `harbor/*` branches, starts both helpers (a CLI and model for each, chosen by Harbor), and runs your checks on each branch when it finishes.
+4. One implementer hits an unresolved storage question and prints `HARBOR_REQUEST_HELP`. The lead answers it or delegates a read-only investigation. The implementer does not spawn anything.
+5. You open the picker helper's conversation and ask it to show the current project more clearly. The message is recorded, the lead learns of it, and the helper handles it after its current step.
+6. The helpers report. The lead delegates a reviewer for each (the reviewer sees the diff and the original specification), then an integrator for the approved branches.
+7. Harbor merges both branches by pinned commit into `harbor/integrate-*`, runs the checks on the combined result, and the lead tells you it is ready. You review the changes and press Apply; your branch fast-forwards. Later you can preview and roll the task back.
 
-All feature work is performed by subagents. CLI, model, and effort selection are automatic under project policy. Users do not need to configure each agent manually. Record requested and effective settings separately when an adapter cannot apply or confirm a model or effort selection.
+## Superseded from the earlier design
 
-## Design acceptance criteria
-
-- Each project has exactly one logical main agent.
-- Every substantive user request is delegated, even when small.
-- The main agent only coordinates, monitors, and reports.
-- Each subagent has one clear responsibility and defined deliverable.
-- Planning and implementation are separate assignments.
-- Subagents request siblings through the main agent and cannot create nested agents.
-- Users can directly prompt every subagent without duplicating instructions to the main agent.
-- Material direct instructions update coordination and dependency records.
-- Progress and completion reports return to the main agent and remain inspectable.
-- Subscription limits and concurrency limits apply across the whole project team, including coordination overhead.
-- All subagents can converse normally; implementation scope restrictions do not prohibit discussion.
-- CLI, model, and effort are selected automatically for each assignment.
-- Siblings communicate directly within the project and coordinate shared files without competing writes.
-- Material peer agreements and blockers are visible to the main agent without requiring it to relay every message.
-- Clear small requests reach one suitable worker without mandatory planning or extra agent stages.
-- Recovery reconciles running processes and saved changes before resuming unfinished work, without replaying completed actions.
-- Verification evidence identifies the exact version checked and is reassessed when affected inputs change.
-- Changed instructions hold affected dependent work until revised assignments and contracts are acknowledged.
-- A task's changes can be selectively reversed without discarding unrelated work; conflicts and dependent work are assessed before rollback.
-
-## Current stage
-
-Design only. Agent roles, adapter enforcement, persistence, and communication behavior described here are requirements for later implementation.
+- Superseded: "every project has one main agent that only assigns work and never writes code; every substantive request is delegated, even when small". The lead works directly; delegation is optional.
+- Superseded: "all subagents are siblings that communicate directly, coordinate shared files and hand off ownership". There are no helper-to-helper messages. Helpers learn about each other only through the lead. See [Agent collaboration](agent-collaboration.md).
+- Superseded: "a planner is delegated estimation and every request has the main agent relay". Planners exist as one optional helper role. Harbor, not an agent, estimates nothing about work size beyond the concierge's complexity guess.
+- Superseded: a distinct Tester and Investigator role. They are `other` helpers; independent verification of behavior is Harbor's `.harbor/checks.json` run, not a role.
+- Not built: assignment revisions that hold dependent work until acknowledged; idle-worker reuse policy; an application-wide assignment register shown to the user.

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
 import type { TrackedProcess } from './proc';
@@ -9,7 +9,32 @@ import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionL
  * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
  * report delivery (`AgentRecord.reportDelivery`); its absence means a file written before that existed.
  */
-type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1 };
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive };
+
+/** Totals of usage events pruned from `usage`, so lifetime cost figures survive pruning. */
+export interface UsageTotals { runs: number; inputTokens: number; outputTokens: number; costUsd: number }
+export interface UsageArchive { total: UsageTotals; byProject: Record<Id, UsageTotals> }
+
+/** Usage events older than this are folded into the archive (longest window the ledger reads is 7 days). */
+export const USAGE_KEEP_MS = 8 * 86_400_000;
+const USAGE_PRUNE_AT = 2000;
+/** Stored helper reports longer than this are clipped in state.json; the full text lives in a side file. */
+export const REPORT_STORE_CHARS = 20_000;
+const REPORT_MARK = '\n[Harbor: report clipped in state; full text in the side file]';
+const emptyTotals = (): UsageTotals => ({ runs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+
+export interface StoreOptions {
+  /** Minimum gap between rolling state.json.bak copies (default 30 s; 0 = every flush). */
+  bakIntervalMs?: number;
+  /** Clock, for tests. */
+  now?: () => number;
+}
+
+export interface FlushError { time: number; message: string }
+
+function sleepSync(ms: number): void {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* not available: retry immediately */ }
+}
 
 /** One helper result, as captured when its report was queued for the lead. `gen` is its `AgentRecord.reportGen`. */
 export type ReportMark = Pick<AgentRecord, 'id' | 'revision' | 'state'> & { gen?: number };
@@ -40,25 +65,136 @@ export class Store {
   private state: Persisted;
   private file: string | undefined;
   private timer: NodeJS.Timeout | undefined;
+  private now: () => number;
+  private bakIntervalMs: number;
+  private lastBak = 0;
+  private notices: string[] = [];
+  private flushError: FlushError | undefined;
+  /** Called when a flush failed even after retries (the state stays in memory and is retried). */
+  onFlushError?: (e: FlushError) => void;
+  private byConversation = new Map<Id, Message[]>();
+  private messageById = new Map<Id, Message>();
+  /** What was last written to a side file, so unchanged reports are not rewritten on every flush. */
+  private sideWritten = new Map<string, number>();
 
   /** dir undefined => purely in-memory (tests). */
-  constructor(dir?: string) {
+  constructor(dir?: string, opts: StoreOptions = {}) {
     this.file = dir ? join(dir, 'state.json') : undefined;
+    this.now = opts.now ?? Date.now;
+    this.bakIntervalMs = opts.bakIntervalMs ?? 30_000;
     this.state = this.load();
+    this.indexMessages();
+    this.pruneUsage();
+  }
+
+  /** Things worth telling the user once at startup (restored from backup, unreadable state, ...). */
+  get startupNotices(): readonly string[] { return this.notices; }
+  /** The last flush failure, cleared by the next successful flush. */
+  get lastFlushError(): FlushError | undefined { return this.flushError; }
+
+  private indexMessages(): void {
+    this.byConversation.clear(); this.messageById.clear();
+    for (const m of this.state.messages) this.indexMessage(m);
+  }
+  private indexMessage(m: Message): void {
+    const list = this.byConversation.get(m.conversationId);
+    if (list) list.push(m); else this.byConversation.set(m.conversationId, [m]);
+    this.messageById.set(m.id, m);
+  }
+  private unindexConversation(id: Id): void {
+    for (const m of this.byConversation.get(id) ?? []) this.messageById.delete(m.id);
+    this.byConversation.delete(id);
+  }
+
+  private parseFile(path: string): Persisted {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<Persisted>;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('state is not an object');
+    const state: Persisted = { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
+    if (!state.reportLedger) markLegacyReports(state);
+    this.rehydrateSideFiles(state);
+    return state;
   }
 
   private load(): Persisted {
-    if (!this.file || !existsSync(this.file)) return { ...emptyState(), reportLedger: 1 };
+    if (!this.file) return { ...emptyState(), reportLedger: 1 };
+    const bak = `${this.file}.bak`;
+    if (!existsSync(this.file)) {
+      if (!existsSync(bak)) return { ...emptyState(), reportLedger: 1 };
+      try {
+        const st = this.parseFile(bak);
+        this.notices.push('state.json was missing; Harbor restored its last backup. Changes from the last moments before the previous exit may be missing.');
+        return st;
+      } catch { return { ...emptyState(), reportLedger: 1 }; }
+    }
     try {
-      const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Persisted>;
-      const state: Persisted = { ...emptyState(), ...raw, settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) } };
-      if (!state.reportLedger) markLegacyReports(state);
-      return state;
+      return this.parseFile(this.file);
     } catch {
       // Keep the unreadable file for inspection rather than silently overwriting it.
-      try { renameSync(this.file, `${this.file}.corrupt-${Date.now()}`); } catch { /* ignore */ }
+      const kept = `${this.file}.corrupt-${this.now()}`;
+      let quarantined = true;
+      try { renameSync(this.file, kept); } catch { quarantined = false; }
+      const where = quarantined ? ` The unreadable file was kept as ${kept}.` : '';
+      if (existsSync(bak)) {
+        try {
+          const st = this.parseFile(bak);
+          this.notices.push(`state.json could not be read; Harbor restored its last backup. Recent changes may be missing.${where}`);
+          return st;
+        } catch { /* backup unreadable too */ }
+      }
+      this.notices.push(`state.json could not be read and no usable backup exists, so Harbor started empty.${where}`);
       return { ...emptyState(), reportLedger: 1 };
     }
+  }
+
+  private get sideDir(): string | undefined { return this.file ? join(dirname(this.file), 'side') : undefined; }
+
+  /** Puts full reports and snapshot file lists back from their side files (state.json only holds clipped reports and counts). */
+  private rehydrateSideFiles(state: Persisted): void {
+    const dir = this.file ? join(dirname(this.file), 'side') : undefined;
+    if (!dir) return;
+    for (const a of state.agents) {
+      if (a.report?.endsWith(REPORT_MARK)) {
+        try { a.report = readFileSync(join(dir, `report-${safeName(a.id)}.txt`), 'utf8'); } catch { /* keep the clipped text */ }
+      }
+      for (const sn of a.snapshots ?? []) {
+        const n = (sn as { fileCount?: number }).fileCount;
+        if (n === undefined) continue;
+        try { sn.files = JSON.parse(readFileSync(join(dir, `snap-${safeName(a.id)}-${sn.revision}.json`), 'utf8')); } catch { /* counts only */ }
+        delete (sn as { fileCount?: number }).fileCount;
+      }
+    }
+  }
+
+  /** The state as written to disk: long reports clipped and snapshot file lists reduced to counts, both kept in side files. */
+  private persistedView(): Persisted {
+    const dir = this.sideDir;
+    if (!dir) return this.state;
+    const agents = this.state.agents.map((a) => {
+      let out: AgentRecord = a;
+      if (a.report && a.report.length > REPORT_STORE_CHARS && this.writeSide(join(dir, `report-${safeName(a.id)}.txt`), a.report)) {
+        out = { ...out, report: a.report.slice(0, REPORT_STORE_CHARS) + REPORT_MARK };
+      }
+      if (a.snapshots?.some((sn) => sn.files.length)) {
+        const snaps = a.snapshots.map((sn) => {
+          if (!sn.files.length) return sn;
+          const ok = this.writeSide(join(dir, `snap-${safeName(a.id)}-${sn.revision}.json`), JSON.stringify(sn.files));
+          return ok ? { ...sn, files: [], fileCount: sn.files.length } : sn;
+        });
+        out = { ...out, snapshots: snaps };
+      }
+      return out;
+    });
+    return { ...this.state, agents };
+  }
+
+  private writeSide(path: string, content: string): boolean {
+    if (this.sideWritten.get(path) === content.length) return true;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, content);
+      this.sideWritten.set(path, content.length);
+      return true;
+    } catch { return false; } // the full text then stays inline in state.json
   }
 
   private dirty(): void {
@@ -67,13 +203,40 @@ export class Store {
     this.timer.unref?.();
   }
 
+  /**
+   * Writes state atomically (temp + rename) after rotating a backup copy. Never throws: a failed write is retried, then
+   * recorded in `lastFlushError` (state stays in memory and a later flush retries).
+   */
   flush(): void {
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     if (!this.file) return;
-    mkdirSync(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.state));
-    renameSync(tmp, this.file);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        mkdirSync(dirname(this.file), { recursive: true });
+        const tmp = `${this.file}.tmp`;
+        writeFileSync(tmp, JSON.stringify(this.persistedView()));
+        this.rotateBackup();
+        renameSync(tmp, this.file);
+        this.flushError = undefined;
+        return;
+      } catch (e) {
+        lastError = e;
+        sleepSync(40 * (attempt + 1)); // Windows: antivirus or an indexer can briefly hold the file
+      }
+    }
+    this.flushError = { time: this.now(), message: lastError instanceof Error ? lastError.message : String(lastError) };
+    try { this.onFlushError?.(this.flushError); } catch { /* observer must not break the store */ }
+    // Try again later instead of giving up until the next change.
+    if (!this.timer) { this.timer = setTimeout(() => this.flush(), 5000); this.timer.unref?.(); }
+  }
+
+  /** Copies the current good state.json to state.json.bak, at most once per interval. A failed copy never blocks the write. */
+  private rotateBackup(): void {
+    if (!this.file || !existsSync(this.file)) return;
+    const t = this.now();
+    if (this.lastBak && t - this.lastBak < this.bakIntervalMs) return;
+    try { copyFileSync(this.file, `${this.file}.bak`); this.lastBak = t; } catch { /* best effort */ }
   }
 
   // ---- projects
@@ -94,9 +257,11 @@ export class Store {
     this.state.projects = this.state.projects.filter((p) => p.id !== id);
     this.state.conversations = this.state.conversations.filter((c) => c.projectId !== id);
     this.state.messages = this.state.messages.filter((m) => !convIds.has(m.conversationId));
+    for (const c of convIds) this.unindexConversation(c);
     this.state.agents = this.state.agents.filter((a) => a.projectId !== id);
     this.state.locks = this.state.locks.filter((l) => l.projectId !== id);
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
+    if (this.state.checksApproved?.[id]) { const { [id]: _gone, ...rest } = this.state.checksApproved; this.state.checksApproved = rest; }
     this.dirty();
   }
 
@@ -110,6 +275,7 @@ export class Store {
   removeConversation(id: Id): void {
     this.state.conversations = this.state.conversations.filter((c) => c.id !== id);
     this.state.messages = this.state.messages.filter((m) => m.conversationId !== id);
+    this.unindexConversation(id);
     this.dirty();
   }
   addConversation(c: Conversation): Conversation { this.state.conversations.push(c); this.dirty(); return c; }
@@ -132,11 +298,27 @@ export class Store {
   }
 
   // ---- messages
-  listMessages(conversationId: Id): Message[] {
-    return this.state.messages.filter((m) => m.conversationId === conversationId).sort((a, b) => a.time - b.time);
+  /**
+   * A conversation's messages by time. With `limit` only the newest `limit` are returned (ascending); `before` (a message id or an
+   * epoch-ms time) pages backwards from there. Without options the whole conversation is returned, as before.
+   */
+  listMessages(conversationId: Id, opts?: { before?: Id | number; limit?: number }): Message[] {
+    const all = [...(this.byConversation.get(conversationId) ?? [])].sort((a, b) => a.time - b.time);
+    if (!opts || (opts.before === undefined && opts.limit === undefined)) return all;
+    let end = all.length;
+    if (opts.before !== undefined) {
+      const at = typeof opts.before === 'number' ? opts.before : this.messageById.get(opts.before)?.time;
+      if (at !== undefined) {
+        const idx = typeof opts.before === 'number' ? all.findIndex((m) => m.time >= at) : all.findIndex((m) => m.id === opts.before);
+        end = idx < 0 ? (typeof opts.before === 'number' ? all.length : end) : idx;
+      }
+    }
+    const limit = opts.limit === undefined ? end : Math.max(1, Math.floor(opts.limit));
+    return all.slice(Math.max(0, end - limit), end);
   }
-  getMessage(id: Id): Message | undefined { return this.state.messages.find((m) => m.id === id); }
-  addMessage(m: Message): Message { this.state.messages.push(m); this.touchConversation(m.conversationId); this.dirty(); return m; }
+  countMessages(conversationId: Id): number { return this.byConversation.get(conversationId)?.length ?? 0; }
+  getMessage(id: Id): Message | undefined { return this.messageById.get(id); }
+  addMessage(m: Message): Message { this.state.messages.push(m); this.indexMessage(m); this.touchConversation(m.conversationId); this.dirty(); return m; }
   updateMessage(id: Id, patch: Partial<Message>): void {
     const m = this.getMessage(id);
     if (m) { Object.assign(m, patch); this.dirty(); }
@@ -206,16 +388,57 @@ export class Store {
   }
 
   // ---- sessions (native CLI session ids)
-  getSession(agentId: Id): SessionLink | undefined { return this.state.sessions.find((s) => s.agentId === agentId); }
+  /**
+   * One link per (key, CLI): a fallback to another CLI must not destroy the session the first CLI can still resume. Without `cli`
+   * the most recently updated link of the key is returned (what older callers, and files with one link per key, mean).
+   */
+  getSession(agentId: Id, cli?: CliId): SessionLink | undefined {
+    const all = this.state.sessions.filter((s) => s.agentId === agentId && (cli === undefined || s.cli === cli));
+    return all.reduce<SessionLink | undefined>((best, s) => (!best || s.updated >= best.updated ? s : best), undefined);
+  }
   setSession(link: SessionLink): void {
-    const i = this.state.sessions.findIndex((s) => s.agentId === link.agentId);
+    const i = this.state.sessions.findIndex((s) => s.agentId === link.agentId && s.cli === link.cli);
     if (i >= 0) this.state.sessions[i] = link; else this.state.sessions.push(link);
     this.dirty();
   }
   clearSession(agentId: Id): void { this.state.sessions = this.state.sessions.filter((s) => s.agentId !== agentId); this.dirty(); }
 
   // ---- usage
-  addUsage(u: UsageEvent): void { this.state.usage.push(u); this.dirty(); }
+  addUsage(u: UsageEvent): void {
+    this.state.usage.push(u);
+    if (this.state.usage.length > USAGE_PRUNE_AT) this.pruneUsage();
+    this.dirty();
+  }
+  /**
+   * Folds usage events older than `USAGE_KEEP_MS` into `usageArchive` (totals per project) so state.json stays small. Every
+   * windowed question the ledger asks (5 h / 7 d, cooldowns, reported limits) is answered by newer events; lifetime
+   * cost figures should add `usageArchive()`.
+   */
+  pruneUsage(): void {
+    const cutoff = this.now() - USAGE_KEEP_MS;
+    if (!this.state.usage.some((u) => u.time < cutoff)) return;
+    const archive: UsageArchive = this.state.usageArchive ?? { total: emptyTotals(), byProject: {} };
+    const keep: UsageEvent[] = [];
+    for (const u of this.state.usage) {
+      if (u.time >= cutoff) { keep.push(u); continue; }
+      for (const t of [archive.total, (archive.byProject[u.projectId] ??= emptyTotals())]) {
+        t.runs += 1; t.inputTokens += u.inputTokens ?? 0; t.outputTokens += u.outputTokens ?? 0; t.costUsd += u.costUsd ?? 0;
+      }
+    }
+    this.state.usage = keep;
+    this.state.usageArchive = archive;
+  }
+  /** Totals of pruned usage events, for one project or overall. */
+  usageArchive(projectId?: Id): UsageTotals {
+    const a = this.state.usageArchive;
+    return { ...(projectId ? a?.byProject[projectId] : a?.total) ?? emptyTotals() };
+  }
+  /** Agents currently working, per CLI (cheap scan of the agent list, no process inspection). */
+  runningByCli(): Record<CliId, number> {
+    const out: Record<CliId, number> = {};
+    for (const a of this.state.agents) if (a.state === 'working' && a.cli) out[a.cli] = (out[a.cli] ?? 0) + 1;
+    return out;
+  }
   listUsage(): UsageEvent[] { return this.state.usage; }
   addResetApproval(r: State['resetApprovals'][number]): void { this.state.resetApprovals.push(r); this.dirty(); }
   listResetApprovals(): State['resetApprovals'] { return this.state.resetApprovals; }
@@ -243,6 +466,13 @@ export class Store {
     this.dirty();
   }
   clearTrackedProcesses(): void { if (this.state.processes?.length) { this.state.processes = []; this.dirty(); } }
+
+  // ---- approval of a project's checks file (by content hash)
+  getChecksApproval(projectId: Id): string | undefined { return this.state.checksApproved?.[projectId]; }
+  setChecksApproval(projectId: Id, hash: string): void {
+    this.state.checksApproved = { ...(this.state.checksApproved ?? {}), [projectId]: hash };
+    this.flush(); // an approval must survive a crash right after it
+  }
 
   // ---- "always allow for this project" tool rules
   listToolRules(projectId: Id): ToolRule[] { return [...(this.state.toolRules?.[projectId] ?? [])]; }
@@ -303,6 +533,11 @@ export const DEFAULT_CONCURRENCY = 4;
 export const CONCURRENCY_RANGE = [1, 8] as const;
 /** At most half the allowance can be reserved, or automatic routing would rarely have anything to use. */
 export const RESERVE_RANGE = [0, 50] as const;
+/** Fan-out brake per lead turn (see leadTurn): helpers beyond these wait for the lead's confirmation. */
+export const DEFAULT_HELPERS_PER_TURN = 4;
+export const DEFAULT_PLANNERS_PER_TURN = 1;
+export const HELPERS_PER_TURN_RANGE = [1, 12] as const;
+export const PLANNERS_PER_TURN_RANGE = [1, 4] as const;
 const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;
 const EFFORT_POLICIES: readonly EffortPolicy[] = ['adaptive', 'conserve', 'quality'];
 const LOW_ALLOWANCE_POLICIES: readonly LowAllowancePolicy[] = ['reduceEffort', 'switch'];
@@ -375,6 +610,8 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
   if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') {
     throw new Error('keepRunningInBackground must be a boolean.');
   }
+  if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
+  if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {
     const po: unknown = patch.projectOverrides;
     if (po === undefined) out.projectOverrides = undefined;
@@ -399,7 +636,8 @@ export interface EffectiveSettings {
   allowedModels: Record<CliId, string[]>;
   rolePreferences: Partial<Record<HelperRole, RolePreference>>;
   effortPolicy: EffortPolicy;
-  lowAllowancePolicy: LowAllowancePolicy;
+  /** Undefined = headroom routing (see RoutingPolicy.lowAllowance). */
+  lowAllowancePolicy?: LowAllowancePolicy;
   subscriptionReserve: number;
 }
 
@@ -410,7 +648,8 @@ export function effectiveSettings(s: Settings, projectId?: Id): EffectiveSetting
     allowedModels: { ...(s.allowedModels ?? {}), ...(p.allowedModels ?? {}) },
     rolePreferences: { ...(s.rolePreferences ?? {}), ...(p.rolePreferences ?? {}) },
     effortPolicy: p.effortPolicy ?? s.effortPolicy ?? 'adaptive',
-    lowAllowancePolicy: p.lowAllowancePolicy ?? s.lowAllowancePolicy ?? 'reduceEffort',
+    // Left unset on purpose: absent means headroom routing in the router (an explicit 'reduceEffort' keeps the old stay-put meaning).
+    lowAllowancePolicy: p.lowAllowancePolicy ?? s.lowAllowancePolicy,
     subscriptionReserve: p.subscriptionReserve ?? s.subscriptionReserve ?? 0
   };
 }
@@ -484,6 +723,9 @@ export function matchesToolRule(rule: ToolRuleDraft, tool: string, input: unknow
 }
 
 export const describeToolRule = (r: ToolRuleDraft): string => (r.prefix ? `${r.tool}(${r.prefix} ...)` : r.tool);
+
+/** Agent ids become file names; anything unusual is replaced so an id can never escape the side folder. */
+const safeName = (id: string): string => id.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80);
 
 export function normPath(p: string): string {
   return p.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();

@@ -5,3 +5,4 @@ dist/
 .env
 .env.*
 .harbor-worktrees/
+src/renderer/.vite/

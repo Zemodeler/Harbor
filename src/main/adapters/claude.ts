@@ -10,6 +10,16 @@ import { streamLines, type StdinSink, type StreamedLine, type StreamResult } fro
  * Claude Code headless adapter. Flags verified against `claude --help` (2.1.293):
  * -p, --output-format stream-json (needs --verbose), --model, --effort, --resume,
  * --permission-mode, --allowedTools, --disallowedTools, --append-system-prompt.
+ *
+ * Lean mode (`lean`, the concierge), flags verified against `claude --help` of 2.1.295 and by running `-p` with no input and
+ * no model call: --tools "" (help: "Use \"\" to disable all tools"; accepted), --strict-mcp-config, --disable-slash-commands,
+ * --no-session-persistence (only with --print), --system-prompt-file (replaces the default prompt; not listed in the help body
+ * but accepted: a missing file is reported as "System prompt file not found", an unknown flag as "unknown option").
+ * Verified to exist but NOT used: --setting-sources (accepts user, project, local; the concierge runs in a neutral folder, so
+ * project and local settings are absent anyway, and what an empty list means was not verified), --system-prompt (argv: the
+ * text is long and .cmd shims reject quotes and line breaks). NOT used because unverified: --bare (documented to skip hooks, plugins
+ * and memory, but it may require API-key auth, which a subscription login does not have). NOT verified: how much of the
+ * default prompt cost these flags remove; measure with `npm run smoke -- claude` and compare costUsd of a concierge run.
  * The prompt goes through stdin so it never touches the command line.
  * NOT VERIFIED (`claude --help` could not be run when these were added): --add-dir (images) and
  * --permission-mode bypassPermissions (auto mode). Both are documented Claude Code options.
@@ -34,6 +44,36 @@ import { streamLines, type StdinSink, type StreamedLine, type StreamResult } fro
  * request needs no reply; and that --disallowedTools deny rules are evaluated before the host is asked. Because of the
  * last one, lead runs (`denyGitWrites`) also auto-deny git merge/rebase/cherry-pick/reset/push here, without asking.
  */
+/** Both `Bash(prefix)` and `Bash(prefix *)`: the second form may not match a bare command with no arguments. */
+const bashRules = (prefixes: string[]): string[] => prefixes.flatMap((p) => [`Bash(${p})`, `Bash(${p} *)`]);
+
+/**
+ * Denied on EVERY edit run (helpers and leads): commands that destroy work, rewrite refs, escape the worktree or touch
+ * configuration. Merge/rebase/cherry-pick are not here because integrator helpers legitimately merge inside their worktree;
+ * leads additionally get GIT_WRITE_DENY below. `git -C` is denied because it lets a command act on another repository.
+ */
+export const GIT_DESTRUCTIVE_PREFIXES = [
+  'git clean', 'git restore', 'git checkout --', 'git checkout .', 'git branch -D', 'git branch -d', 'git branch -M', 'git branch -m',
+  'git branch --delete', 'git branch --move', 'git update-ref', 'git worktree', 'git stash drop', 'git stash clear', 'git config',
+  'git remote', 'git push', 'git reset --hard', 'git gc', 'git prune', 'git reflog', 'git filter-branch', 'git -C'
+];
+export const GIT_DESTRUCTIVE_DENY: readonly string[] = bashRules(GIT_DESTRUCTIVE_PREFIXES);
+const GIT_DESTRUCTIVE_RE = /\bgit\b(?:\s+-[Cc]\b|[^;&|\n]*?\s(?:clean|restore|update-ref|worktree|config|remote|push|gc|prune|reflog|filter-branch)(?![\w-])|[^;&|\n]*?\s(?:checkout\s+(?:--|\.)|branch\s+(?:-[DdMm]\b|--delete|--move)|stash\s+(?:drop|clear)|reset\s+--hard))/i;
+
+/** Bash commands a helper may run without being asked: read-only git, staging and committing, tests. Everything else is asked or denied. */
+export const HELPER_BASH_ALLOW: readonly string[] = bashRules([
+  'git status', 'git diff', 'git log', 'git show', 'git rev-parse', 'git add', 'git commit', 'git ls-files', 'git grep', 'git blame',
+  'git branch --show-current', 'npm test', 'npm run', 'npx vitest', 'npx tsc'
+]);
+/** Leads keep the original broad allowlist; their deny rules, not the allowlist, are what keeps them safe. */
+const LEAD_BASH_ALLOW = ['Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)'];
+
+/** The deny rules (without Task/Agent) for one run. */
+export function claudeDenyRules(o: RunOptions): string[] {
+  if (o.permission !== 'edit' && !o.denyGitWrites) return [];
+  return [...(o.denyGitWrites ? GIT_WRITE_DENY : []), ...GIT_DESTRUCTIVE_DENY];
+}
+
 const GIT_WRITE_CMDS = ['merge', 'rebase', 'cherry-pick', 'reset', 'push'];
 const GIT_WRITE_DENY = GIT_WRITE_CMDS.map((c) => `Bash(git ${c} *)`);
 // Broader than the deny rules on purpose (`git -C x merge`, `cd x && git push`): a false deny is cheap, a merge is not.
@@ -46,21 +86,29 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
   if (o.model && o.model !== 'default') a.push('--model', o.model);
   a.push('--effort', o.effort);
+  if (o.lean) {
+    // The concierge answers from its prompt alone: no tools (so no tool schemas in every request), no MCP servers, no skills, no
+    // session on disk, and Harbor's front-desk text instead of Claude Code's long default system prompt.
+    a.push('--tools', '', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence');
+    if (systemPromptFile) a.push('--system-prompt-file', systemPromptFile);
+    return a;
+  }
   if (o.resumeId) a.push('--resume', o.resumeId);
   if (o.permission === 'full') {
     a.push('--permission-mode', 'bypassPermissions');
   } else if (o.permission === 'edit') {
-    a.push('--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)');
+    const extra = (o.allowedCommands ?? []).filter((c) => c.trim() && !/[\r\n]/.test(c)).flatMap((c) => bashRules([c.trim()]));
+    a.push('--permission-mode', 'acceptEdits', '--allowedTools', ...(o.denyGitWrites ? LEAD_BASH_ALLOW : HELPER_BASH_ALLOW), ...extra);
   } else {
     a.push('--permission-mode', 'plan');
   }
   // Attached images live outside the project: the agent may only Read them if their folder is added. Variadic flag, so it
   // must be followed by another flag (--disallowedTools below).
-  const dirs = [...new Set((o.images ?? []).map((p) => dirname(p)))];
+  const dirs = [...new Set([...(o.images ?? []).map((p) => dirname(p)), ...(o.writableDirs ?? [])])];
   if (dirs.length) a.push('--add-dir', ...dirs);
   // Subagents must not spawn agents (docs/project-agents.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');
-  if (o.denyGitWrites) a.push(...GIT_WRITE_DENY);
+  a.push(...claudeDenyRules(o));
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
   if (systemPromptFile) a.push('--append-system-prompt-file', systemPromptFile);
   if (isControlled(o)) a.push('--input-format', 'stream-json', '--permission-prompt-tool', 'stdio');
@@ -110,6 +158,17 @@ export function controlError(requestId: string, error: string): string {
 }
 
 /** Lead runs never get a git history rewrite or push approved through the handler. */
+/** Destructive git on any run: auto-denied in the control channel without asking, since deny rules may not be evaluated first. */
+export function isGitDestructive(tool: string, input: unknown): boolean {
+  const cmd = (input as { command?: unknown } | null)?.command;
+  // A commit message or search pattern may contain "config", "restore", "push"...: drop those arguments before matching.
+  // Only message-like options are stripped, so a quoted subcommand (`git "clean"`) is still seen.
+  return tool === 'Bash' && typeof cmd === 'string' && GIT_DESTRUCTIVE_RE.test(cmd.replace(GIT_TEXT_ARG, '$1 ""').replace(QUOTED_WORD, '$1$2'));
+}
+// `git "clean"` runs clean: unquote a lone quoted word so the subcommand check sees it.
+const QUOTED_WORD = /(\s)(?:"([A-Za-z][\w-]*)"|'([A-Za-z][\w-]*)')(?=\s|$)/g;
+const GIT_TEXT_ARG = /(\s(?:-m|--message|--grep|--author|-S|-G|-F|--file)(?:=|\s+))(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g;
+
 export function isGitWrite(tool: string, input: unknown): boolean {
   const cmd = (input as { command?: unknown } | null)?.command;
   return tool === 'Bash' && typeof cmd === 'string' && GIT_WRITE_RE.test(cmd);
@@ -140,7 +199,13 @@ export function parseClaudeLine(line: string): Chunk[] {
     if (limits.length) out.push({ kind: 'limits', limits });
   } else if (j.type === 'result') {
     if (j.session_id) out.push({ kind: 'session', id: j.session_id });
-    out.push({ kind: 'usage', inputTokens: j.usage?.input_tokens, outputTokens: j.usage?.output_tokens, costUsd: j.total_cost_usd });
+    const u = j.usage ?? {};
+    out.push({
+      kind: 'usage', inputTokens: u.input_tokens, outputTokens: u.output_tokens, costUsd: j.total_cost_usd,
+      // Cached prompt tokens are most of a Claude run's input and are NOT in input_tokens; undefined when absent so older output parses as before.
+      ...(typeof u.cache_read_input_tokens === 'number' ? { cacheReadTokens: u.cache_read_input_tokens } : {}),
+      ...(typeof u.cache_creation_input_tokens === 'number' ? { cacheWriteTokens: u.cache_creation_input_tokens } : {})
+    });
     const err = j.is_error || (j.subtype && j.subtype !== 'success');
     const text = typeof j.result === 'string' ? j.result : undefined;
     out.push({ kind: 'done', ok: !err, text, error: err ? text || String(j.subtype) : undefined, rateLimited: err && RATE_LIMIT_RE.test(text ?? '') });
@@ -187,6 +252,10 @@ class PermissionChannel {
   private async ask(id: string, p: ToolPermissionRequest): Promise<void> {
     if (this.o.denyGitWrites && isGitWrite(p.tool, p.input)) {
       this.send(controlResponse(id, { allow: false, message: 'Lead runs never merge, rebase, cherry-pick, reset or push; the integrator lands branches.' }, p.input));
+      return;
+    }
+    if (isGitDestructive(p.tool, p.input)) {
+      this.send(controlResponse(id, { allow: false, message: 'Harbor does not allow destructive git commands (clean, restore, checkout --, branch deletion, update-ref, worktree, stash drop, config, remote, push, -C).' }, p.input));
       return;
     }
     const ac = new AbortController();
@@ -252,7 +321,7 @@ export class ClaudeAdapter implements CliAdapter {
     if (!done) {
       const r = res.value;
       const reason = r.aborted ? 'stopped' : r.spawnError ?? (r.stderr.trim().slice(-500) || `exited with code ${r.code}`);
-      yield { kind: 'done', ok: false, error: reason, rateLimited: RATE_LIMIT_RE.test(r.stderr) };
+      yield { kind: 'done', ok: false, error: reason, rateLimited: RATE_LIMIT_RE.test(r.stderr), exitCode: r.aborted || r.spawnError ? null : r.code };
     }
   }
 }

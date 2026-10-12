@@ -121,8 +121,9 @@ describe('router', () => {
     const { ledger, run } = ledgerAt(t, 10);
     for (let i = 0; i < 6; i++) run('claude');
     const inp = base([cli('claude'), cli('codex')], ledger);
-    expect(route({ role: 'implementer', complexity: 'low' }, inp)!.cli).toBe('codex');
-    expect(route({ role: 'implementer', complexity: 'low', continuity: 'claude' }, inp)!.cli).toBe('claude');
+    // Medium work: both CLIs have a standard model, so the difference is the allowance (a cheap request would favour claude's haiku on tier fit).
+    expect(route({ role: 'implementer', complexity: 'medium' }, inp)!.cli).toBe('codex');
+    expect(route({ role: 'implementer', complexity: 'medium', continuity: 'claude' }, inp)!.cli).toBe('claude');
   });
 
   it('honours a CLI the user asked for, and says so when it cannot', () => {
@@ -164,14 +165,17 @@ describe('router', () => {
     expect(d.reason).toMatch(/opus skipped/);
   });
 
-  it('lowers effort when allowance is low, planners get stronger models', () => {
+  it('lowers effort when allowance is low; a planner follows complexity (strong only for high, standard otherwise)', () => {
     const t = { now: 1 };
     const { ledger, run } = ledgerAt(t, 10);
     for (let i = 0; i < 8; i++) run('claude');
     const d = route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledger))!;
     expect(d.effort).toBe('medium');
     expect(d.reason).toMatch(/effort lowered/);
-    expect(route({ role: 'planner', complexity: 'low' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('opus');
+    // Changed deliberately (quota audit): planners used to be strong at every complexity, which bought Opus for every plan.
+    expect(route({ role: 'planner', complexity: 'low' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('sonnet');
+    expect(route({ role: 'planner', complexity: 'medium' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('sonnet');
+    expect(route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('opus');
   });
 
   it('spreads parallel load', () => {

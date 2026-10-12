@@ -76,11 +76,12 @@ describe('Harbor main flows', () => {
 
 describe('Delete conversation', () => {
   it('removes the conversation from the sidebar after confirming', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     await ready();
     await userEvent.click(screen.getByRole('button', { name: /New conversation/ }));
     const before = (await screen.findAllByRole('button', { name: /^Delete conversation/ })).length;
     await userEvent.click(screen.getAllByRole('button', { name: /^Delete conversation/ })[0]);
+    const confirm = await screen.findByRole('dialog', { name: 'Delete conversation?' });
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(screen.getAllByRole('button', { name: /^Delete conversation/ }).length).toBe(before - 1));
   });
   it('pops up an agent question, answers it with an option, and can be dismissed to answer in chat', async () => {
@@ -89,14 +90,14 @@ describe('Delete conversation', () => {
     await ready();
     const ask = (requestId: string, prompt: string) => act(() => listeners.forEach(cb => cb({ type: 'question', requestId, conversationId: 'account', prompt, options: ['Blue', 'Green'], allowText: true })));
     ask('q1', 'Which theme?');
-    const dialog = await screen.findByRole('dialog', { name: /has a question/ });
+    const dialog = await screen.findByRole('region', { name: /has a question/ });
     expect(within(dialog).getByText('Which theme?')).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('radio', { name: 'Blue' }));
     expect(dialog).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Send answer' }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: /has a question/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('region', { name: /has a question/ })).not.toBeInTheDocument());
     ask('q2', 'Anything else?');
-    await userEvent.click(within(await screen.findByRole('dialog', { name: /has a question/ })).getByRole('button', { name: 'Answer in chat' }));
-    expect(screen.queryByRole('dialog', { name: /has a question/ })).not.toBeInTheDocument();
+    await userEvent.click(within(await screen.findByRole('region', { name: /has a question/ })).getByRole('button', { name: 'Answer in chat' }));
+    expect(screen.queryByRole('region', { name: /has a question/ })).not.toBeInTheDocument();
   });
 });

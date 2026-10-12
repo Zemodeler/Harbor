@@ -1,109 +1,78 @@
 # Automatic connections, skills, and plugins
 
+Status: CLI discovery, sign-in checks, enable/disable and native sign-in are implemented for Claude Code and Codex (Gemini CLI is detected only). Native skills and plugins are not discovered or routed on by Harbor; they work only inside each CLI's own session. This page says, per CLI, which capabilities are verified against a real install and which are not. "Verified" means the repository's own notes record a run against a real install; nothing here was re-run when this page was written.
+
 ## Core principle
 
-Install Harbor and start working. Discovery, connection checks, and native configuration reuse happen automatically. Settings offer control without becoming a prerequisite for ordinary use.
+Install Harbor and start working. Discovery, connection checks, and reuse of the CLI's own sign-in happen automatically. Settings offer control without becoming a prerequisite.
 
-This immediate-start path assumes at least one supported AI CLI is installed and signed in. When that is not true, the app explains the missing step and offers the shortest supported path to install or sign in.
+This path assumes at least one supported CLI (Claude Code or Codex) is installed and signed in. When it is not, Settings says so and offers the shortest supported path: the CLI's own installer, then its own sign-in flow.
 
 ## First launch
 
-1. Open the project interface immediately.
-2. Discover supported CLIs in the background using known executable names, configured paths, and supported installation locations.
-3. Check availability and authentication with noninteractive, supported mechanisms where possible.
-4. Discover project-relevant native skills and plugins where supported.
-5. Enable ready connections for automatic routing under sensible defaults.
+1. The project interface opens immediately.
+2. Harbor discovers the CLIs in the background: it looks for `claude`, `codex` and `gemini` on PATH (with PATHEXT), in `%APPDATA%\npm`, in `~\.local\bin`, in `~\.claude\local`, in the folders bundled with the Claude desktop app (`%APPDATA%\Claude\claude-code\<version>\<hash>`) and the Codex desktop app (`%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>`). The environment variables `HARBOR_CLAUDE_PATH`, `HARBOR_CODEX_PATH` and `HARBOR_GEMINI_PATH` override the path.
+3. For each installed CLI it runs the version command and a non-interactive sign-in check where one exists.
+4. Enabled, signed-in, adapter-backed CLIs become eligible for routing.
 
-Do not install tools, change authentication, enable new plugins, or alter native configuration merely because they were discovered. A scan observes the existing environment.
+Harbor does not install tools, change authentication, enable plugins, or alter native configuration during a scan. A CLI that was seen and then disappears (the Claude desktop app swaps its folder when it updates) is re-checked a few times at growing intervals before it is shown as missing.
 
 ## Connection states
 
-| State | Meaning | User action |
+| State shown | Meaning | User action |
 | --- | --- | --- |
-| Checking | Discovery or a status check is in progress. | Usually none. |
-| Ready | Installed and authenticated through a supported check. | Start working. |
-| Installed — login required | Installation found; authentication is confirmed missing or expired. | Use the native sign-in flow. |
-| Installed — status unknown | Installation found; authentication cannot be established reliably. | Retry the check or open the native tool. |
-| Unavailable | A previously discovered tool cannot currently run. | Inspect the reason or refresh discovery. |
-| Not installed | A supported integration has no discovered installation. | Optional installation. |
+| Not installed | No executable was found. | Optionally install it with its native installer, then refresh. |
+| Needs login | Installed; the sign-in check says signed out (or a run just reported a login failure). Removed from routing until refreshed. | "Sign in" opens a normal `cmd` window running the CLI's login. |
+| Status unknown | Installed; the sign-in state could not be established (the check failed, or the CLI has no check). Still eligible, with a small routing penalty. | Refresh, or open the native tool. |
+| Ready | Installed and the check says signed in. | Start working. |
 
-Authentication and remaining allowance are separate states. A signed-in CLI may have exhausted allowance. Missing quota information does not mean the user is logged out.
+The earlier design also named "Checking" and "Unavailable" states; the screen shows a "Checking..." label while refreshing, and does not have a separate "Unavailable" state. Authentication and remaining allowance are separate: a signed-in CLI can be out of allowance, and missing usage data never means logged out.
 
-Keep checks bounded and non-disruptive. Do not launch interactive login prompts during discovery or read and display credential secrets. Reuse native authentication through the CLI's supported execution path.
+Discovery never launches an interactive login and never reads or displays credential secrets. Sign-in is each CLI's own flow, and Harbor does not read or store credentials. Opening a login window is Windows only.
 
 ## Settings experience
 
-List detected CLIs automatically, with name, status, installation path, version when available, and last check time. Make installed-but-not-logged-in tools easy to identify.
+Settings > Connections lists each detected CLI with its name, status, version when available, a note, a Refresh action, "Sign in to <CLI>" for a CLI that needs login, and an Enable switch (a disabled CLI is never routed to). Not built: showing the installation path and last check time, an optional manual executable path in the UI (use the environment variables), and per-adapter capability display.
 
-Offer refresh, native sign-in, connection enable or disable, and an optional manual executable path. Advanced adapter settings stay secondary. A user should not need to register a standard installed CLI manually.
+## Capability verification
 
-Update discovery after relevant settings changes and connection failures. Avoid continuous expensive probing or creating sessions just to check installation.
+| Capability | Claude Code | Codex | Gemini CLI |
+| --- | --- | --- | --- |
+| Discovery and version | Verified against `claude` 2.1.293 (including the executable bundled with the Claude desktop app). | Verified: the Codex desktop app's bundled executable is found; version from `--version`. | Detected on PATH; `--version` only. |
+| Sign-in check | `claude auth status --json` (`loggedIn`). The signed-out result was seen on a real install. | `codex login status`, parsed from its text output. Recorded as parsed from documentation, not verified. | None exists; status is unknown. |
+| Headless run, streamed output, session id | Verified (flags accepted by 2.1.293; stream-json parsing checked against a real result; a real signed-in `npm run smoke -- claude --full` run was recorded). | Verified on codex-cli 0.160.0: `codex exec --json`, prompt on stdin, session id capture and event shapes. | No adapter. |
+| Resume a session | `--resume` with a captured id; covered by the smoke script. | `codex exec resume <id>`; it rejects `-s`, so the sandbox is passed as a config value. A full resume flow is not recorded as verified. | No adapter. |
+| Effort | `--effort` accepted by 2.1.293. | `-c model_reasoning_effort=<level>` (low, medium or high); value handling per model is not verified. | No adapter. |
+| Model selection | `--model` with aliases `haiku`, `sonnet`, `opus`; the `claude-fable-5-1` id is not verified. | Only Codex's default model; no named model ids are verified or listed. | No adapter. |
+| Read-only, edit and full modes | `--permission-mode plan`, `acceptEdits` plus an allowlist, and `bypassPermissions`. The first two verified as accepted flags; `bypassPermissions` unverified. | `-c sandbox_mode=read-only`, `workspace-write`, `danger-full-access` with `approval_policy=never`. The read-only and workspace-write sandboxes were used in the smoke run; the full-access values are unverified. | No adapter. |
+| Write access to a worktree's git metadata | `--add-dir` with the worktree's git folders; `--add-dir` itself is unverified. | `sandbox_workspace_write.writable_roots` added after a real run showed commits failed in the sandbox; the fix itself is not verified. | No adapter. |
+| Tool permission prompts to Harbor | stream-json control channel (`--permission-prompt-tool stdio`): `--input-format stream-json` and an `initialize` round trip were checked without a model call; the live `can_use_tool` request and response shapes, and that deny rules are evaluated before the host is asked, are taken from the Agent SDK and unverified. | Impossible: `codex exec` has no host approval channel. Runs are confined by Codex's sandbox. | No adapter. |
+| Deny dangerous git commands | `--disallowedTools` rules plus a command check in the control channel. Rule syntax and precedence over allow rules unverified. | Not available; Harbor only detects after the fact if a lead merged a helper branch. | No adapter. |
+| Block native sub-agents | `--disallowedTools Task Agent` (flag accepted; documented tool names). | Not verified that Codex has none, or how to disable them. | No adapter. |
+| Cancellation | Process-tree kill with `taskkill`, tested against fake CLIs. | Same. | No adapter. |
+| Usage and limits reporting | `rate_limit_event` in the stream gives five-hour, weekly and per-model windows, seen only during Harbor runs; per-model key names are inferred. | The newest session logs under `~/.codex/sessions` carry the account's five-hour and weekly windows; Harbor reads them and never opens auth files. Format not verified across versions. | None. |
+| Images | `--add-dir` for the image folder plus a note to read the files; unverified. | `--image` per file; unverified. | No adapter. |
 
-## Native skills
+A capability that fails verification for a given CLI version should be reported as unsupported rather than assumed. In practice that means: if Claude's permission prompts or git denials do not work on your version, see [Safety](safety.md) before relying on them.
 
-Support skills already available to Claude and Codex through their native loading and invocation mechanisms. Preserve the relevant project folder, instructions, configuration, and supported skill locations when starting sessions.
+## Native skills and plugins
 
-Distinguish user-level skills from project-level skills. Project-specific skills apply only where their native scope permits. Isolated workspaces should retain the applicable skill context without indiscriminately copying private configuration or credentials.
+Claude Code and Codex load their skills, plugins, `CLAUDE.md`/`AGENTS.md` and user configuration themselves when Harbor starts them in the project folder (or a helper's worktree) as your user. That is the only support today:
 
-When supported, let users explicitly invoke a native skill through its owning CLI's command syntax or an optional composer picker. The router can use discovered skill descriptions as a routing signal when relevant.
+- No discovery, listing or compatibility states in Harbor, no composer picker, and no routing on skill descriptions.
+- Project-level extensions that live in the repository reach a helper only if committed (a worktree is created from a commit). User-level extensions come from your profile and apply to every run.
+- Discovery does not authorize execution. A skill's actions follow your request and the CLI's permission settings; Harbor's allowlist and deny rules apply to Claude runs.
+- A Claude skill or plugin is not a Codex one, and a handoff to another CLI carries Harbor's written handoff, not the extension's state.
 
-Discovery does not authorize execution. A skill's actions still follow the user's request, the native CLI's permissions, and any applicable application policy.
-
-## Native plugins
-
-Use existing installed and enabled Claude and Codex plugins through their owning native CLI environment where compatible. Preserve supported plugin configuration and tool connections.
-
-Plugins may supply skills, commands, tools, or service integrations. Some may require native UI, additional authentication, account permissions, or capabilities unavailable through a desktop wrapper. Show such requirements clearly rather than claiming universal compatibility.
-
-Do not automatically install, activate, or grant permissions to new plugins during scanning. If an existing plugin requires setup, expose the supported native management or setup flow when needed.
-
-## Compatibility and routing
-
-Native extensions belong to a provider environment. A Claude skill or plugin is not automatically a Codex extension, and vice versa.
-
-The router should prefer the owning CLI when a request depends on a specific extension. Explicit invocation can constrain routing for that step. Other steps can still use different CLIs when appropriate.
-
-At handoff, transfer relevant outputs and context rather than assuming the receiving CLI has the same extension, permissions, or connected services. Preserve session continuity when an extension depends on native session state.
-
-If allowance is low on the only CLI that supports a required extension, explain the constraint. Switching providers must not silently discard a capability needed to fulfill the task.
-
-## Extension states
-
-| State | Meaning |
-| --- | --- |
-| Available | Discovered and usable in the applicable native session. |
-| Needs setup | Configuration, login, or permissions are missing. |
-| Disabled | Native configuration or an application routing preference excludes it. |
-| Unsupported | A known required capability is unavailable through the adapter. |
-| Compatibility unknown | Discovery succeeded, but support has not been established. |
-
-Do not claim that Harbor changed a native plugin's enabled state when it only excluded that extension from routing. Native state and application preferences should be distinguishable.
-
-## Design acceptance criteria
-
-- A user with a ready supported CLI can open a project and start without a connection wizard.
-- Settings automatically list installed CLIs and clearly identify those needing login.
-- Unknown authentication states are not mislabeled as logged out.
-- Native authentication is reused without exposing secrets.
-- Existing compatible Claude and Codex skills and plugins are available through their native sessions.
-- Project scope and native extension configuration survive supported workspace isolation.
-- Explicit extension requests reach a CLI that can fulfill them, or produce a clear explanation.
-- Unsupported or unknown extension capabilities remain visible and accurately described.
-- Configuration is optional for ordinary work and available for advanced control.
+This remains the design intent, not behavior: prefer the owning CLI when a request depends on a specific extension, show extension states (available, needs setup, disabled, unsupported, compatibility unknown), never claim Harbor changed a native plugin's enabled state, and never auto-install or enable plugins during a scan.
 
 ## Focused adapter rollout
 
-Start implementation with one or two dedicated CLI adapters and verify their complete work lifecycle before broadening support: discovery and sign-in checks, launch, streamed output, permissions, cancellation, session resume or checkpoint handoff, workspace isolation, and recovery after failures. The first release still targets multiple CLIs; initial validation can proceed one adapter at a time. The initial pair is Claude Code and Codex. Confirm each required capability against the supported version rather than assuming it exists.
+Claude Code and Codex were chosen as the first adapters. Status of the lifecycle verification: discovery and sign-in (done for Claude, partly for Codex), launch and streamed output (done for both on the versions above), permissions (Claude only, partly unverified), cancellation and recovery after failures (tested against fake CLIs and real git, not against a real CLI mid-run), session resume (Claude covered; Codex partly), workspace isolation through worktrees (tested with real git; Codex needed an extra writable-roots fix whose effect is unverified), managed-agent constraint (Claude enforced by flag; Codex unverified). Additional CLIs would start as detected-only with their limits labeled; there is no baseline terminal adapter, and a detected executable does not establish compatibility.
 
-Test cancellation and recovery against surviving processes and unfinished changes, not only successful sessions. Confirm the managed-agent and workspace-ownership constraints for each supported version. Report unsupported capabilities explicitly.
+## Open questions
 
-Additional CLIs may use limited terminal integrations while their richer behavior is unverified. Label their limitations and exclude them from assignments that require unsupported permissions, recovery, isolation, or agent controls. A detected executable does not establish full compatibility.
-
-## Open design questions
-
-- Which adapters can reliably report sign-in status without launching interactive sessions?
-- Which native extensions are discoverable versus usable only through native delegation?
-- Which extension actions should be surfaced in the composer?
-- How should isolated workspaces inherit project extension configuration for each CLI?
-
-These are design requirements. Exact discovery mechanisms and extension compatibility must be verified against the supported versions during implementation.
+- Which of Codex's remaining flags (images, full access, writable roots, effort values per model) behave as documented on current versions?
+- Does Claude's control channel behave as the adapter assumes on a live turn, and do deny rules win over allow rules?
+- Which native extensions can be discovered, and which are usable only through native delegation?
+- How should an isolated worktree inherit project extension configuration for each CLI?

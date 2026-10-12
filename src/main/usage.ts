@@ -1,22 +1,55 @@
 import type { CliId, Id, UsageWindow } from '../shared/api';
 import type { ReportedLimit } from './codexLimits';
 import { newId, type Store } from './store';
+import { DEFAULT_CATALOG, USD_PER_WEIGHT, costWeightOf, type CatalogEntry } from './clis/capabilities';
 import type { UsageEvent } from './types';
 
 export type UsageLevel = 'plenty' | 'limited' | 'low' | 'exhausted';
 
-export const WINDOW_MS = 5 * 60 * 60 * 1000;
+/** Whether a reading came from the provider itself or is Harbor's own count of the runs it started. */
+export type UsageSource = 'reported' | 'estimated';
+/** `calibrated`: an estimated reading whose budget came from the owner's settings or from the provider's own readings (false = fallback constant). */
+export interface Pressure {
+  level: UsageLevel; pct: number; projectedPct?: number; resetsAt?: number; source: UsageSource; calibrated?: boolean;
+  /** Every window that applies to the model (5h and weekly, plus its own per-model limits), for headroom routing. Absent on a rate-limit cooldown. */
+  windows?: PressureWindow[];
+}
+/** One window as routing sees it. `remainingPct` = 100 - usedPct; `projectedPct` only for reported windows past their first 10%. */
+export interface PressureWindow {
+  period: 'session' | 'weekly'; scope?: string; usedPct: number; remainingPct: number;
+  resetsAt?: number; projectedPct?: number; source: UsageSource; calibrated?: boolean;
+  /** When the provider's reading was taken (reported windows only): weekly pacing trusts an old reading less. */
+  asOf?: number;
+}
+
+export const WINDOW_MS =5 * 60 * 60 * 1000;
 /** After a CLI reports a rate limit its reset time is unknown; treat it as exhausted for this long. */
 export const COOLDOWN_MS = 30 * 60 * 1000;
-export const DEFAULT_RUNS_PER_WINDOW = 40;
+/**
+ * FALLBACKS, used only until the provider's own readings calibrate a budget (see `calibratedBudget`). Measured once on one account:
+ * 78 runs were 33% of the 5h window (so ~230 average runs), and the weekly count was about 2.5x too generous at 300. They are
+ * guesses for other plans and are shown as 'uncalibrated'.
+ */
+export const DEFAULT_RUNS_PER_WINDOW = 200;
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-export const DEFAULT_RUNS_PER_WEEK = 300;
+export const DEFAULT_RUNS_PER_WEEK = 120;
+/** One "average run" in catalog weight points (between a haiku run at 1 and an opus run at 25): budgets are counted in these. */
+export const AVERAGE_RUN_WEIGHT = 8;
+/** A calibration needs the provider's percent to have moved at least this much between two readings (rounding noise below). */
+const MIN_CALIBRATION_DELTA_PCT = 3;
+/** The same window if its reset time moved by less than this between two readings. */
+const SAME_WINDOW_MS = 2 * 60_000;
 
 export interface LedgerOptions {
   now?: () => number;
   windowMs?: number;
-  /** Assumed runs per window. Provider quotas are unknown, so this is an explicit estimate, not a reading. */
+  /**
+   * Budget in runs per window, set by the owner: such a budget counts every run as one (no cost weighting) and is never 'uncalibrated'.
+   * Without it, runs are weighted by cost and the budget comes from the provider's readings, else from the DEFAULT_ fallback.
+   */
   runsPerWindow?: Partial<Record<CliId, number>> & { default?: number };
+  /** Catalog for the per-model run weights (default: the built-in one). */
+  catalog?: CatalogEntry[];
   /** Supported source of a discretionary reset entitlement. No CLI exposes one today, so the default is none. */
   entitlement?: (cli: CliId) => boolean;
   /** Limits the provider itself reported (read from its own logs). Win over Harbor's estimate when present. */
@@ -47,9 +80,27 @@ export class UsageLedger {
     return ev;
   }
 
-  private inWindow(cli: CliId, ms = this.windowMs): UsageEvent[] {
+  /**
+   * The latest reset of an account-wide window that is already behind us: a reset time the CLI reported (during a Harbor run, or
+   * in its own logs) that has passed. Estimated usage counts only runs after it, because the provider's counter started again
+   * then; without this a window that already reset keeps showing the runs from before it (a lockout until they age out).
+   */
+  private lastKnownReset(cli: CliId, period?: ReportedLimit['period']): number {
+    const now = this.now();
+    let last = 0;
+    const see = (l: { period: ReportedLimit['period']; scope?: string; resetsAt: number }) => {
+      if (l.scope === undefined && (period === undefined || l.period === period) && l.resetsAt <= now) last = Math.max(last, l.resetsAt);
+    };
+    this.opts.reported?.(cli).forEach(see);
+    for (const u of this.store.listUsage()) if (u.cli === cli) u.limits?.forEach(see);
+    return last;
+  }
+
+  private inWindow(cli: CliId, ms = this.windowMs, period?: ReportedLimit['period']): UsageEvent[] {
     const from = this.now() - ms;
-    return this.store.listUsage().filter((u) => u.cli === cli && u.time >= from);
+    // Strictly after the reset: a run that started before it belongs to the old window.
+    const reset = period ? this.lastKnownReset(cli, period) : 0;
+    return this.store.listUsage().filter((u) => u.cli === cli && u.time >= from && u.time > reset);
   }
 
   /** `scope` undefined = the account-wide window; otherwise the per-model limit with that scope. */
@@ -65,15 +116,65 @@ export class UsageLedger {
     return best;
   }
 
-  private budget(cli: CliId): number {
-    const b = this.opts.runsPerWindow;
-    return b?.[cli] ?? b?.default ?? DEFAULT_RUNS_PER_WINDOW;
+  /** Quota weight of one run: its real cost when the CLI reported one, else the catalog's weight for the model. */
+  private unitsOf(u: UsageEvent): number {
+    return u.costUsd !== undefined && u.costUsd >= 0 ? u.costUsd / USD_PER_WEIGHT : costWeightOf(this.opts.catalog ?? DEFAULT_CATALOG, u.cli, u.model);
   }
 
-  /** Time until which the CLI is treated as rate limited, if its last rate limit is recent. */
+  /** Runs of average weight in `events` (the unit of every budget). An owner-set budget counts plain runs instead. */
+  private runsIn(events: UsageEvent[], countRuns: boolean): number {
+    return countRuns ? events.length : events.reduce((s, u) => s + this.unitsOf(u), 0) / AVERAGE_RUN_WEIGHT;
+  }
+
+  /** The provider's own whole-account readings of one window for a CLI, oldest first, each tied to the run that carried it. */
+  private anchors(cli: CliId, period: ReportedLimit['period']): Array<{ time: number; usedPct: number; resetsAt: number }> {
+    const out: Array<{ time: number; usedPct: number; resetsAt: number }> = [];
+    for (const u of this.store.listUsage()) {
+      if (u.cli !== cli) continue;
+      const l = u.limits?.find((x) => x.period === period && x.scope === undefined);
+      if (l) out.push({ time: u.time, usedPct: l.usedPct, resetsAt: l.resetsAt });
+    }
+    return out.sort((a, b) => a.time - b.time);
+  }
+
+  /**
+   * Budget (runs of average weight) learned from the provider: for consecutive readings of the same window whose percent rose by
+   * at least MIN_CALIBRATION_DELTA_PCT, the Harbor runs between them cost `units / delta` per percent. The median of the latest
+   * pairs wins. Any use of the account outside Harbor makes the budget look smaller than it is (a cautious error). Undefined with
+   * fewer than two readings in one window: then nothing is invented, and callers fall back to a flagged constant.
+   */
+  private calibratedBudget(cli: CliId, period: ReportedLimit['period']): number | undefined {
+    const a = this.anchors(cli, period);
+    if (a.length < 2) return undefined;
+    const events = this.store.listUsage().filter((u) => u.cli === cli);
+    const perPct: number[] = [];
+    for (let i = 1; i < a.length; i++) {
+      const delta = a[i].usedPct - a[i - 1].usedPct;
+      if (delta < MIN_CALIBRATION_DELTA_PCT || Math.abs(a[i].resetsAt - a[i - 1].resetsAt) > SAME_WINDOW_MS) continue;
+      const units = events.filter((u) => u.time > a[i - 1].time && u.time <= a[i].time).reduce((s, u) => s + this.unitsOf(u), 0);
+      if (units > 0) perPct.push(units / delta);
+    }
+    if (!perPct.length) return undefined;
+    const latest = perPct.slice(-8).sort((x, y) => x - y);
+    const median = latest[Math.floor((latest.length - 1) / 2)]!;
+    return (median * 100) / AVERAGE_RUN_WEIGHT;
+  }
+
+  /** The budget one estimated window is measured against, and whether it is trustworthy (owner-set or calibrated) or a fallback. */
+  private budgetFor(cli: CliId, period: ReportedLimit['period']): { runs: number; calibrated: boolean; countRuns: boolean } {
+    const set = period === 'session' ? (this.opts.runsPerWindow?.[cli] ?? this.opts.runsPerWindow?.default) : this.opts.runsPerWeek;
+    if (set !== undefined) return { runs: set, calibrated: true, countRuns: true };
+    const cal = this.calibratedBudget(cli, period);
+    if (cal !== undefined) return { runs: cal, calibrated: true, countRuns: false };
+    return { runs: period === 'session' ? DEFAULT_RUNS_PER_WINDOW : DEFAULT_RUNS_PER_WEEK, calibrated: false, countRuns: false };
+  }
+
+  /** Time until which the CLI is treated as rate limited, if its last rate limit is recent. A limit that named no model holds every model out. */
   cooldownUntil(cli: CliId, model?: string): number | undefined {
     let last = 0;
-    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited && (model === undefined || u.model === model)) last = Math.max(last, u.time);
+    // A rate limit hit before a reset the CLI has since reported no longer holds the CLI out.
+    const reset = this.lastKnownReset(cli);
+    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited && u.time > reset && (model === undefined || u.model === model || u.cliWide)) last = Math.max(last, u.time);
     const until = last + COOLDOWN_MS;
     return last && until > this.now() ? until : undefined;
   }
@@ -83,14 +184,15 @@ export class UsageLedger {
     const r = this.reportedFor(cli, 'session');
     if (r) return Math.min(100, Math.round(r.usedPct));
     if (cooldown && this.cooldownUntil(cli)) return 100;
-    return Math.min(100, Math.round((this.inWindow(cli).length / this.budget(cli)) * 100));
+    const b = this.budgetFor(cli, 'session');
+    return Math.min(100, Math.round((this.runsIn(this.inWindow(cli, this.windowMs, 'session'), b.countRuns) / b.runs) * 100));
   }
 
   private weeklyPct(cli: CliId): number {
     const r = this.reportedFor(cli, 'weekly');
     if (r) return Math.min(100, Math.round(r.usedPct));
-    const budget = this.opts.runsPerWeek ?? DEFAULT_RUNS_PER_WEEK;
-    return Math.min(100, Math.round((this.inWindow(cli, this.opts.weekMs ?? WEEK_MS).length / budget) * 100));
+    const b = this.budgetFor(cli, 'weekly');
+    return Math.min(100, Math.round((this.runsIn(this.inWindow(cli, this.opts.weekMs ?? WEEK_MS, 'weekly'), b.countRuns) / b.runs) * 100));
   }
 
   /** Model-family limits currently reported for a CLI (e.g. 'opus', 'fable'). */
@@ -107,46 +209,53 @@ export class UsageLedger {
     return m !== 'default' && (m.includes(scope) || scope.includes(m));
   }
 
-  private windowState(cli: CliId, period: ReportedLimit['period'], scope?: string): { pct: number; resetsAt?: number; ms: number } | undefined {
+  private windowState(cli: CliId, period: ReportedLimit['period'], scope?: string): { pct: number; resetsAt?: number; ms: number; source: UsageSource; calibrated?: boolean; asOf?: number } | undefined {
     const ms = period === 'session' ? this.windowMs : (this.opts.weekMs ?? WEEK_MS);
     const r = this.reportedFor(cli, period, scope);
-    if (r) return { pct: Math.min(100, Math.round(r.usedPct)), resetsAt: r.resetsAt, ms };
+    if (r) return { pct: Math.min(100, Math.round(r.usedPct)), resetsAt: r.resetsAt, ms, source: 'reported', asOf: r.asOf };
     if (scope !== undefined) return undefined; // per-model limits are only known when the CLI reports them
+    // Estimated: the "window" is Harbor's own rolling count, so its start is the first Harbor run, not the provider's window start.
+    const calibrated = this.budgetFor(cli, period).calibrated;
     if (period === 'session') {
-      const oldest = this.inWindow(cli).reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
-      return { pct: this.sessionPct(cli, false), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms };
+      const oldest = this.inWindow(cli, this.windowMs, 'session').reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
+      return { pct: this.sessionPct(cli, false), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms, source: 'estimated', calibrated };
     }
-    const oldest = this.inWindow(cli, ms).reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
-    return { pct: this.weeklyPct(cli), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms };
+    const oldest = this.inWindow(cli, ms, 'weekly').reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
+    return { pct: this.weeklyPct(cli), resetsAt: oldest !== undefined ? oldest + ms : undefined, ms, source: 'estimated', calibrated };
   }
 
   /**
    * How tight the allowance is for one model: the worst of the account windows and any per-model limit that
    * applies to it. Uses pace as well as percent: used% divided by the elapsed share of the window projects where
    * usage lands at reset. Ahead of pace (would run out before reset) tightens a notch; well under pace relaxes one.
-   * Pace is ignored in the first 10% of a window (too noisy to extrapolate).
+   * Pace is ignored in the first 10% of a window (too noisy to extrapolate) and for estimated windows altogether:
+   * those start at Harbor's first run, not the provider's window start, so "elapsed" would be meaningless.
+   * `source` says whether the deciding window was reported by the provider or is Harbor's own estimate; routing
+   * weighs estimates less.
    */
-  pressure(cli: CliId, model?: string): { level: UsageLevel; pct: number; projectedPct?: number; resetsAt?: number } {
+  pressure(cli: CliId, model?: string): Pressure {
     const scopes = model ? this.liveScopes(cli).filter((s) => this.scopeMatches(s, model)) : [];
-    const wins = [undefined, ...scopes].flatMap((sc) => (['session', 'weekly'] as const).map((p) => this.windowState(cli, p, sc)));
+    const wins = [undefined, ...scopes].flatMap((sc) => (['session', 'weekly'] as const).map((p) => { const w = this.windowState(cli, p, sc); return w && { ...w, period: p, scope: sc }; }));
     const order: UsageLevel[] = ['plenty', 'limited', 'low', 'exhausted'];
-    let worst: { level: UsageLevel; pct: number; projectedPct?: number; resetsAt?: number } = { level: 'plenty', pct: 0 };
+    let worst: Pressure = { level: 'plenty', pct: 0, source: 'estimated' };
+    const windows: PressureWindow[] = [];
     // A rate limit hit while running this model holds it out for a while; its siblings on the same CLI are judged on their own windows.
     const until = model ? this.cooldownUntil(cli, model) : this.cooldownUntil(cli);
-    if (until) return { level: 'exhausted', pct: 100, resetsAt: until };
+    if (until) return { level: 'exhausted', pct: 100, resetsAt: until, source: 'reported' };
     for (const w of wins) {
       if (!w) continue;
       let level: UsageLevel = w.pct >= 100 ? 'exhausted' : w.pct >= 80 ? 'low' : w.pct >= 50 ? 'limited' : 'plenty';
       let projectedPct: number | undefined;
-      const elapsed = w.resetsAt === undefined ? 0 : Math.min(1, 1 - (w.resetsAt - this.now()) / w.ms);
+      const elapsed = w.source !== 'reported' || w.resetsAt === undefined ? 0 : Math.min(1, 1 - (w.resetsAt - this.now()) / w.ms);
       if (level !== 'exhausted' && elapsed >= 0.1) {
         projectedPct = Math.round(w.pct / elapsed);
         if (projectedPct >= 100 && level !== 'low') level = order[order.indexOf(level) + 1];
         else if (projectedPct < 70 && level === 'limited') level = 'plenty';
       }
-      if (order.indexOf(level) > order.indexOf(worst.level) || (level === worst.level && w.pct > worst.pct)) worst = { level, pct: w.pct, projectedPct, resetsAt: w.resetsAt };
+      windows.push({ period: w.period, ...(w.scope !== undefined ? { scope: w.scope } : {}), usedPct: w.pct, remainingPct: 100 - w.pct, resetsAt: w.resetsAt, projectedPct, source: w.source, ...(w.calibrated !== undefined ? { calibrated: w.calibrated } : {}), ...(w.asOf !== undefined ? { asOf: w.asOf } : {}) });
+      if (order.indexOf(level) > order.indexOf(worst.level) || (level === worst.level && w.pct > worst.pct)) worst = { level, pct: w.pct, projectedPct, resetsAt: w.resetsAt, source: w.source, ...(w.calibrated !== undefined ? { calibrated: w.calibrated } : {}) };
     }
-    return worst;
+    return { ...worst, windows };
   }
 
   /** Routing sees the tighter of the two windows: an exhausted week blocks a CLI even when the 5h window is empty. */
@@ -163,19 +272,22 @@ export class UsageLedger {
     const weekMs = this.opts.weekMs ?? WEEK_MS;
     const oldestOf = (events: UsageEvent[]) => events.reduce<number | undefined>((m, u) => (m === undefined ? u.time : Math.min(m, u.time)), undefined);
     const clock = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    // An estimate against a fallback budget says so: its percentage is a guess about someone else's quota, not a reading.
+    const noteOf = (calibrated: boolean) => (calibrated ? '' : ' · uncalibrated (assumed budget; becomes accurate once two provider readings are seen)');
     return clis.filter((c) => this.opts.measurable?.(c) ?? true).flatMap((cli): UsageWindow[] => {
       const free = this.opts.entitlement?.(cli) ? true : undefined;
       const cooldown = this.cooldownUntil(cli);
       const rs = this.reportedFor(cli, 'session'), rw = this.reportedFor(cli, 'weekly');
-      const oldest = oldestOf(this.inWindow(cli)), oldestWeek = oldestOf(this.inWindow(cli, weekMs));
+      const oldest = oldestOf(this.inWindow(cli, this.windowMs, 'session')), oldestWeek = oldestOf(this.inWindow(cli, weekMs, 'weekly'));
       const session: UsageWindow = rs
         ? { cli, period: 'session', source: 'reported', label: `5h window · reported by ${cli} as of ${clock(rs.asOf)}`, usedPct: this.sessionPct(cli), resetsAt: rs.resetsAt, freeResetAvailable: free }
-        : { cli, period: 'session', source: cooldown ? 'reported' : 'estimated', label: cooldown ? 'Rate limited (reported by the CLI)' : '5h window · estimated from Harbor runs only',
-            usedPct: this.sessionPct(cli), resetsAt: cooldown ?? (oldest !== undefined ? oldest + this.windowMs : undefined), freeResetAvailable: free };
+        : { cli, period: 'session', source: cooldown ? 'reported' : 'estimated', label: cooldown ? 'Rate limited (reported by the CLI)' : `5h window · estimated from Harbor runs only${noteOf(this.budgetFor(cli, 'session').calibrated)}`,
+            usedPct: this.sessionPct(cli), resetsAt: cooldown ?? (oldest !== undefined ? oldest + this.windowMs : undefined), freeResetAvailable: free,
+            ...(cooldown ? {} : { calibrated: this.budgetFor(cli, 'session').calibrated }) };
       const weekly: UsageWindow = rw
         ? { cli, period: 'weekly', source: 'reported', label: `Weekly window · reported by ${cli} as of ${clock(rw.asOf)}`, usedPct: this.weeklyPct(cli), resetsAt: rw.resetsAt }
-        : { cli, period: 'weekly', source: 'estimated', label: 'Weekly window · estimated from Harbor runs only (rolling 7 days)',
-            usedPct: this.weeklyPct(cli), resetsAt: oldestWeek !== undefined ? oldestWeek + weekMs : undefined };
+        : { cli, period: 'weekly', source: 'estimated', label: `Weekly window · estimated from Harbor runs only (rolling 7 days)${noteOf(this.budgetFor(cli, 'weekly').calibrated)}`,
+            usedPct: this.weeklyPct(cli), resetsAt: oldestWeek !== undefined ? oldestWeek + weekMs : undefined, calibrated: this.budgetFor(cli, 'weekly').calibrated };
       const scoped = this.liveScopes(cli).flatMap((scope): UsageWindow[] => (['session', 'weekly'] as const).flatMap((period) => {
         const r = this.reportedFor(cli, period, scope);
         return r ? [{ cli, period, source: 'reported' as const, model: scope, label: `${scope} only · ${period === 'session' ? '5h' : 'weekly'} · reported by ${cli} as of ${clock(r.asOf)}`, usedPct: Math.min(100, Math.round(r.usedPct)), resetsAt: r.resetsAt }] : [];
@@ -184,13 +296,27 @@ export class UsageLedger {
     });
   }
 
+  /** Lifetime totals: live events plus what pruning folded into the store's archive, so the figure never drops when old events are pruned. */
   runningCost(projectId?: Id): { runs: number; inputTokens: number; outputTokens: number; costUsd: number } {
     const evs = this.store.listUsage().filter((u) => !projectId || u.projectId === projectId);
+    const archived = this.store.usageArchive(projectId);
     return evs.reduce((a, u) => ({
       runs: a.runs + 1, inputTokens: a.inputTokens + (u.inputTokens ?? 0),
       outputTokens: a.outputTokens + (u.outputTokens ?? 0), costUsd: a.costUsd + (u.costUsd ?? 0)
-    }), { runs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    }), { runs: archived.runs, inputTokens: archived.inputTokens, outputTokens: archived.outputTokens, costUsd: archived.costUsd });
   }
+}
+
+/** Recent outcomes per "cli/model" for the router: runs, failures (rate limits included: they are why a model is a bad pick right now) and the last failure time. */
+export function buildHistory(events: readonly UsageEvent[], now: number, sinceMs = 24 * 60 * 60 * 1000): Record<string, { runs: number; fails: number; lastFailAt?: number }> {
+  const out: Record<string, { runs: number; fails: number; lastFailAt?: number }> = {};
+  for (const u of events) {
+    if (u.time < now - sinceMs) continue;
+    const h = (out[`${u.cli}/${u.model}`] ??= { runs: 0, fails: 0 });
+    h.runs++;
+    if (!u.ok || u.rateLimited) { h.fails++; h.lastFailAt = Math.max(h.lastFailAt ?? 0, u.time); }
+  }
+  return out;
 }
 
 export interface FreeResetDeps {

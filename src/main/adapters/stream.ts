@@ -1,8 +1,15 @@
 import type { ChildProcess } from 'node:child_process';
-import { killTree, spawnCli } from '../proc';
+import { CappedText, killTree, spawnCli } from '../proc';
+
+/** Longest line held back while waiting for a newline. */
+export const MAX_PARTIAL_LINE = 1024 * 1024;
 
 export interface StreamedLine { stream: 'stdout' | 'stderr'; line: string }
-export interface StreamResult { code: number | null; aborted: boolean; stderr: string; spawnError?: string }
+/** `leaked`: the process did not exit within the grace period after an abort; its PID stays recorded so the next start's orphan sweep kills it. */
+export interface StreamResult { code: number | null; aborted: boolean; stderr: string; spawnError?: string; leaked?: boolean }
+
+/** After an abort the stream is given this long to see the process exit before it is abandoned. */
+export const FORCE_RESOLVE_MS = 10_000;
 
 /** Write side of a child's stdin kept open for a conversation (control protocols). Writes after `end` are dropped. */
 export interface StdinSink { write(data: string): void; end(): void }
@@ -14,12 +21,13 @@ export interface StdinSink { write(data: string): void; end(): void }
  */
 export async function* streamLines(
   exe: string, args: string[],
-  opts: { cwd: string; input: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv; interactive?: (stdin: StdinSink) => void }
+  opts: { cwd: string; input: string; signal?: AbortSignal; env?: NodeJS.ProcessEnv; interactive?: (stdin: StdinSink) => void; forceResolveMs?: number }
 ): AsyncGenerator<StreamedLine, StreamResult> {
   const queue: StreamedLine[] = [];
   let wake: (() => void) | undefined;
-  let closed = false, aborted = false, code: number | null = null, spawnError: string | undefined;
-  let stderrAll = '';
+  let closed = false, aborted = false, leaked = false, code: number | null = null, spawnError: string | undefined;
+  let leakTimer: NodeJS.Timeout | undefined;
+  const stderrAll = new CappedText(256 * 1024);
   const poke = () => { wake?.(); wake = undefined; };
 
   let child: ChildProcess;
@@ -33,13 +41,15 @@ export async function* streamLines(
     let buf = '';
     src?.setEncoding?.('utf8');
     src?.on('data', (d: string) => {
-      if (stream === 'stderr') stderrAll += d;
+      if (stream === 'stderr') stderrAll.push(d);
       buf += d;
       let i: number;
       while ((i = buf.indexOf('\n')) >= 0) {
         queue.push({ stream, line: buf.slice(0, i).replace(/\r$/, '') });
         buf = buf.slice(i + 1);
       }
+      // A newline-free flood must not grow without bound: flush an oversized partial line in pieces.
+      while (buf.length > MAX_PARTIAL_LINE) { queue.push({ stream, line: buf.slice(0, MAX_PARTIAL_LINE) }); buf = buf.slice(MAX_PARTIAL_LINE); }
       poke();
     });
     src?.on('end', () => { if (buf) queue.push({ stream, line: buf }); buf = ''; poke(); });
@@ -61,7 +71,15 @@ export async function* streamLines(
     });
   } else child.stdin?.end(opts.input);
 
-  const onAbort = () => { aborted = true; killTree(child); };
+  const onAbort = () => {
+    aborted = true;
+    killTree(child);
+    // A process that survives the kill must not hold the run (and its queue slot) forever.
+    if (!leakTimer) {
+      leakTimer = setTimeout(() => { if (!closed) { leaked = true; closed = true; poke(); } }, opts.forceResolveMs ?? FORCE_RESOLVE_MS);
+      leakTimer.unref?.();
+    }
+  };
   if (opts.signal?.aborted) onAbort(); else opts.signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
@@ -72,7 +90,8 @@ export async function* streamLines(
     }
   } finally {
     opts.signal?.removeEventListener('abort', onAbort);
+    if (leakTimer) clearTimeout(leakTimer);
     if (!closed) killTree(child);
   }
-  return { code, aborted, stderr: stderrAll, spawnError };
+  return { code, aborted, stderr: stderrAll.toString(), spawnError, ...(leaked ? { leaked } : {}) };
 }

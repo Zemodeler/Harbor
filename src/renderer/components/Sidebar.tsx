@@ -1,7 +1,8 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Conversation } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
+import { Modal } from './Modal';
 import { sessionStatus } from '../session';
 import { SessionStatus } from './SessionStatus';
 import { CloseIcon, MoreIcon, PlusIcon, SearchIcon, SettingsIcon } from './Icons';
@@ -36,7 +37,23 @@ function toIcon(file: File): Promise<string> {
 }
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
-export function Sidebar({ state, settings, add, close, search, history, rename }: { state: HarborState; settings: () => void; add: () => void; close: () => void; search: () => void; history: () => void; rename: (c: Conversation) => void }) {
+export function Sidebar({ state, settings, add, close, search, history, rename, queuedFor, forget }: { state: HarborState; settings: () => void; add: () => void; close: () => void; search: () => void; history: () => void; rename: (c: Conversation) => void; queuedFor?: (conversationId: string) => number; forget?: (conversationId: string) => void }) {
+  const [deleting, setDeleting] = useState<Conversation>();
+  const [deletePending, setDeletePending] = useState(false);
+  const list = useRef<HTMLDivElement>(null);
+  // Escape or a click elsewhere closes an open conversation menu; Escape returns focus to its button.
+  useEffect(() => {
+    const open = () => [...list.current?.querySelectorAll<HTMLDetailsElement>('details[open]') ?? []];
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const menus = open();
+      if (!menus.length) return;
+      menus.forEach(d => { d.removeAttribute('open'); d.querySelector('summary')?.focus(); });
+    };
+    const click = (e: PointerEvent) => open().forEach(d => { if (!d.contains(e.target as Node)) d.removeAttribute('open'); });
+    document.addEventListener('keydown', key); document.addEventListener('pointerdown', click);
+    return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', click); };
+  }, []);
   const project = state.projects.find(p => p.id === state.projectId);
   const picker = useRef<HTMLInputElement>(null);
   const roleOf = (c: Conversation) => state.agents.find(a => a.id === c.agentId)?.role;
@@ -48,6 +65,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename }
   const owners = mains.filter(c => c.agentId === activeAgentId);
   const isActive = (c: Conversation) => c.id === state.conversation?.id || (viewing?.role !== 'main' && owners.length === 1 && owners[0].id === c.id);
   // The main agent is shared by every conversation of a project, so a conversation counts as running only when its own subagents are, or when it is the one open.
+  const isBusy = (c: Conversation) => ['working', 'queued', 'waiting'].includes(sessionStatus(c, state.agents, state.sending)) || (queuedFor?.(c.id) ?? 0) > 0;
   const isWorking = (c: Conversation) => ['working', 'queued'].includes(sessionStatus(c, state.agents, state.sending));
   const running = mains.find(c => isActive(c) && isWorking(c));
   const runningAgent = state.agents.find(a => a.id === running?.agentId);
@@ -73,10 +91,10 @@ export function Sidebar({ state, settings, add, close, search, history, rename }
           {project.image ? <button onClick={() => void state.setProjectImage(project.id, null)}>Remove image</button> : null}
         </div>
         <p className={s.panelSub}>{mains.length === 1 ? '1 conversation' : `${mains.length} conversations`}</p>
-        {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.run(() => state.api.stopConversation(running.id)); }}>Stop</button></div> : null}
+        {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.stopConversation(running.id); }}>Stop</button></div> : null}
         <button className={s.newConversation} onClick={() => { void state.newConversation(); close(); }}>New conversation</button>
         {state.projectLoading ? <p role="status" className={s.muted}>Loading conversations…</p> : null}
-        <div className={s.conversationList}>
+        <div className={s.conversationList} ref={list}>
           {groups.map(g => <div key={g.label}><p className={s.group}>{g.label}</p>
             {g.items.map(c => <div key={c.id} className={s.conversationRow}>
               <button className={`${s.conversationLink} ${isActive(c) ? s.selected : ''}`} aria-current={isActive(c) ? 'page' : undefined} onClick={() => { void state.selectConversation(c); close(); }}><span className={s.conversationText}><span className={s.conversationTitle}>{c.title}</span>{sessionStatus(c, state.agents, state.sending) !== 'idle' ? <SessionStatus status={sessionStatus(c, state.agents, state.sending)}/> : null}</span></button>
@@ -85,11 +103,17 @@ export function Sidebar({ state, settings, add, close, search, history, rename }
                 <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); rename(c); }}>Rename</button>
                 <button disabled={['working', 'queued', 'waiting'].includes(sessionStatus(c, state.agents, state.sending))} onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { archived: true }); }}>Archive</button>
               </div></details>
-              <button className={s.deleteConversation} aria-label={`Delete conversation ${c.title}`} title="Delete conversation" onClick={() => { if (window.confirm(`Delete “${c.title}”? Its messages will be removed.`)) void state.deleteConversation(c); }}><CloseIcon size={14} aria-hidden="true"/></button>
+              <button className={s.deleteConversation} aria-label={`Delete conversation ${c.title}`} disabled={isBusy(c)} title={isBusy(c) ? 'Stop this session or clear its queue before deleting it' : 'Delete conversation'} onClick={() => setDeleting(c)}><CloseIcon size={14} aria-hidden="true"/></button>
             </div>)}
           </div>)}
         </div>
       </> : !state.loading ? <p className={s.muted}>Your projects will appear here.</p> : null}
+      {deleting ? <Modal title="Delete conversation?" close={() => { setDeleting(undefined); state.clearError('delete'); }} dismissible={!deletePending}>
+        <p>Delete “{deleting.title}”? Its messages will be removed. This cannot be undone.</p>
+        {(queuedFor?.(deleting.id) ?? 0) > 0 ? <p className={s.muted}>It has queued follow-ups; clear them first.</p> : null}
+        {state.areaErrors.delete ? <p className={s.error} role="alert">{state.areaErrors.delete}</p> : null}
+        <div className={s.actions}><button disabled={deletePending} onClick={() => { setDeleting(undefined); state.clearError('delete'); }}>Keep conversation</button><button className={s.primary} disabled={deletePending || isBusy(deleting)} onClick={() => { const c = deleting; setDeletePending(true); void state.deleteConversation(c, 'delete').then(ok => { if (ok) { forget?.(c.id); setDeleting(undefined); } }).finally(() => setDeletePending(false)); }}>{deletePending ? 'Deleting…' : 'Delete'}</button></div>
+      </Modal> : null}
       <div className={s.panelFoot}><button className={s.historyButton} onClick={history}>Conversation history</button><small>Local workspace{document.documentElement.dataset.demo ? ' · Demo' : ''}</small></div>
     </div>
   </nav>;

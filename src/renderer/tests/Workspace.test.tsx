@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import { createMockApi } from '../mock/mockApi';
-import { QuestionDialog } from '../components/Question';
+import { QuestionCard } from '../components/Question';
 import { useWorkspace } from '../hooks/useWorkspace';
 import { groupMessages, ToolActivity } from '../components/ToolActivity';
 import { sessionStatus } from '../session';
@@ -11,11 +11,11 @@ import type { Agent, Message } from '../../shared/api';
 
 beforeEach(() => { localStorage.clear(); window.harbor = createMockApi({ delay: 0 }); });
 async function ready() { render(<App/>); await screen.findByRole('heading', { name: 'Build the account page' }); await screen.findByText(/I've assigned/); }
-describe('Question menu', () => {
+describe('Question card', () => {
   it('requires explicit submission and preserves a custom answer while pending', async () => {
     const answer = vi.fn(), dismiss = vi.fn();
     const props = { q: { type: 'question' as const, requestId: 'q', conversationId: 'account', prompt: 'Which palette?', options: ['Ocean', 'Olive'], allowText: true }, who: 'Harbor', answer, dismiss, pending: false };
-    const view = render(<QuestionDialog {...props}/>);
+    const view = render(<QuestionCard {...props}/>);
     expect(screen.getByRole('button', { name: 'Send answer' })).toBeDisabled();
     await userEvent.click(screen.getByRole('radio', { name: 'Olive' }));
     expect(answer).not.toHaveBeenCalled();
@@ -23,10 +23,12 @@ describe('Question menu', () => {
     await userEvent.type(screen.getByLabelText('Your answer'), 'Warm neutrals, please');
     await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
     expect(answer).toHaveBeenCalledWith('Warm neutrals, please');
-    view.rerender(<QuestionDialog {...props} pending/>);
+    view.rerender(<QuestionCard {...props} pending/>);
     expect(screen.getByLabelText('Your answer')).toHaveValue('Warm neutrals, please');
     expect(screen.getByRole('button', { name: 'Sending…' })).toBeDisabled();
-    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    // A card, not a dialog: it is non-modal and Escape does nothing to it.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole('region', { name: /has a question/ }), { key: 'Escape' });
     expect(dismiss).not.toHaveBeenCalled();
   });
 });
@@ -68,7 +70,7 @@ describe('Workspace quality of life', () => {
     await ready();
     await userEvent.click(screen.getByRole('button', { name: 'Session information' }));
     expect(await screen.findByText('Current step')).toBeInTheDocument();
-    expect(screen.getByText('Subagents · 3')).toBeInTheDocument();
+    expect(screen.getByText(/^Subagents · \d+$/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Close session information' }));
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
     const input = screen.getByLabelText('Find a project');

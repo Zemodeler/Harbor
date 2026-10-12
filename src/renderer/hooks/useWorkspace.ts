@@ -27,15 +27,23 @@ export function useWorkspace() {
   const [saveError, setSaveError] = useState(false);
   const current = useRef(preferences);
   current.current = preferences;
+  // Saving is debounced (drafts change often) and writes after typing pauses; the final state is always written on
+  // pagehide and on unmount, so nothing is lost and not every change stringifies all drafts.
   useEffect(() => {
-    const save = () => { try { localStorage.setItem(key, JSON.stringify(current.current)); setSaveError(false); } catch { setSaveError(true); } };
-    const timer = setTimeout(save, 120);
-    window.addEventListener('pagehide', save);
-    return () => { clearTimeout(timer); window.removeEventListener('pagehide', save); try { localStorage.setItem(key, JSON.stringify(current.current)); } catch { /* The next save reports the failure. */ } };
+    const timer = setTimeout(() => { try { localStorage.setItem(key, JSON.stringify(current.current)); setSaveError(false); } catch { setSaveError(true); } }, 300);
+    return () => clearTimeout(timer);
   }, [preferences]);
+  useEffect(() => {
+    const flush = () => { try { localStorage.setItem(key, JSON.stringify(current.current)); } catch { /* The next save reports the failure. */ } };
+    window.addEventListener('pagehide', flush);
+    return () => { window.removeEventListener('pagehide', flush); flush(); };
+  }, []);
   useEffect(() => { document.documentElement.dataset.textSize = preferences.textSize; document.documentElement.dataset.density = preferences.density; }, [preferences.textSize, preferences.density]);
   const setDraft = (id: string, text: string | ((current: string) => string)) => setPreferences(p => ({ ...p, drafts: { ...p.drafts, [id]: typeof text === 'function' ? text(p.drafts[id] || '') : text } }));
   const setQueue = (id: string, items: QueuedPrompt[] | ((current: QueuedPrompt[]) => QueuedPrompt[])) => setPreferences(p => ({ ...p, queue: { ...p.queue, [id]: typeof items === 'function' ? items(p.queue[id] || []) : items } }));
-  return { preferences, setPreferences, setDraft, setQueue, saveError };
+  /** Prune what was stored for a deleted conversation. */
+  const forgetConversation = (id: string) => setPreferences(p => id in p.drafts || id in p.queue
+    ? { ...p, drafts: Object.fromEntries(Object.entries(p.drafts).filter(([k]) => k !== id)), queue: Object.fromEntries(Object.entries(p.queue).filter(([k]) => k !== id)) } : p);
+  return { preferences, setPreferences, setDraft, setQueue, forgetConversation, saveError };
 }
 export type WorkspaceState = ReturnType<typeof useWorkspace>;

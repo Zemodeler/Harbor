@@ -1,8 +1,17 @@
 import { useEffect, useState } from 'react';
 import type { ReviewSnapshot } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
+import { Clipped } from './Clipped';
 import { CloseIcon } from './Icons';
 import s from '../Harbor.module.css';
+
+// The patch is only turned into DOM while the file is open, and only its first lines until "Show all".
+function DiffFile({ file, initiallyOpen }: { file: ReviewSnapshot['files'][number]; initiallyOpen: boolean }) {
+  const [open, setOpen] = useState(initiallyOpen);
+  return <details className={s.diffFile} open={initiallyOpen} onToggle={e => setOpen(e.currentTarget.open)}><summary>{file.path}<small>{file.source}{file.untracked ? ' · New file' : ''}</small></summary>
+    {open ? <Clipped text={file.patch}>{lines => <pre>{lines.map((line, index) => <span key={index} className={line.startsWith('+') && !line.startsWith('+++') ? s.diffAdded : line.startsWith('-') && !line.startsWith('---') ? s.diffRemoved : undefined}>{line}{'\n'}</span>)}</pre>}</Clipped> : null}
+  </details>;
+}
 
 export function ReviewPanel({ state, close }: { state: HarborState; close: () => void }) {
   const [snapshot, setSnapshot] = useState<ReviewSnapshot>();
@@ -22,7 +31,7 @@ export function ReviewPanel({ state, close }: { state: HarborState; close: () =>
     {snapshot ? <><p className={s.reviewSummary}>{snapshot.files.length} changed {snapshot.files.length === 1 ? 'file' : 'files'}<small>Snapshot at {new Date(snapshot.capturedAt).toLocaleTimeString()}</small></p>
       <p className={s.muted}>Changes are a snapshot. Refresh after work continues. Verification applies only when its report matches the current changes.</p>
       {snapshot.notes.map((note, i) => <p key={i} className={s.reviewNote}>{note}</p>)}
-      {!snapshot.files.length ? <p>No previewable changes in this snapshot.</p> : snapshot.files.map((file, i) => <details className={s.diffFile} key={`${file.source}-${file.path}`} open={i === 0}><summary>{file.path}<small>{file.source}{file.untracked ? ' · New file' : ''}</small></summary><pre>{file.patch.split('\n').map((line, index) => <span key={index} className={line.startsWith('+') && !line.startsWith('+++') ? s.diffAdded : line.startsWith('-') && !line.startsWith('---') ? s.diffRemoved : undefined}>{line}{'\n'}</span>)}</pre></details>)}
+      {!snapshot.files.length ? <p>No previewable changes in this snapshot.</p> : snapshot.files.map((file, i) => <DiffFile key={`${file.source}-${file.path}`} file={file} initiallyOpen={i === 0}/>)}
     </> : null}
   </>;
 }

@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Project-first desktop app that routes work to installed AI CLIs",
   "main": "./out/main/index.js",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "dev": "electron-vite dev",
@@ -18,6 +19,7 @@
     "test:renderer": "npm --prefix src/renderer test"
   },
   "dependencies": {
+    "electron-updater": "6.8.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

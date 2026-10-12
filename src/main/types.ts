@@ -34,8 +34,10 @@ export interface AgentRecord extends Agent {
   helpFor?: Id;
   /** User allowed this agent to overlap file claims held by a sibling. */
   sharedOk?: boolean;
-  /** Redoes failed or rejected work (one complexity level up, high effort). */
+  /** Redoes work a reviewer or Harbor check rejected, already on the top tier: effort goes to high (one axis moves, never both). */
   retry?: boolean;
+  /** A retry after an infrastructure failure: the CLI/model that failed is a soft penalty in routing, tier and effort are unchanged. */
+  avoid?: Array<{ cli: CliId; model?: string }>;
   /** Number of CLI fallbacks used. */
   attempts: number;
   created: number;
@@ -59,6 +61,12 @@ export interface AgentRecord extends Agent {
    * run keeps its revision and may end in the same state, so a late mark from a turn carrying the old result must not count.
    */
   reportGen?: number;
+  /** Epoch ms of the last state change (worktree retention and the handoff read it). */
+  updated?: number;
+  /** An integrator queued without a target: the branch that was checked out then. Running it refuses if the folder moved to another branch. */
+  pinnedCheckedOut?: string;
+  /** The project folder had uncommitted edits when this helper was delegated; it starts from the committed HEAD without them. */
+  dirtyAtStart?: 'dirty' | 'unknown';
 }
 type Id = string;
 
@@ -97,13 +105,21 @@ export interface TaskSnapshot {
 
 export interface CheckRun { cmd: string; ok: boolean; exitCode: number | null; timedOut?: boolean; durationMs: number; /** Tail of the combined output. */ output: string }
 
-export interface SessionLink { agentId: Id; cli: CliId; sessionId: string; updated: number }
+export interface SessionLink {
+  agentId: Id; cli: CliId; sessionId: string; updated: number;
+  /** Model and effort of the last run in this session. A resumed session keeps them (changing either rewrites the prompt cache). */
+  model?: string; effort?: string;
+}
 
 /** One observed unit of consumption. Never fabricated: fields stay undefined when unknown. */
 export interface UsageEvent {
   id: Id; time: number; cli: CliId; model: string; projectId: Id; agentId: Id; conversationId?: Id;
   inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs: number; ok: boolean;
+  /** Claude prompt-cache tokens; `inputTokens` excludes them. */
+  cacheReadTokens?: number; cacheWriteTokens?: number;
   rateLimited?: boolean;
+  /** With `rateLimited`: the message did not name a model, so the whole CLI is held out, not just this model. */
+  cliWide?: boolean;
   /** Account limits the CLI reported during this run (Claude: `rate_limit_event`). Persisted so they survive restarts. */
   limits?: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }>;
 }
@@ -112,6 +128,8 @@ export interface CoordinationEntry {
   id: Id; time: number; projectId: Id;
   kind: 'peer' | 'lock' | 'handoff' | 'conflict' | 'direct' | 'help' | 'decision';
   from?: Id; to?: Id; text: string; files?: string[];
+  /** Decisions: the conversation the lead noted it in, so another session's decisions are not handed to this one. */
+  conversationId?: Id;
 }
 
 export interface FileLock { projectId: Id; file: string; agentId: Id; since: number }
@@ -133,4 +151,6 @@ export interface State {
   settings: Settings;
   /** "Always allow for this project" tool rules, keyed by project id. Optional so older files still load. */
   toolRules?: Record<Id, ToolRule[]>;
+  /** Hash of the `.harbor/checks.json` commands the user approved per project; changed commands need a new approval. */
+  checksApproved?: Record<Id, string>;
 }

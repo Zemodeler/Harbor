@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
-  ClaudeAdapter, claudeArgs, controlError, controlResponse, isGitWrite, parseControlCancel, parseControlRequest, userMessageLine
+  ClaudeAdapter, GIT_DESTRUCTIVE_DENY, HELPER_BASH_ALLOW, claudeArgs, controlError, controlResponse, isGitWrite, parseControlCancel, parseControlRequest, userMessageLine
 } from '../src/main/adapters/claude';
 import { streamLines } from '../src/main/adapters/stream';
 import type { Chunk, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from '../src/main/adapters/types';
@@ -63,9 +63,10 @@ describe('controlled-mode args', () => {
       expect(plain).not.toContain('--permission-prompt-tool');
       if (p !== 'edit') expect(claudeArgs({ ...base, permission: p, ...h }, 'sp.txt')).toEqual(plain);
     }
+    // Helper runs: narrowed allowlist plus the destructive-git deny set on every edit run.
     expect(claudeArgs(base)).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--model', 'sonnet', '--effort', 'medium',
-      '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)',
-      '--disallowedTools', 'Task', 'Agent']);
+      '--permission-mode', 'acceptEdits', '--allowedTools', ...HELPER_BASH_ALLOW,
+      '--disallowedTools', 'Task', 'Agent', ...GIT_DESTRUCTIVE_DENY]);
   });
   it('edit + handler adds stream-json input and keeps the deny rules', () => {
     const a = claudeArgs({ ...base, ...h, denyGitWrites: true });

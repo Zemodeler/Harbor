@@ -1,157 +1,131 @@
 # Product direction
 
+Status: Harbor is implemented and working but young; see the [README](../README.md) for what is verified and [Limitations](limitations.md) for the gaps. This document keeps the product intent and says where the implementation differs. Sections marked "Superseded" describe an earlier model that no longer applies; the current model is in [Architecture](architecture.md) and [Project agents](project-agents.md).
+
 ## Core idea
 
 Make it easy on the user. The user installs Harbor and can immediately open a project and start working with an already installed, signed-in CLI. No provider setup wizard, routing configuration, or API key is required for that path.
 
-Give users one desktop interface for working on projects with their preferred AI CLIs. Keep the experience familiar: choose a project, open a conversation, and ask for work. The app handles provider selection, effort, and coordination behind the scenes according to configurable policies.
+Give one desktop interface for working on projects with the AI CLIs a person already pays for. Keep the experience familiar: choose a project, open a conversation, ask for work. The app handles provider selection, effort and coordination behind the scenes according to configurable policies.
 
-Automatically discover installed CLIs and check their sign-in state. Settings show which tools are ready, which are installed but need login, and which have an unknown status. If no ready CLI exists, provide one clear next action to install or sign in to a supported tool. This is an exception to the immediate-start path, not a mandatory onboarding flow for everyone.
+Automatically discover installed CLIs and check their sign-in state. Settings show which tools are ready, which are installed but need login, and which have an unknown status. If no ready CLI exists there is one clear next action (install or sign in). Implemented for Claude Code and Codex; Gemini CLI is detected but cannot be used yet.
 
-Use existing Claude and Codex skills and plugins through their native environments where supported. Preserve project and user configuration so work inside Harbor can benefit from the same extensions users already rely on.
+Automatic routing is a main capability, but it should not become the main visual experience. Users spend their time working with an assistant, not operating a routing dashboard. Harbor routes every request, but it is honest that routing and delegation add overhead; it does not promise savings (see [Limitations](limitations.md)).
 
-Automatic routing is the main product capability, but it should not become the main visual experience. Users should spend their time working with an assistant, rather than operating a routing dashboard.
+Native Claude and Codex skills and plugins keep working inside their own CLI sessions. Harbor does not discover, list or route on them (not built; see [Connections and extensions](connections-and-extensions.md)).
+
+## Audience and scope
+
+Harbor is built for one developer with a Claude subscription and a Codex subscription (also used by a few friends), on Windows, working on local git projects. It is open source and personal-use. Team features, shared workspaces, cloud execution, deployment and GitHub publishing are out of scope. macOS and Linux are undecided.
 
 ## Product priorities
 
-Harbor should install and behave like any other Windows PC app. Provide a normal installer, a Start menu entry, a pinnable taskbar icon, an optional desktop shortcut, and uninstall support through Windows Settings. Launch Harbor directly into its own desktop window, with standard minimize, maximize, restore, resize, and close behavior. Ordinary use should not require opening a terminal or starting a local server manually. Restore the user's projects and workspace on relaunch. Packaging and installation remain implementation requirements at this design stage.
+Harbor installs and behaves like a normal Windows app: an NSIS installer (unsigned), a Start menu entry, a pinnable taskbar icon, uninstall through Windows Settings, a native window with standard controls, restoration of projects on relaunch, and an optional tray mode that keeps agents running when the window is closed. Updates arrive through GitHub Releases ([RELEASING.md](../RELEASING.md)).
 
-1. Organize everything by project.
-2. Provide a familiar coding assistant conversation interface, drawing on the general interaction patterns of Codex and Claude apps.
-3. Coordinate multiple AI CLIs from the first version.
-4. Prefer installed CLIs and their existing subscriptions.
-5. Consider remaining subscription allowance when planning work and choosing effort.
-6. Support API tokens as a configurable fallback.
-7. Make routing configurable and inspectable without interrupting ordinary work.
-8. Make it practical to connect additional AI CLIs through adapters.
-9. Discover connections automatically and make advanced configuration optional.
-10. Respect and support native Claude and Codex skills and plugins.
-11. Give each project one main agent that only delegates, monitors, and reports.
-12. Assign every subagent one clear responsibility; separate planning from implementation.
-13. Let users prompt subagents directly while keeping the main agent informed.
+1. Organize everything by project. (Built.)
+2. A familiar coding-assistant conversation interface. (Built.)
+3. Coordinate multiple AI CLIs from the first version. (Built for Claude Code and Codex; one CLI per run, with fallback.)
+4. Prefer installed CLIs and their existing subscriptions. (Built; there is no API use.)
+5. Consider remaining subscription allowance when choosing a model and effort. (Built, with estimates and provider-reported windows where available; see [Usage and resets](usage-and-resets.md).)
+6. API tokens as a configurable fallback. (Not built.)
+7. Routing that is configurable and inspectable without interrupting ordinary work. (Engine built; a routing settings screen was in progress in the UI. The reason for each choice is stored with the message.)
+8. Make it practical to add CLIs through adapters. (An adapter interface and registry exist; there is no baseline terminal adapter.)
+9. Discover connections automatically; advanced configuration optional. (Built.)
+10. Respect native skills and plugins. (They work in-session; Harbor has no discovery or routing for them.)
+11. One lead per project that does the work itself when that is simplest and delegates when it pays off. (Replaces "a main agent that only delegates".)
+12. Give each helper one clear responsibility; separate planning from implementation when a task needs it. (Built as helper roles; not mandatory.)
+13. Let users prompt helpers directly. (Built: a message to a helper's conversation resumes that helper and is recorded for the lead's next turn.)
 
 ## Main concepts
 
 ### Project
 
-A project is the top-level boundary for work. It has a local folder, conversations, session history, routing preferences, and relevant working context.
-
-Switching projects restores that project's conversation and workspace state. Work from one project must not silently become context for another.
+A project is the top-level boundary of work. It has a local folder (a drive root or the home folder is refused), conversations, session history, and settings that can override the global ones. Switching projects restores that project's conversations; work from one project does not become context for another.
 
 ### Conversation
 
-The project's main agent is the default contact. Its conversations contain delegated work and consolidated reports. Each subagent also has an accessible conversation scoped to its assignment.
+A conversation is the user-facing thread of work inside a project: requests, responses, tool activity, system notes and results. Each conversation has its own lead session (resumed natively between turns) and its own helpers. A conversation has a mode (default, auto, plan, goal). Helpers also have conversations scoped to their assignment, which you can open and message.
 
-A conversation is the user-facing thread of work inside a project. It contains requests, assistant responses, progress, tool activity, and results.
-
-The conversation remains continuous even when different CLIs contribute. It should be possible to identify the provider behind a response without making every response look like an orchestration report.
+The conversation stays continuous when different CLIs contribute. Each response carries its CLI, model, effort and routing reason in execution details.
 
 ### Task
 
-A task is a unit of requested work within a conversation. The router may divide it into planning, implementation, review, or other steps when that helps achieve the request.
+A task is a unit of requested work. Harbor does not impose a plan on it. Questions and small changes are handled by the lead itself in one session; work that splits into independent parts, needs a long research sweep, or deserves an independent review may be delegated by the lead to helpers.
 
-Not every message needs a multi-step plan. The main agent can delegate a question or small edit to one suitable subagent. It never performs the task itself.
+### Concierge
 
-### Main agent
+Every user message first goes to a cheap, tool-less model that either answers (greetings, status of running work, explanations that need no files) or escalates with a complexity, needs and a one-line acknowledgement. Messages that are obviously work skip it. It exists to keep trivial messages off the expensive lead.
 
-Each project has exactly one logical main agent. It receives requests, delegates work, monitors assignments, handles requests for sibling agents, and relays reports to the user. It does not investigate, design, implement, test, review, or integrate the work itself. Planning and estimation are delegated to a planning subagent.
+### Lead
 
-### Subagent
+An escalation starts or resumes the conversation's lead: a normal working CLI session that reads files, edits them, runs commands, answers questions, and may delegate. It keeps its own native session. The lead is chosen by the router like any other run, at a tier matching the concierge's complexity.
 
-A subagent has one clear assignment and reports to the project's main agent. An implementation subagent owns one designated feature or bounded change. Planning, research, review, testing, and integration belong to separate subagent assignments when needed.
+### Helper
 
-Subagents cannot create other subagents. They request a sibling from the main agent. Users can inspect and prompt them directly. See [Project agents](project-agents.md) for role boundaries and communication rules.
+A helper has one assignment, reports to the lead, and never creates other agents or talks to other helpers. Roles are planner, implementer, reviewer and other. Edit helpers work in their own git worktree and branch. See [Project agents](project-agents.md).
 
 ### CLI session
 
-A CLI session is an underlying execution session belonging to a project and conversation. One conversation can contain several CLI sessions.
-
-Native session identifiers should be preserved when an adapter supports them. A handoff to another CLI creates a linked session with transferred context; it does not imply that native sessions are interchangeable across providers.
+An underlying execution session of one CLI, tied to a conversation or a helper. Native session ids are preserved and resumed only on the same CLI. When another CLI takes over, Harbor writes a handoff (decisions, unfinished work, evidence against the commit it covered) instead of pretending sessions are interchangeable.
 
 ### Routing policy
 
-A routing policy determines which connected CLIs are eligible, how they are assigned work, what effort to request, how allowance is conserved, and when API fallback is permitted.
-
-Global defaults apply unless a project overrides them. Optional conversation overrides allow specific work to use a chosen CLI or policy.
+Which installed CLIs and models are eligible, how they are scored, what effort is requested, how a low allowance is handled, and which preferences apply. Global defaults, per-project overrides, per-CLI model restrictions, role preferences. A user can also name a CLI in a message ("use codex"). See [Background routing](background-routing.md).
 
 ## Primary workflow
 
 1. Add or open a local project.
-2. Start a new conversation or resume an existing one.
+2. Start a new conversation or resume one; optionally choose a mode.
 3. Describe the work in the composer.
-4. The main agent delegates planning to a focused subagent when the request needs it.
-5. Background routing assigns suitable CLIs and effort to the approved assignments under project policy.
-6. The main agent dispatches subagents, monitors them, and receives their progress and completion reports.
-7. The user can prompt the main agent or open a specific subagent's conversation.
-8. The main conversation shows consolidated progress and results. Changes, linked CLI sessions, and individual reports remain inspectable.
+4. The concierge answers or escalates; the lead works, delegating only when worthwhile.
+5. Harbor routes each run to a CLI, model and effort, schedules helpers (dependencies, concurrency, file locks), runs your `.harbor/checks.json` on their results, and resumes the lead with reports.
+6. You can read the lead's streamed work, open a helper's conversation, answer questions and permission prompts, stop a run, or change the mode.
+7. Finished, reviewed work is merged by Harbor's integrator into a `harbor/integrate-*` branch and lands on your branch only when you Apply it. A task can be rolled back the same way.
 
 ## Experience principles
 
 - Install and start: use discovered, signed-in CLIs without mandatory configuration.
-- Existing native skills and plugins remain available where compatible.
-- Project context is always clear.
-- Conversation is the main surface.
-- Routing requires no manual selection for normal tasks.
-- Background decisions remain explainable on demand.
-- Important blockers and budget decisions remain visible.
-- Usage uncertainty is presented honestly.
+- Project context is always clear. Conversation is the main surface.
+- Routing needs no manual selection for normal tasks, and its reasons are available on demand.
+- Important blockers and decisions are visible: questions, permission requests, failures.
+- Usage uncertainty is presented honestly: estimates are labeled; unknown is unknown.
 - Settings use plain language and have predictable scope.
-- Project switching preserves ongoing work; it does not implicitly cancel it.
-- The main agent coordinates only; all substantive work is delegated.
-- Each subagent does one clear thing and requests siblings through the main agent.
-- Feature implementers follow a supplied specification; broader thinking belongs to a planning subagent.
+- Project switching preserves ongoing work; it does not cancel it.
+- Nothing lands on your branch, is pushed, or spends a free reset without an explicit action from you.
+- Helpers do one clear thing and follow a supplied specification; broader thinking belongs to the lead or a planner.
 
 ## Design scope
 
-Functional priorities also include a direct single-worker path for clear small tasks, durable recovery without duplicate actions, verification tied to the exact version tested, coordinated handling of changed instructions, routing that preserves useful session continuity, and user-controlled queues with capacity reserved for interactive responses. These extend the existing coordinator and focused-subagent model; they do not require every task to pass through every agent role.
-
-Also provide task-scoped rollback that preserves unrelated edits and a focused implementation rollout that proves the full lifecycle of one or two dedicated adapters before expanding compatibility.
-
-The interface supports these behaviors through clear task status, conversation-scoped agent groups, a primary result-review action, side-by-side workspace panels, clear composer recipients, and usable navigation in narrow windows. See [Interface design](interface-design.md) for the six interaction requirements.
-
-The initial design covers a local desktop app, project navigation, conversations, CLI connections, background routing, multi-CLI coordination, allowance-aware effort, and optional API fallback.
-
-Automatic connection discovery and native skills and plugins are part of the initial design. Shared web workspaces, deployment, and GitHub publishing are later stages. These documents do not authorize or describe completed implementation.
+- A direct single-worker path for clear small tasks: this is the default. The lead does it, with no helper.
+- Durable recovery without duplicate actions: Harbor records processes and agent state, stops and checkpoints interrupted helpers on restart, and tells the lead which reports may not have arrived. Native session resume is used where available. (Built; not exercised against real long runs.)
+- Verification tied to the exact version tested: reviews and Harbor-run checks record the commit they covered and go stale when the branch moves. (Built.)
+- Routing that preserves useful session continuity. (Built; see the continuity bonus in [Background routing](background-routing.md).)
+- User-controlled queues with capacity reserved for interactive responses. Priority, pause and resume exist per project in the API. A cross-project queue and reserved interactive headroom are not built.
+- Task-scoped rollback that preserves unrelated edits. (Built for merges Harbor's integrator made; see [Project agents](project-agents.md#task-scoped-rollback).)
+- Focused adapter rollout: Claude Code and Codex first, each verified against a real install before breadth. (Done for the basics; gaps listed in [Connections and extensions](connections-and-extensions.md).)
 
 ## Design decisions
 
 ### First dedicated adapters
 
-Claude Code and Codex receive the first dedicated adapters. They are the two CLIs the product already targets for native skills and plugins, so one pair serves both the multi-CLI goal and extension support. Every other CLI starts on the baseline terminal adapter with its limitations labeled. Each adapter must still pass the lifecycle verification in [Connections and extensions](connections-and-extensions.md); a capability that fails verification for a given version is reported unsupported rather than assumed.
+Claude Code and Codex are the two adapters. They are the CLIs the owner actually uses. Every other CLI is detected only. Each adapter's capabilities are verified against a supported version rather than assumed; what is and is not verified is listed in [Connections and extensions](connections-and-extensions.md).
 
 ### Active and archived conversations
 
-A project keeps one history, and each conversation is either active or archived.
+A project keeps one history, and each conversation is active or archived. The sidebar shows active conversations. Archiving is manual and refused while a conversation has running work or pending requests; archived conversations stay searchable and keep their agents and reports. (The contract and engine support archive, pin, rename and search; check the UI for how much is exposed.)
 
-- The sidebar shows active conversations only, with running and input-needed ones first.
-- Archiving is manual, with a suggestion after a long period of inactivity. Nothing is archived automatically.
-- A conversation with running work, pending approvals, or queued tasks cannot be archived.
-- Archived conversations stay searchable in the project history view, keep their agents, reports, and linked sessions, and can be restored.
-- Archiving never deletes files or history.
+### When a plan appears
 
-### When a plan appears in the conversation
-
-Show a concise plan only when it helps the user decide or follow along:
-
-- The work needs two or more assignments or has dependencies between them.
-- It touches a scope, cost, or risk the user should confirm (large changes, destructive actions, API spending).
-- The user asks for a plan.
-
-Questions and clear single-worker tasks get no plan, only a short acknowledgement. A plan is one collapsed line with expandable steps. It stays out of the way of the result, and provider and budget details remain in execution details.
+Superseded: "the main agent shows a concise plan when work has several assignments". There is no automatic plan card. The lead explains what it delegates in a short line ("Delegated: ..."), and the user can ask for a plan explicitly by switching the conversation to plan mode, where the lead is read-only and answers with a numbered plan; a go-ahead ("yes, do it") leaves plan mode and the lead carries the plan out.
 
 ### Comparing allowance across providers
 
-Harbor does not convert providers' units into one number. Each provider shows its own readings in native units, with window, reset time, freshness, and a reported, estimated, or unknown label. For a quick glance each provider also gets a plain-language level: plenty, limited, low, exhausted, or unknown. A level is derived per provider from its own signals and never compared across providers.
+Harbor does not convert providers' units into one number. Each provider shows its own windows (5-hour and weekly, and per-model limits when the CLI reports them), each labeled reported or estimated, with a reset time when known. Routing derives a plain level (plenty, limited, low, exhausted) per model from its own windows and never compares percentages across providers directly. The Usage tab shows per-window percentages; the levels are used by the router, not displayed.
 
-Cross-provider comparison happens in routing, which asks whether each provider can support a given task under its own limits. The Usage area shows levels first and the native readings on expansion.
+### API spending policy
 
-### Default API spending policy
+Not built. The intent stands: API use off by default, no key needed to start, ask before use once a key exists, hard per-task and per-period limits if the user sets them. Nothing in the app can currently spend money; everything runs on the CLIs' subscriptions.
 
-API use is off by default and no key is needed to start. There is no onboarding step for it. API fallback is configured under Settings when the user adds a key.
+## Superseded: a main agent that never performs the task itself
 
-- Once a key is added, the default mode is **ask before use**. Each approval states the reason and the estimated cost range, if known.
-- **Allowed within limits** is available only after the user sets a per-task and a per-period limit. Harbor suggests no dollar amounts; the user chooses them.
-- A limit is enforced as a hard stop. Estimates that can't be bounded fall back to asking.
-- Spending is shown in the Usage area, and the user can disable fallback at any time.
-
-For the routing setting, see [Background routing](background-routing.md#api-fallback).
+The original design had one "main agent per project" that "only delegates, monitors and reports", never writes code, and delegates every substantive request, including to a planner for estimation. That model was replaced. The repository records no detailed rationale beyond the lead-rework notes in `BACKLOG.md`. The practical difference is that a coordinator-only model puts a delegate-and-wait cycle in front of every request, however small, and Harbor now avoids that. The replacement is the concierge plus lead model above. The lead may and usually does read, edit, run commands and test directly. "One logical lead per project" survives; "every substantive user request is delegated" and "the main agent does not investigate, design, implement, test, review or integrate" do not. Integration is the one thing the lead does not do itself: Harbor's integrator merges branches in code, and the lead is denied merging.

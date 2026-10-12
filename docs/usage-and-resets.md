@@ -1,86 +1,66 @@
 # Usage accounting and reset-aware execution
 
+Status: implemented in `src/main/usage.ts` and `src/main/codexLimits.ts`, used by `router.ts`. It is deliberately modest. This page describes what is counted, what is only an estimate, what the provider reports, and what is not built. It must never be read as a statement of your provider quota.
+
 ## Goal
 
-Keep authorized project work progressing by assigning suitable CLIs, models, and effort automatically and making effective use of available subscription allowance until it resets.
+Keep authorized work progressing by routing each run to a CLI and model whose allowance can bear it, at a sensible effort, without letting two projects or two conversations each assume the same allowance is free. The ledger is application-wide because the subscriptions are shared.
 
-Track the whole application, not just individual agents. Every project main agent draws on a shared resource view when its team uses the same account or subscription.
+## Assignment
 
-## Automatic assignment
+CLI, model and effort are chosen per run by the router (see [Background routing](background-routing.md)); nothing is configured per agent. The router reads this ledger for each candidate model: how full each window is, whether a rate limit hit that model recently, and how the usage is trending. Harbor records the requested CLI, model and effort of every run with its reason on the message, and the effective values on the agent.
 
-For each subagent assignment, select the CLI, model, and effort together. Consider responsibility, specification, complexity, native extensions, model availability, estimated consumption, remaining allowance, and time until reset.
+## What the ledger records
 
-Planning can justify a different model and effort from implementation. An implementer follows its specification and delegates unresolved design questions through the main agent; this does not require a universally minimal effort setting. All subagents remain able to converse normally.
+Each CLI run (concierge, lead turn, helper run, retry, follow-up) writes one usage event: CLI, model, project, agent, conversation, start time, duration, whether it succeeded, whether it was rate limited, and, when the CLI reported them, input and output tokens, a cost in dollars (Claude reports it; Codex reports tokens only), and the account limits the run printed. Events older than 8 days are folded into archive totals so lifetime figures survive pruning. Integration and rollback runs use no CLI and record nothing. Gemini has no adapter, so it records nothing and has no window.
 
-Users can constrain selection in settings, but ordinary assignments require no manual choices. Record requested settings, confirmed effective settings, selection reasons, and any adapter limitations. A provider change must preserve required capabilities and task context.
+Not tracked: planned or reserved consumption, usage outside Harbor, per-task attribution beyond the stored project, agent and conversation ids, tool activity as a separate unit. Spawn failures (the CLI could not even start) are, in the code I read, still recorded as runs; excluding them is planned.
 
-## Shared usage ledger
+## Three kinds of reading
 
-Record usage by account or subscription, provider, model where known, allowance window, project, task, agent, assignment revision, and session. Include timestamps and source quality.
+| Kind | Where it comes from | How it is used |
+| --- | --- | --- |
+| Reported | The provider's own numbers. Claude: the `rate_limit_event` its stream prints during a Harbor run (five-hour and seven-day account windows, and per-model windows such as Opus or Fable). Codex: the newest of the five latest session logs under `~/.codex/sessions`, whose `rate_limits` give a primary (five-hour) and secondary (weekly) window. Harbor never opens Codex's auth files. | Wins over the estimate. Used with its reset time. A reported window whose reset time has passed is dropped as stale. |
+| Estimated | Harbor's own count of the runs it started in a rolling window, divided by an assumed budget: 40 runs per five hours and 300 per seven days per CLI. Every run is one unit regardless of size. | Used when no reported window exists, labeled "estimated from Harbor runs only". Counts half as much as a reported reading in routing, and pace is not applied to it. |
+| Unknown | Nothing is available (for example Gemini). | No window is shown. A missing reading never means unlimited or empty. |
 
-Track all observable activity: coordination, planning, implementation, conversation, review, tests, integration, retries, and handoffs. Record tokens, requests, cost, duration, or provider quota units only where available. Tool activity can contribute to consumption but must not be counted as an extra billable unit without evidence.
+Claude's windows can be stale: they are only learned when Harbor itself runs Claude, and they stay until their reset time. The per-model names (`seven_day_<model>`) are inferred from a naming pattern, not verified for every plan. When a window resets, estimated usage counts only the runs after the reset the CLI reported, so a window that already rolled over does not keep locking the CLI out.
 
-Keep these values separate:
+Both windows are shown separately, with the provider's unit (a percentage) and a reset time when one is known. Harbor does not add unlike units into one figure, and never compares a percentage from one provider with another's.
 
-- Planned consumption: an estimate for queued work.
-- Reserved consumption: headroom provisionally allocated to active work.
-- Observed consumption: measured activity from execution.
-- Provider-reported allowance: authoritative snapshots where supported.
-- Estimated external consumption: inferred account use outside Harbor, where possible.
+## Levels and pace
 
-Reconcile reservations when work completes, fails, or stops. Do not double-count an execution event and the provider snapshot that already includes it. Preserve history across restarts and resets. Mark missing information unknown rather than fabricating an exact count.
+For routing, each model's windows (account-wide five-hour and weekly, plus any per-model window that applies to it) become a level: plenty below 50% used, limited from 50%, low from 80%, exhausted at 100%. The worst window decides. On provider-reported windows, once at least 10% of the window has elapsed, Harbor projects where usage would land at reset (used percent divided by elapsed share): a projection of 100% or more raises the level one notch, and a projection under 70% lowers "limited" to "plenty". Estimated windows get no pace adjustment because their start is Harbor's first run, not the provider's window start. The projection is shown as `projectedPct` on a window.
 
-Shared account snapshots may include use outside Harbor without identifying its source. Show any attribution gap rather than assigning all account usage to app agents.
+A rate limit reported by a CLI in a run holds that model out for 30 minutes (judged per model, not for the whole CLI), and the reset time is unknown until the CLI reports one. The adapters' rate-limit pattern also matches "overloaded", so a provider overload currently holds the model out for 30 minutes like a quota limit (treating overload separately is planned). A sign-in failure removes the CLI from routing until the next refresh.
 
-## Reset windows
+## What the user sees
 
-Track each provider's window separately, including rolling windows and concurrent short-term, weekly, or model-specific limits when exposed. A reset in one window may leave another limit exhausted.
+The Usage tab lists each provider's windows with percentage, label ("reported by claude as of 14:32" or "estimated from Harbor runs only"), and reset time or "Reset time unknown". The plain levels are used by routing and are not displayed. There is no per-project or per-agent breakdown screen and no cost view yet. Usage updates stream through a `usage` event after every run.
 
-Record the known reset time, its source, freshness, and uncertainty. Do not invent a countdown when reset timing is unavailable. Refresh allowance after a reset instead of assuming full capacity.
+## Pacing
 
-When a provider grants a new allowance window, retain the earlier window's accounting and start the new period's records. Rolling windows must retain their actual semantics rather than being treated as a single fixed reset.
+Pacing is limited to what routing does: a tightening window raises the penalty on that model, a low window lowers effort or steers away (per the low-allowance policy), a reserve skips a model entirely, and an exhausted one is skipped until it resets. Harbor does not queue work to land after a reset, estimate a task's cost in advance, or generate work to use up allowance. Work that cannot run now fails with the reason; the user sends it again. It does not resume by itself after a reset, and it cannot run while the computer or Harbor is off.
 
-## Pacing useful work
-
-Use the authorized backlog and planning estimates to decide which work can proceed now, which should use another eligible connection, and which must wait.
-
-Avoid exhausting capacity early through unnecessary high effort or excessive concurrency. Conversely, use expiring allowance effectively for useful queued work when doing so fits the task and policy. Reassess estimates from observed results instead of relying on the initial plan indefinitely.
-
-“Max it out before resetting” means obtaining useful work from the existing allowance before consuming an optional reset. It does not mean creating filler tasks, repeating checks without cause, or intentionally triggering failed requests. A small unusable remainder need not be forced to exactly zero.
-
-Configured reserves remain explicit. Defaults should support effective use of allowance; a reserve is not a reason to silently abandon authorized work. If a user-set reserve prevents progress, explain the choice rather than silently bypassing it.
-
-When resources are insufficient, checkpoint active work, preserve reports, and queue dependent assignments. Eligible alternatives can continue under policy. Resume queued authorized work after a confirmed scheduled reset when the app is running; respect explicit pauses and cancellations. Do not promise background execution while the computer or app is unavailable.
+Not built from the earlier design: planned and reserved consumption, estimating work before it runs, an unknown-usage policy, "defer" and "ask first" low-allowance behaviors, and attribution of account usage outside Harbor.
 
 ## Optional free resets
 
-Some integrations may expose a reset entitlement. This is an optional adapter capability, not an assumed feature of every subscription. Distinguish a scheduled automatic refresh from consuming a discretionary reset entitlement.
+Some provider might one day expose a discretionary reset entitlement. **None does today**: the ledger's entitlement source defaults to "none", so `freeResetAvailable` is never set and the feature is dormant. The code path exists and its rules are firm:
 
-Before offering a free reset:
+- It is only ever proposed when an entitlement is confirmed from a supported source, the model's level is low or exhausted, tasks are waiting, the user has not already answered for the current five-hour window, and the setting is not "never".
+- The proposal is a permission request, never automatic. It states the estimated usage (labeled Harbor-observed), the number of waiting tasks, the next scheduled refresh, and that the entitlement count is unknown. The user's yes or no is stored. A yes applies to that one reset.
+- If Harbor has no supported way to perform the reset it reports "manual" and leaves the user to use the provider's own interface. Harbor does not retry.
+- Declining is remembered for the window, so it does not re-ask repeatedly.
 
-1. Confirm the entitlement exists, is available to this account, and is actually free using a supported source.
-2. Establish which allowance it restores and whether other limits will still block work.
-3. Use the current allowance effectively for useful authorized work first.
-4. Compare the reset with waiting for the scheduled refresh or using another eligible CLI.
-5. Check that the remaining backlog can benefit from the restored capacity.
-6. Ask the user before consuming the entitlement.
+Do not describe this as a verified or free reset: no entitlement source has been verified for any provider. The README and this page therefore make no claim that a free reset exists.
 
-The approval names the affected account and window, remaining usable allowance, entitlement count if known, expected restoration, next scheduled refresh, and the useful work it would unblock. An entitlement count or effect that cannot be confirmed is labeled unknown; do not market an uncertain action as a verified free reset.
+## Acceptance criteria (status)
 
-Permission applies to the stated reset, not unlimited future resets. Declining or deferring does not imply approval later. Keep working within available resources or wait according to policy without repeated unchanged prompts.
-
-After approval, use a supported reset action if available. If the action is only possible in the provider's own interface, guide the user to it and verify refreshed allowance afterward. Record the approval, outcome, updated entitlement, and usage snapshot. An inconclusive result must be checked before retrying to avoid consuming a second entitlement.
-
-## Acceptance criteria
-
-- CLI, model, and effort are assigned automatically for every subagent.
-- General conversation and coordination consumption are included where observable.
-- Shared subscriptions cannot be independently overallocated by different projects.
-- Reported, estimated, reserved, and unknown usage remain distinguishable.
-- Reset windows retain their provider-specific semantics.
-- The scheduler favors useful progress through the current allowance period.
-- Existing allowance is used effectively before a discretionary free reset is proposed.
-- No discretionary reset is consumed without explicit permission.
-- A scheduled refresh can unblock queued work without erasing history or resuming cancelled tasks.
-
-Design only. Provider reporting, model controls, and reset capabilities require verification during implementation.
+- CLI, model and effort are assigned automatically for every run. Met.
+- Conversation, coordination and helper runs are counted where observable. Met for runs; spawn failures should be excluded and are not yet.
+- Shared subscriptions are not independently overallocated by different projects: the ledger and routing are application-wide. Met for routing; concurrency limits are per project.
+- Reported, estimated and unknown usage are distinguishable. Met in the engine and labels; per-model labels depend on what the CLI reports.
+- Reset windows keep provider semantics (five-hour, weekly, per-model). Met where reported.
+- A discretionary reset is never consumed without explicit permission. Met by construction (and dormant).
+- Scheduled refresh unblocking queued work automatically. Not met.

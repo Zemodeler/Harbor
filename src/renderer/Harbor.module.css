@@ -557,3 +557,19 @@
 .mdTable [data-align=center] { text-align: center; }
 .mdTable [data-align=right] { text-align: right; }
 .mdTable code { overflow-wrap: anywhere; }
+
+/* hq*: additions for list windowing, peer messages, question cards and clipped output (hardening pass). */
+.hqRow { display: block; }
+.hqEarlier { display: block; margin: 0 auto 24px; }
+.hqLoadError { display: grid; gap: 10px; justify-items: start; padding: 16px 0; color: var(--error); }
+.hqShowAll { margin: 6px 0 10px; font-size: 12px; }
+.hqPeer { border-left: 3px solid var(--accent); padding-left: 14px; font-size: 14px; color: var(--muted); background: color-mix(in srgb, var(--accent) 6%, transparent); border-radius: 0 8px 8px 0; padding-top: 8px; padding-bottom: 2px; }
+.hqPeer .byline strong { color: var(--accent); }
+.hqQuote { margin: 0 0 14px; padding: 2px 0 2px 14px; border-left: 3px solid var(--line); color: var(--muted); }
+.hqQuote p { margin-bottom: 8px; }
+.hqImageItem { display: inline-flex; align-items: center; gap: 8px; }
+.hqImageItem img { max-width: 160px; max-height: 120px; border-radius: 6px; border: 1px solid var(--line); object-fit: cover; }
+.hqBannerActions { display: inline-flex; gap: 8px; }
+.hqQuestions { display: grid; gap: 10px; padding: 0 24px 12px; }
+.hqQuestion { border: 1px solid var(--accent); border-radius: 12px; padding: 14px 16px; background: var(--surface); }
+.hqQuestionTitle { font-size: 14px; margin: 0 0 6px; }

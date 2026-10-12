@@ -117,6 +117,7 @@ describe('Mode picker', () => {
   it('reflects the conversation mode, shows the Auto warning in the header and clears it again', async () => {
     await ready();
     await userEvent.click(screen.getByRole('radio', { name: 'Auto' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Enable Auto mode' }));   // Auto asks for confirmation first
     expect(await screen.findByText(/Auto mode · no permission prompts/)).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Auto' })).toBeChecked();
     await userEvent.click(screen.getByRole('radio', { name: 'Default' }));

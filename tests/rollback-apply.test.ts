@@ -56,7 +56,7 @@ async function setup(plan: Task[]) {
   const runner: Runner = (exe, args, opts) => { if (exe === 'git') calls.push(args); return runProcess(exe, args, opts); };
   const adapter = new FakeAdapter('claude', script);
   const cli: ResolvedCli = { id: 'claude', name: 'claude', installed: true, signedIn: true, authState: 'signedIn', models: ['default'], path: '/fake/claude' };
-  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 4, git: new Git(runner) });
+  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, autoApproveChecks: true, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 4, git: new Git(runner) });
   const project = (await svc.addProject(repo))!;
   const [conv] = await svc.listConversations(project.id);
   await svc.send(conv!.id, 'do the work');
@@ -72,7 +72,10 @@ async function setup(plan: Task[]) {
 /** No history rewrite, no force, no push: none of these may appear in any git call Harbor made for a rollback. */
 function expectNoDestructiveGit(calls: string[][]) {
   const banned = ['push', 'reset', 'clean', '--force', '-f', '-D', '--hard', 'rebase', 'filter-branch'];
-  for (const c of calls) expect(c.filter((x) => banned.includes(x)), c.join(' ')).toEqual([]);
+  // Worktree retention removes the folder of landed work (never its branch) once an integration is applied: `worktree remove --force <path>`
+  // is that cleanup, and only for folders under Harbor's own worktrees root.
+  const retention = (c: string[]) => c[0] === 'worktree' && c[1] === 'remove' && c.length === 4 && c[2] === '--force' && /[\\/]wt[\\/]/.test(c[3]!);
+  for (const c of calls.filter((c) => !retention(c))) expect(c.filter((x) => banned.includes(x)), c.join(' ')).toEqual([]);
   // The user's branch moves only by `merge --ff-only` or a compare-and-swap update-ref (old value given).
   for (const c of calls.filter((c) => c.includes('update-ref'))) expect(c).toHaveLength(4);
   for (const c of calls.filter((c) => c[0] === 'merge')) expect(c).toContain('--ff-only');
