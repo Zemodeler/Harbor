@@ -1,14 +1,33 @@
 import { join } from 'node:path';
 import { statSync } from 'node:fs';
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, shell, Tray } from 'electron';
 import { registerIpc, type IpcHost } from './ipc';
 import { readCodexLimits } from './codexLimits';
+import { createLogger } from './logger';
 import { createHarborService } from './service';
 import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } from './tray';
 import { appDocument, hardenContents } from './windowSecurity';
+import { autoUpdater } from 'electron-updater';
+import { createUpdater } from './updater';
 
 let win: BrowserWindow | undefined;
 let quitting = false;
+
+const dataDir = join(app.getPath('appData'), 'Harbor');
+const logger = createLogger(join(dataDir, 'logs'));
+// A stray error in one run should not take every running agent down with the window: log it and carry on.
+// A burst means state is likely broken, so stop instead of looping.
+const recentFaults: number[] = [];
+function fault(kind: string, error: unknown): void {
+  logger.error(kind, error);
+  const now = Date.now();
+  recentFaults.push(now);
+  while (recentFaults.length && now - recentFaults[0]! > 10_000) recentFaults.shift();
+  if (recentFaults.length >= 10) { logger.error('Too many unhandled errors in 10 seconds; exiting.'); app.exit(1); }
+}
+process.on('uncaughtException', (error) => fault('uncaughtException', error));
+process.on('unhandledRejection', (reason) => fault('unhandledRejection', reason));
+logger.info(`Harbor ${app.getVersion()} starting (${app.isPackaged ? 'packaged' : 'dev'}, ${process.platform})`);
 
 // A hidden-to-tray instance keeps running old code after a repackage; launching the exe again would only focus it.
 function builtCodeMtime(): number {
@@ -66,7 +85,8 @@ if (startupAction === 'start') app.on('second-instance', () => {
 if (startupAction === 'start') app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
   const service = createHarborService({
-    dataDir: join(app.getPath('appData'), 'Harbor'),
+    dataDir,
+    appVersion: app.getVersion(),
     openFolder: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
     // Codex logs its real 5h/weekly limits locally. Claude's come from the rate_limit_event in its own stream
     // during Harbor runs (see usage.ts), so they appear after the first Claude run and are estimates before that.
@@ -139,14 +159,34 @@ if (startupAction === 'start') app.whenReady().then(() => {
     if (win.isMinimized()) win.restore();
     if (!win.isFocused()) { win.show(); win.flashFrame(true); win.once('focus', () => win?.flashFrame(false)); }
   });
-  app.on('before-quit', () => {
+  let shutdownDone = false;
+  app.on('before-quit', (event) => {
+    if (shutdownDone) return;
+    // Quitting stops every run; ask first when something is still working (its work so far stays in the worktrees and can be resumed).
+    const active = service.activeRuns();
+    if (active > 0) {
+      const options = { type: 'question' as const, buttons: ['Quit anyway', 'Cancel'], defaultId: 1, cancelId: 1, message: `${active} run${active === 1 ? ' is' : 's are'} active; quit anyway?`, detail: 'Running agents are stopped. Their work so far stays in their worktrees and can be resumed.' };
+      const answer = win ? dialog.showMessageBoxSync(win, options) : dialog.showMessageBoxSync(options);
+      if (answer !== 0) { event.preventDefault(); return; }
+    }
     quitting = true;
-    service.shutdown();
+    logger.info('Harbor quitting');
+    // The runs' process trees are killed and state is saved first; the quit then continues.
+    event.preventDefault();
     tray?.destroy();
     tray = undefined;
+    void service.shutdown().catch((error) => logger.error('Shutdown failed', error)).finally(() => { shutdownDone = true; app.quit(); });
   });
+  // Timers can stall while the machine sleeps: permission requests are re-checked against their wall-clock deadlines on wake.
+  powerMonitor.on('resume', () => service.onResume());
   createWindow(hideOnClose);
   syncTray();
+  try { createUpdater({
+    autoUpdater, isPackaged: app.isPackaged, env: process.env, log: logger,
+    isEnabled: () => (service.store.getSettings() as { autoUpdate?: boolean }).autoUpdate,
+    isBusy: () => service.store.allAgentRecords().some(a => a.state === 'working' || a.state === 'queued'),
+    ask: async (message, buttons) => (await dialog.showMessageBox(win ?? undefined as never, { type: 'question', message, buttons, defaultId: 0, cancelId: 1 })).response
+  }); } catch (error) { logger.error('Updater failed to start', error); }
   app.on('activate', openWindow);
 });
 

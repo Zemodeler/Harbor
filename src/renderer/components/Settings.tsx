@@ -4,17 +4,23 @@ import type { AppearanceState } from '../hooks/useAppearance';
 import { layouts, palettes, paletteTokens } from '../appearance';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { WorkspaceSettings } from './WorkspaceSettings';
+import { RoutingFields, RoutingSettings } from './RoutingSettings';
+import { UsageWindows } from './UsageWindows';
+import { ToolRules } from './ToolRules';
+import { canExportDiagnostics, Diagnostics } from './Diagnostics';
 import s from '../Harbor.module.css';
 
 export function Settings({ state, appearanceState, workspace }: { state: HarborState; appearanceState: AppearanceState; workspace: WorkspaceState }) {
   const [tab, setTab] = useState('Connections');
   const { appearance, scheme, updateAppearance, saveError } = appearanceState;
   const [pending, setPending] = useState(false);
+  const tabs = ['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage', 'Project', ...(canExportDiagnostics(state.api) ? ['Diagnostics'] : [])];
+  const project = state.projects.find(p => p.id === state.projectId);
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   return <section className={s.settings} aria-label="Settings">
-    <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
-    <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
-    <div className={s.tabs} role="tablist" aria-label="Settings sections">{['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage'].map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
+    <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : tab === 'Project' ? 'Settings for this project.' : tab === 'Diagnostics' ? 'Help us help you.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
+    <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : tab === 'Project' ? 'Override routing for one project and manage the tools it always allows.' : tab === 'Diagnostics' ? 'Export a redacted bundle for support.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
+    <div className={s.tabs} role="tablist" aria-label="Settings sections">{tabs.map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
     <div role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
       {tab === 'Workspace' ? <WorkspaceSettings state={state} workspace={workspace}/> : tab === 'Appearance' ? <>
         <fieldset className={s.appearanceGroup}><legend>Workspace mode</legend><p className={s.muted} id="layout-help">Three ways to work. Switching keeps your conversations, drafts, and running agents.</p>
@@ -53,13 +59,13 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
         {state.settings.routing === 'manual' ? <p className={s.muted}>Use the connection toggles to limit eligible tools. Selecting a tool per conversation is not available yet.</p> : null}
         <label className={s.field}>Optional free resets<select disabled={pending} value={state.settings.allowFreeReset} onChange={e => void action(() => state.updateSettings({ allowFreeReset: e.target.value as 'ask' | 'never' }))}><option value="ask">Ask every time</option><option value="never">Never use</option></select></label>
         <p className={s.muted}>A discretionary reset always requires your explicit approval.</p>
-      </> : <>
-        <h3>Subscription windows</h3><p className={s.muted}>Each window belongs to its provider. Missing readings mean usage is unknown.</p>
-        {!state.usage.length ? <p>Usage is unavailable. No allowance estimate is assumed.</p> : state.usage.map((w, i) => <div className={s.connection} key={`${w.cli}-${w.label}-${i}`}>
-          <div className={s.connectionHeading}><h3>{w.cli}</h3><span>{Number.isFinite(w.usedPct) ? `${Math.round(w.usedPct)}% used` : 'Usage unknown'}</span></div><p>{w.label}</p>
-          {Number.isFinite(w.usedPct) ? <progress aria-label={`${w.cli} ${w.label} usage`} max={100} value={Math.max(0, Math.min(100, w.usedPct))}/> : null}
-          <small>{w.resetsAt ? `Resets ${new Date(w.resetsAt).toLocaleString()}` : 'Reset time unknown'}{w.freeResetAvailable ? ' · Optional reset available (approval required)' : ''}</small>
-        </div>)}
+        <RoutingSettings state={state}/>
+      </> : tab === 'Project' ? (project ? <>
+        <h3>{project.name}</h3><p className={s.muted}>Fields left on “Inherit global” follow Settings → Routing.</p>
+        <RoutingFields key={project.id} state={state} projectId={project.id}/>
+        <ToolRules api={state.api} projectId={project.id}/>
+      </> : <p>Open a project to change its settings.</p>) : tab === 'Diagnostics' ? <Diagnostics api={state.api}/> : <>
+        <UsageWindows windows={state.usage} clis={state.clis}/>
       </>}
     </div>
   </section>;

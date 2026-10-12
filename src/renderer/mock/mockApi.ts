@@ -1,4 +1,5 @@
-import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, Settings, ToolRule } from '../../shared/api';
+import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, Settings, ToolRule } from '../../shared/api';
+import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
@@ -22,9 +23,16 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
   // Like Harbor: requests live in memory, are listed until answered, expired (tool) or withdrawn (conflict), and have no resolution event.
   const permissions = new Map<string, { resolve: (allow: boolean, always: boolean) => void; timer?: ReturnType<typeof setTimeout> }>();
   const pendingPermissions = new Map<string, PendingPermission>();
-  const toolRules = new Map<string, ToolRule[]>();
+  // Demo rules live on the Harbor project, so the Storefront project (used by the permission samples) starts with none.
+  const toolRules = new Map<string, ToolRule[]>([['harbor', [{ id: 'rule-npm-test', tool: 'Bash', prefix: 'npm test', created: Date.now() - 172800000 }, { id: 'rule-read', tool: 'Read', created: Date.now() - 86400000 }]]]);
   const questions = new Map<string, string>();
   let settings: Settings = { routing: 'auto', cliOverrides: { codex: { enabled: true }, claude: { enabled: true }, gemini: { enabled: false } }, allowFreeReset: 'ask' };
+  const demoPreview = (agent: Agent, target?: string): RollbackPreview => {
+    const base = { agentId: agent.id, target: target || 'main', targetHead: demoCommits[1].hash, supported: true, notes: ['Rolling back does not undo external effects such as pushed commits, sent messages or deployed builds.', 'Demo only: this preview is sample data.'] };
+    if (agent.id === 'stopped-helper') return { ...base, supported: false, merges: [], clean: null, blockers: [`“${agent.title}” has not reached ${base.target} through merge commits Harbor can reverse.`] };
+    if (agent.id === 'integrate-1') return { ...base, merges: [{ commit: demoCommits[1].hash, agentId: 'implement', integrationId: agent.id }], files: demoChanges, clean: false, conflicts: ['src/account.tsx'], laterCommits: [{ hash: demoCommits[0].hash, subject: demoCommits[0].subject, files: ['src/account.tsx'], agentTitle: 'Implement account page' }], dependents: [{ agentId: 'verify', title: 'Verify account flow', state: 'done', reason: 'spec' }, { agentId: 'queued-1', title: 'Index product titles', state: 'queued', reason: 'overlap' }] };
+    return { ...base, merges: [{ commit: demoCommits[1].hash, agentId: agent.id }], files: demoChanges, clean: true, laterCommits: [], dependents: [{ agentId: 'verify', title: 'Verify account flow', state: 'done', reason: 'dependsOn' }], ...(data.agents.some(a => a.rollback?.taskId === agent.id && ['queued', 'working'].includes(a.state)) ? { blockers: ['A rollback of this task is already running.'] } : {}) };
+  };
   let requested = false;
   const copy = <T,>(v: T): T => structuredClone(v);
   const emit = (e: HarborEvent) => {
@@ -221,26 +229,67 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       const affected = data.agents.filter(x => x.id === agentId || (a.role === 'main' && x.parentId === agentId));
       affected.forEach(x => { const run = runs.get(x.id); if (run) run.cancelled = true; x.state = 'stopped'; x.summary = 'Stopped by you. Conversation history retained.'; updateAgent(x); });
     },
-    // Queue controls exist in the contract; this demo has no queue UI, so they only validate the agent.
+    // Queue controls: pause only holds back queued work, higher priority starts first.
     async setAgentPriority(agentId, priority) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); x.priority = priority; updateAgent(x); },
     async pauseAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); if (x.state === 'queued') { x.paused = true; updateAgent(x); } },
     async resumeAgent(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x) throw new Error('This agent is no longer available.'); x.paused = false; updateAgent(x); },
-    async resumeAgentSession(agentId) { const x = data.agents.find(a => a.id === agentId); if (!x || x.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.'); x.state = 'working'; updateAgent(x); },
-    // The browser demo must not pretend to apply changes to a real Git checkout.
-    async integrateBranches() { throw new Error('Branch integration is available in the desktop app.'); },
-    async applyIntegration() { throw new Error('Applying integration is available in the desktop app.'); },
-    async getChanges(agentId) {
-      if (!data.agents.some(a => a.id === agentId)) throw new Error('This agent is no longer available.');
-      return copy(agentId === 'implement' ? demoChanges : []);
+    async resumeAgentSession(agentId) {
+      const x = data.agents.find(a => a.id === agentId);
+      if (!x || x.state !== 'stopped') throw new Error('Only a stopped agent can be resumed.');
+      if (x.id === 'stopped-helper') throw new Error('This helper has no saved session to continue.');   // demo: shows the error path
+      x.state = 'working'; updateAgent(x);
     },
-    async previewRollback() { return { supported: false, notes: ['Task rollback is available in the desktop app.'] }; },
-    async rollbackTask() { throw new Error('Task rollback is available in the desktop app.'); },
+    // Integration and rollback only touch sample data: nothing here runs git.
+    async integrateBranches(projectId, agentIds, target) {
+      const sources = agentIds.map(sid => data.agents.find(a => a.id === sid && a.projectId === projectId));
+      if (!sources.length || sources.some(a => !a?.worktree)) throw new Error('Pick helpers that have a branch.');
+      const unapproved = sources.find(a => !data.agents.some(r => r.role === 'reviewer' && r.result?.verdict === 'approve' && !r.outdated && r.conversationId === a!.conversationId));
+      if (unapproved) throw new Error(`“${unapproved.title}” has no current reviewer approval.`);
+      const agent: Agent = { id: id(), projectId, parentId: `main-${projectId}`, conversationId: sources[0]!.conversationId, role: 'other', title: `Integrate ${sources.length} ${sources.length === 1 ? 'branch' : 'branches'}`, state: 'queued', cli: 'codex', model: 'default', effort: 'medium',
+        integration: { target: target || 'main', base: demoCommits[1].hash, sources: sources.map(a => ({ agentId: a!.id, branch: demoBranch, commit: demoCommits[0].hash, state: 'pending' as const })) } };
+      data.agents.push(agent); updateAgent(copy(agent));
+      void pause().then(() => { agent.state = 'done'; agent.summary = 'Merged; checks passed.'; agent.testedCommit = demoCommits[0].hash; agent.checks = [{ cmd: 'npm test', ok: true, exitCode: 0, durationMs: 18000 }]; Object.assign(agent.integration!, { branch: 'harbor/integrate-demo-0a1b2c', head: demoCommits[0].hash }); agent.integration!.sources.forEach(src => { src.state = 'merged'; }); updateAgent(copy(agent)); });
+      return copy(agent);
+    },
+    async applyIntegration(agentId) {
+      const a = data.agents.find(x => x.id === agentId);
+      const target = a?.integration ?? a?.rollback;
+      if (!a || !target) throw new Error('Only an integration or rollback can be applied.');
+      if (a.state !== 'done') throw new Error('Wait until it is done before applying.');
+      if (target.applied) throw new Error('This has already been applied.');
+      if (a.id === 'rollback-1') throw new Error('The project folder has uncommitted changes. Commit or stash them, then apply again.');   // demo: shows the error path
+      target.applied = true;
+      data.agents.filter(x => x.role === 'reviewer').forEach(x => { x.outdated = true; updateAgent(copy(x)); });
+      updateAgent(copy(a)); return copy(a);
+    },
+    async getChanges(agentId) {
+      const a = data.agents.find(x => x.id === agentId);
+      if (!a) throw new Error('This agent is no longer available.');
+      return copy(a.worktree || a.integration?.branch || a.integration?.head ? demoChanges : []);
+    },
+    async previewRollback(agentId, target) {
+      const a = data.agents.find(x => x.id === agentId);
+      if (!a) throw new Error('This agent is no longer available.');
+      await pause(); return copy(demoPreview(a, target));
+    },
+    async rollbackTask(agentId, target) {
+      const a = data.agents.find(x => x.id === agentId);
+      if (!a) throw new Error('This agent is no longer available.');
+      const preview = demoPreview(a, target);
+      if (preview.blockers?.length) throw new Error(`Refused: ${preview.blockers[0]}`);
+      const agent: Agent = { id: id(), projectId: a.projectId, parentId: `main-${a.projectId}`, conversationId: a.conversationId, role: 'other', title: `Roll back ${a.title}`, state: 'queued', cli: 'codex', model: 'default', effort: 'medium',
+        rollback: { taskId: a.id, target: preview.target, base: preview.targetHead, merges: (preview.merges ?? []).map(m => ({ ...m, state: 'pending' as const })) } };
+      data.agents.push(agent); updateAgent(copy(agent));
+      void pause().then(() => { agent.state = 'done'; agent.summary = 'Reverted the merges; checks passed.'; agent.checks = [{ cmd: 'npm test', ok: true, exitCode: 0, durationMs: 17000 }]; agent.testedCommit = demoCommits[0].hash; Object.assign(agent.rollback!, { branch: 'harbor/rollback-demo-5e6f7a', head: demoCommits[0].hash }); agent.rollback!.merges.forEach(m => { m.state = 'reverted'; m.revert = demoCommits[2].hash; }); updateAgent(copy(agent)); });
+      return copy(agent);
+    },
     async listToolRules(projectId) { return copy(toolRules.get(projectId) || []); },
     async removeToolRule(projectId, ruleId) { const rest = (toolRules.get(projectId) || []).filter(r => r.id !== ruleId); toolRules.set(projectId, rest); return copy(rest); },
     async listPendingPermissions() { return copy([...pendingPermissions.values()]); },
     async getUsage() { await pause(); return copy(data.windows); },
     async getSettings() { await pause(); return copy(settings); },
-    async setSettings(s) { settings = { ...settings, ...copy(s) }; return copy(settings); },
+    async setSettings(s) { settings = applySettingsPatch(settings, copy(s)); return copy(settings); },
+    async exportDiagnostics() { return ['Harbor diagnostics (demo)', `Generated: ${new Date().toISOString()}`, 'App version: demo', `CLIs: ${data.clis.map(c => `${c.id} ${c.installed ? (c.signedIn ? 'signed in' : 'signed out') : 'not installed'}`).join(', ')}`, `Projects: ${data.projects.length}, conversations: ${data.conversations.length}, agents: ${data.agents.length}`, 'No message text, prompts or credentials are included.'].join('\n'); },
     async answerPermission(requestId, allow, opts) {
       const request = pendingPermissions.get(requestId);
       const p = settle(requestId);

@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({
   store: undefined as Store | undefined,
   service: undefined as { setSettings(patch: Partial<Settings>): Promise<Settings> } | undefined,
   event: undefined as ((event: HarborEvent) => void) | undefined,
-  shutdown: vi.fn(), emptyIcon: false
+  shutdown: vi.fn(() => Promise.resolve()), emptyIcon: false
 }));
 
 class FakeWindow extends EventEmitter {
@@ -38,20 +38,21 @@ class FakeTray extends EventEmitter {
 const app = Object.assign(new EventEmitter(), {
   requestSingleInstanceLock: vi.fn(() => true),
   whenReady: () => Promise.resolve(), isPackaged: false,
-  getAppPath: () => '/harbor', getPath: () => '/data', setAppUserModelId: vi.fn(),
-  quit: vi.fn(() => { app.emit('before-quit'); })
+  getAppPath: () => '/harbor', getPath: () => '/data', getVersion: () => '0.0.0-test', exit: vi.fn(), setAppUserModelId: vi.fn(),
+  quit: vi.fn(() => { app.emit('before-quit', { preventDefault: vi.fn() }); })
 });
 
 vi.mock('electron', () => ({
-  app, BrowserWindow: FakeWindow, Tray: FakeTray, dialog: {}, shell: {}, Notification: {},
+  app, BrowserWindow: FakeWindow, Tray: FakeTray, dialog: { showMessageBoxSync: vi.fn(() => 0) }, shell: {}, Notification: {}, powerMonitor: { on: vi.fn() },
   Menu: { buildFromTemplate: (menu: FakeTray['menu']) => menu },
   nativeImage: { createFromPath: () => ({ isEmpty: () => state.emptyIcon }), createEmpty: () => 'empty-icon' }
 }));
 vi.mock('../src/main/ipc', () => ({ registerIpc: vi.fn() }));
+vi.mock('../src/main/logger', () => ({ createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn(), log: vi.fn(), file: '' }) }));
 vi.mock('../src/main/codexLimits', () => ({ readCodexLimits: vi.fn() }));
 vi.mock('../src/main/service', () => ({ createHarborService: () => {
   const service = {
-    store: state.store!, shutdown: state.shutdown,
+    store: state.store!, shutdown: state.shutdown, activeRuns: () => 0, onResume: vi.fn(),
     onEvent: (cb: (event: HarborEvent) => void) => { state.event = cb; },
     setSettings: async (patch: Partial<Settings>) => state.store!.setSettings(patch)
   };

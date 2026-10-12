@@ -217,7 +217,7 @@ describe('Pending permission requests', () => {
     expect(await screen.findByRole('dialog', { name: 'Quick actions' })).toBeInTheDocument();
     await userEvent.keyboard('{Escape}');
     push({ type: 'question', requestId: 'q', conversationId: 'account', prompt: 'Which theme?', options: ['Blue'] });
-    expect(await screen.findByRole('dialog', { name: /has a question/ })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: /has a question/ })).toBeInTheDocument();
     expect(cards()).toHaveLength(3);
   });
 });

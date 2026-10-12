@@ -21,3 +21,27 @@ describe('Mock execution lifecycle', () => {
     await expect(api.answerPermission(requestId, true)).rejects.toThrow('no longer pending');
   });
 });
+
+describe('Mock settings validate like Harbor', () => {
+  it('clamps numbers, rejects bad values with Harbor\'s messages and keeps nothing half-applied', async () => {
+    const api = createMockApi({ delay: 0 });
+    expect((await api.setSettings({ concurrencyLimit: 99, subscriptionReserve: -5 }))).toMatchObject({ concurrencyLimit: 8, subscriptionReserve: 0 });
+    await expect(api.setSettings({ effortPolicy: 'bogus' as never, concurrencyLimit: 2 })).rejects.toThrow('effortPolicy must be one of: adaptive, conserve, quality.');
+    await expect(api.setSettings({ concurrencyLimit: 'x' as never })).rejects.toThrow('concurrencyLimit must be a number.');
+    await expect(api.setSettings({ keepRunningInBackground: 'yes' as never })).rejects.toThrow('keepRunningInBackground must be a boolean.');
+    await expect(api.setSettings({ allowedModels: { codex: 'x' } as never })).rejects.toThrow('allowedModels.codex must be a list of model names.');
+    expect((await api.getSettings()).concurrencyLimit).toBe(8);
+  });
+  it('drops empty model lists, resets with undefined and clears a project with {}', async () => {
+    const api = createMockApi({ delay: 0 });
+    expect((await api.setSettings({ allowedModels: { codex: [], claude: [' opus '] }, rolePreferences: { reviewer: { cli: 'claude' } } }))).toMatchObject({ allowedModels: { claude: ['opus'] }, rolePreferences: { reviewer: { cli: 'claude' } } });
+    expect((await api.setSettings({ projectOverrides: { store: { effortPolicy: 'conserve' } } })).projectOverrides).toEqual({ store: { effortPolicy: 'conserve' } });
+    expect((await api.setSettings({ projectOverrides: { store: {} } })).projectOverrides).toBeUndefined();
+    expect('allowedModels' in (await api.setSettings({ allowedModels: undefined }))).toBe(false);
+  });
+  it('emits usage windows of both sources and offers diagnostics', async () => {
+    const api = createMockApi({ delay: 0 });
+    expect(new Set((await api.getUsage()).map(w => w.source))).toEqual(new Set(['estimated', 'reported']));
+    expect(await api.exportDiagnostics!()).toContain('No message text');
+  });
+});

@@ -19,6 +19,8 @@ const fakeCli = (id: string): ResolvedCli => ({ id, name: id, installed: true, s
 const isConcierge = (o: RunOptions) => !!o.systemPrompt?.includes('front desk');
 const isLead = (o: RunOptions) => !!o.systemPrompt?.includes('LEAD agent');
 const say = (text: string): Chunk[] => [{ kind: 'text', text }];
+// A turn that did something (a tool call) and then said something: a goal continuation that only talks counts as no progress.
+const work = (text: string): Chunk[] => [{ kind: 'tool', text: 'Read src/x.ts' }, { kind: 'text', text }];
 const escalate = (): Chunk[] => say(JSON.stringify({ escalate: { complexity: 'medium', needs: ['code'], ack: '' } }));
 const delegateLine = (t: unknown) => `HARBOR_DELEGATE: ${JSON.stringify(t)}`;
 const PNG = Buffer.from('iVBORw0KGgo=', 'base64').toString('base64');
@@ -56,8 +58,8 @@ describe('adapter flags', () => {
     const a = codexArgs({ ...base, permission: 'full', images: ['C:\\d\\a.png', 'C:\\d\\b.jpg'] });
     expect(a.filter((x) => x === '--image')).toHaveLength(2);
     expect(a).toContain('C:\\d\\a.png');
-    expect(a).toContain('sandbox_mode="danger-full-access"');
-    expect(a).toContain('approval_policy="never"');
+    expect(a).toContain('sandbox_mode=danger-full-access');
+    expect(a).toContain('approval_policy=never');
     expect(a[a.length - 1]).toBe('-');
     // each --image value is followed by a flag, never by the `-` prompt argument
     expect(a[a.indexOf('C:\\d\\b.jpg') + 1]).toBe('--json');
@@ -140,7 +142,7 @@ describe('conversation modes', () => {
   it('auto: lead and edit helpers run with full permission, reviewers stay read-only', async () => {
     const h = await harness({
       claude: script({
-        lead: (_p, _o, i) => say(i === 0 ? [delegateLine({ ref: 'a', title: 'build', role: 'implementer', access: 'edit', instructions: 'edit' }), delegateLine({ ref: 'b', title: 'check', role: 'reviewer', access: 'read', instructions: 'review' })].join('\n') : 'all done')
+        lead: (_p, _o, i) => say(i === 0 ? [delegateLine({ ref: 'a', title: 'build', role: 'implementer', access: 'edit', instructions: 'edit' }), delegateLine({ ref: 'b', title: 'check', role: 'reviewer', access: 'read', dependsOn: ['a'], instructions: 'review' })].join('\n') : 'all done')
       })
     }, ['claude']);
     await h.svc.setConversationMode(h.conv.id, 'auto');
@@ -160,7 +162,7 @@ describe('conversation modes', () => {
       })
     }, ['claude']);
     await h.svc.setConversationMode(h.conv.id, 'plan');
-    await h.svc.send(h.conv.id, 'plan the refactor');
+    await h.svc.send(h.conv.id, 'sketch an approach for making startup faster');
     await h.svc.whenIdle();
     const first = h.all().find((c) => isLead(c.opts))!;
     expect(first.opts.permission).toBe('read-only');
@@ -181,7 +183,7 @@ describe('conversation modes', () => {
   });
 
   it('goal: continues until HARBOR_GOAL_DONE and includes the goal in every lead prompt', async () => {
-    const h = await harness({ claude: script({ lead: (_p, _o, i) => say(i < 2 ? `step ${i}` : 'finished\nHARBOR_GOAL_DONE: {"summary":"goal met"}') }) }, ['claude']);
+    const h = await harness({ claude: script({ lead: (_p, _o, i) => (i < 2 ? work(`step ${i}`) : say('finished\nHARBOR_GOAL_DONE: {"summary":"goal met"}')) }) }, ['claude']);
     await h.svc.setConversationMode(h.conv.id, 'goal', 'make tests pass');
     await h.svc.send(h.conv.id, 'start');
     await h.svc.whenIdle();
@@ -195,7 +197,7 @@ describe('conversation modes', () => {
   });
 
   it('goal: stops at the cap of 8 automatic continuations, and when the lead asks', async () => {
-    const h = await harness({ claude: script({ lead: () => say('still going') }) }, ['claude']);
+    const h = await harness({ claude: script({ lead: () => work('still going') }) }, ['claude']);
     await h.svc.setConversationMode(h.conv.id, 'goal', 'never ends');
     await h.svc.send(h.conv.id, 'start');
     await h.svc.whenIdle();
@@ -223,7 +225,7 @@ describe('conversation modes', () => {
 describe('session activity and CLI pinning', () => {
   it('activity carries complexity and effort of the routed lead turn', async () => {
     const h = await harness({ claude: script({ concierge: () => say(JSON.stringify({ escalate: { complexity: 'high', needs: ['code'], ack: '' } })), lead: () => say('ok') }) }, ['claude']);
-    await h.svc.send(h.conv.id, 'refactor everything');
+    await h.svc.send(h.conv.id, 'make the whole thing much better, think it through');
     await h.svc.whenIdle();
     const a = (await h.svc.listConversations(h.project.id))[0]!.activity!;
     expect(a.complexity).toBe('high');
@@ -332,7 +334,7 @@ describe('goal loop and helpers', () => {
   it('pauses on a helper failure: the report resumes the lead once without the auto-continue loop, and a new message clears the pause', async () => {
     const h = await harness({
       claude: script({
-        lead: (_p, _o, i) => say(i === 0 ? delegateLine({ title: 'flaky', role: 'other', access: 'read', instructions: 'explode' }) : 'still going'),
+        lead: (_p, _o, i) => (i === 0 ? say(delegateLine({ title: 'flaky', role: 'other', access: 'read', instructions: 'explode' })) : work('still going')),
         helper: () => [{ kind: 'done', ok: false, error: 'boom' }]
       })
     }, ['claude']);

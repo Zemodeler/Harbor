@@ -29,7 +29,8 @@ describe('buildHandoff', () => {
       applied: []
     });
     expect(text).toContain('Use argon2, not bcrypt');
-    expect(text).toContain('do not ask the user again');
+    expect(text).toContain("the lead's notes of what the user said");
+    expect(text).toContain("the user's current message wins");
     expect(text).toContain('Add tests [implementer, failed] on harbor/add-tests: checks failed');
     expect(text).not.toContain('Fix login [implementer');
     expect(text).toContain('STALE');
@@ -58,7 +59,7 @@ describe('HARBOR_DECISION', () => {
 });
 
 describe('handoff in a fresh session', () => {
-  it('a recorded decision reaches a new conversation of the same project, and stale evidence is flagged', async () => {
+  it('a recorded decision reaches a lead whose session is lost (worded as notes, not orders) but not another conversation', async () => {
     const repo = tmp();
     const g = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' }).stdout.trim();
     g('init', '-q', '-b', 'main'); g('config', 'user.email', 't@t'); g('config', 'user.name', 't');
@@ -82,13 +83,24 @@ describe('handoff in a fresh session', () => {
     await svc.whenIdle();
     expect(svc.store.listCoordination(project.id).filter((c) => c.kind === 'decision').map((c) => c.text)).toEqual(['Passwords are hashed with argon2, never bcrypt.']);
 
-    // A brand-new conversation has no native session to resume: the lead is briefed from Harbor's record.
-    const second = await svc.newConversation(project.id);
-    await svc.send(second.id, 'now add a password reset');
+    // The stored decision records which conversation it was noted in.
+    expect(svc.store.listCoordination(project.id).find((c) => c.kind === 'decision')!.conversationId).toBe(first!.id);
+
+    // The session of that conversation is lost: the lead is briefed from Harbor's record, worded as the lead's own notes.
+    svc.store.clearSession(`lead:${first!.id}`);
+    await svc.send(first!.id, 'now add a password reset');
     await svc.whenIdle();
     const fresh = leadPrompts.at(-1)!;
     expect(fresh).toContain('Project handoff');
     expect(fresh).toContain('never bcrypt');
+    expect(fresh).toContain("the lead's notes of what the user said");
+    expect(fresh).toContain("the user's current message wins");
     expect(fresh).toContain('now add a password reset');
+
+    // A brand-new conversation is scoped to itself: another conversation's notes are not handed over as if they applied here.
+    const second = await svc.newConversation(project.id);
+    await svc.send(second.id, 'unrelated change to the footer');
+    await svc.whenIdle();
+    expect(leadPrompts.at(-1)!).not.toContain('never bcrypt');
   }, 60_000);
 });

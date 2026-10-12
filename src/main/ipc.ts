@@ -1,4 +1,5 @@
 import { EVENT_CHANNEL, INVOKE_METHODS, channel } from '../shared/ipc';
+import { validateInvoke } from './ipcValidate';
 import type { HarborService } from './service';
 import { isAppDocumentUrl, isTrustedInvoke, type AppDocument, type ContentsRef, type InvokeEventRef } from './windowSecurity';
 
@@ -17,6 +18,7 @@ export function registerIpc(service: HarborService, host: IpcHost, target: () =>
   for (const m of INVOKE_METHODS) {
     host.handle(channel(m), (event, ...args: unknown[]) => {
       if (!isTrustedInvoke(event, target(), doc)) throw new Error(UNTRUSTED_SENDER);
+      validateInvoke(m, args);
       return (service[m] as (...a: unknown[]) => Promise<unknown>)(...args);
     });
   }

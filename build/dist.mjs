@@ -10,7 +10,11 @@ if (!existsSync(vite) || !existsSync(builder)) {
   console.error('Install the root app dependencies and build/ packaging dependencies before running dist.');
   process.exit(1);
 }
-for (const [script, args] of [[vite, ['build']], [builder, ['--win', '--x64', '--config', 'electron-builder.yml', '--publish', 'never']]]) {
+// Local default is never to publish; CI passes `--publish always` (signing variables stay cleared: the installer is unsigned).
+const pubIdx = process.argv.indexOf('--publish');
+const publish = pubIdx >= 0 ? process.argv[pubIdx + 1] : 'never';
+if (!['never', 'always', 'onTag', 'onTagOrDraft'].includes(publish ?? '')) { console.error('Invalid --publish value'); process.exit(1); }
+for (const [script, args] of [[vite, ['build']], [builder, ['--win', '--x64', '--config', 'electron-builder.yml', '--publish', publish]]]) {
   const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
   delete env.CSC_LINK;
   delete env.WIN_CSC_LINK;

@@ -1,106 +1,87 @@
-# Direct subagent collaboration
+# Collaboration between agents
+
+Status: implemented, in a different shape from the first design. The first design had sibling agents messaging each other directly and handing file ownership back and forth. That is **superseded**: helpers never message each other. Collaboration now rests on isolation (every edit helper has its own git worktree), a single coordinator (the lead), deterministic integration done by Harbor's own code, and short notes between leads of different conversations of the same project. See [Project agents](project-agents.md) for roles and [Architecture](architecture.md) for the flow.
 
 ## Goal
 
-Let sibling agents work as a coordinated team. They should communicate directly about shared files, dependencies, existing interfaces, findings, and handoffs, without requiring the main agent to relay every exchange.
+Let several agents work on one repository at the same time without overwriting each other and without a human relaying every detail, while keeping each agent's job narrow and every merge visible and reversible.
 
-Each agent retains one clear assignment. The main agent remains responsible for assignment, monitoring, and agent creation. Collaboration does not permit nested agents or unplanned scope expansion.
+## Who can tell whom what
 
-## Project communication
+| From | To | Channel |
+| --- | --- | --- |
+| You | Lead | The conversation composer. |
+| You | A helper | The helper's own conversation; recorded as a `direct` coordination entry, shown in the lead's conversation, delivered after the helper's current step, and passed to the lead as a note on its next turn. |
+| Lead | Helpers | `HARBOR_DELEGATE` instructions (including the specification, the files it owns, and what to report). A lead cannot interrupt a running helper; it can delegate a retry with the failure pasted in. |
+| Helper | Lead | Its final report, `HARBOR_RESULT`, `HARBOR_REQUEST_HELP` (the lead decides) and `HARBOR_ASK` (a question for you). |
+| Helper | Helper | **Nothing.** There is no helper-to-helper message, thread or directory of siblings. |
+| Lead | Another lead of the same project | One `HARBOR_PEER: {"to","text","urgent"}` line (details below). |
+| Harbor | Lead | Notices as turn context: ignored protocol lines, restart summaries, held reports. They are Harbor's own words, never your instruction. |
 
-Provide direct messages and small shared threads between agents in the same project. Agents can discover relevant siblings through an assignment directory showing role, scope, status, owned files, and dependencies.
-
-Messages use a common application channel across different CLIs. Native provider sessions remain distinct. The application delivers relevant peer messages through a supported adapter mechanism at a safe execution boundary and records delivery and acknowledgement. Sending a message does not itself transfer file ownership.
-
-Each message identifies its sender, recipients, assignment revisions, purpose, and relevant files, contracts, or output references. Support ordinary discussion alongside explicit requests, replies, agreements, blockers, and handoff events.
-
-Agents can ask one another questions, share available results, coordinate edit order, and clarify already specified behavior. New design decisions go to a planner through the main agent; new assignments and sibling creation always go through the main agent.
+Anything a helper needs from a sibling's work arrives through the lead: either the lead's instructions, or an upstream report passed in because the helper depends on it (`dependsOn`, `specFrom`).
 
 ## Working on shared files
 
-Before editing, an agent declares the affected files and intended change. The application checks active ownership and expected overlaps, then alerts relevant siblings when coordination is needed.
-
-Use these strategies:
-
-| Situation | Collaboration strategy |
+| Situation | Strategy |
 | --- | --- |
-| Independent files | Work in parallel, sharing interface updates when relevant. |
-| Same file in one workspace | One writer at a time, with an explicit handoff. Other agents can read or work elsewhere. |
-| Same file in isolated workspaces | Exchange intended changes and baseline revisions, then have an integrator combine outputs deliberately. |
-| Shared interface or schema | Use a versioned contract from the planner; notify consumers when a revision is proposed. |
-| Unresolved overlap | Pause only conflicting work and escalate ownership or planning decisions to the main agent. |
+| Independent files | Helpers run in parallel in separate worktrees. |
+| Same file, edit helpers | Each edits in its own worktree and branch, so there is no overwrite while working. The collision shows up at integration as a merge conflict, which the integrator records, aborts and reports; you or a new helper resolve it on the source branch. |
+| Several helpers need a shared interface | The lead puts the contract in each instruction, or has a planner write the specification first and passes it to both as `specFrom` / `dependsOn`. |
+| The project folder is not a git repository with commits | Helpers cannot get a worktree, so they edit the folder directly under whole-file ownership: Harbor's lock table grants a helper its declared files (or the whole project when it declared none) all-or-nothing, and a second helper wanting an overlapping file waits. When it waits, Harbor asks you whether to allow parallel editing anyway (a permission request of kind `conflict`). Locks are released only when the owner's process has ended, never by timeout. |
+| Edits outside a helper's declared files | Detected after the run from the branch diff; recorded as a `conflict` coordination entry, posted, and flagged in the report as needing coordination before integration. |
+| The lead and a helper on the same files | The lead is told not to edit files its helpers own while they run; it works in the project folder while helpers work in worktrees, so the collision is again a merge conflict later. |
 
-The initial design uses whole-file write ownership in a shared workspace. Different sections of the same file are not automatically safe for simultaneous edits. Coordination messages alone cannot prevent overwrites; the application must enforce ownership through supported workspace controls. If an adapter cannot enforce shared-workspace ownership, use isolated workspaces or serialize execution instead.
+The initial design's whole-file ownership in a shared workspace survives only for the no-git case. Worktrees replaced it for normal projects.
 
-Claims must cover the actual affected resources, including generated files or shared configuration. Unexpected edits outside a claim require coordination before continuing. Workspace isolation remains useful even when sibling agents communicate well.
+## Landing work: integration
 
-## Ownership handoff
+Integration is the deliberate combination of helper work, and it is code, not an agent.
 
-1. The requesting agent names the file, intended edit, and dependency.
-2. The current owner acknowledges and identifies a safe handoff point.
-3. The owner finishes or checkpoints its change and reports the exact baseline revision and relevant checks.
-4. The application confirms the writer has stopped and releases ownership.
-5. The next agent acknowledges the handoff, reads the current file, and acquires ownership before editing.
-6. The application records the transfer and updates affected dependencies.
+1. The lead asks for an integrator naming its sources (`HARBOR_DELEGATE {"role":"integrator","sources":[...],"target"?}`), or you start one through the API. It waits for the sources and the reviewers of those sources.
+2. **Gate.** For every source, before any git write: an existing `harbor/*` branch; a reviewer whose `testedCommit` is the branch's current head and whose verdict is approve and not outdated; no reviewer asking for changes on that head. Any failure refuses the whole integration with the reasons ("Refused: ...").
+3. **Merge.** Harbor pins each source's head, creates `harbor/integrate-<target>-<id>` from the target's head in its own worktree, and merges the pinned commits with `--no-ff` in dependency order. Sources already contained are skipped, so a re-run is safe. A conflict is recorded with its paths, the merge is aborted, and the run stops; earlier merges stay on the integration branch. If the target moved since the last run, the integration branch is rebuilt from the new head.
+4. **Checks** from `.harbor/checks.json` run on the combined result (if you approved that file). The integration is `done` only if everything merged and the checks passed.
+5. **Apply** is yours. It fast-forwards the target branch only if the integration is done, the project folder has no uncommitted changes, the target has not moved, and the target is not checked out in another worktree. Harbor never pushes, forces or resets. After applying, worktree folders of the landed work are eventually cleaned up; the branches stay.
 
-A queued message or timeout must not automatically grant ownership. If an agent crashes, stop or confirm its underlying execution state before releasing its claim. Do not let two agents believe they own the same shared file.
+If the lead merges a helper branch itself despite the rule, Harbor checks after the turn whether a helper branch became reachable from your branch and warns. It works for every CLI; it detects and does not prevent. Changes under `.harbor/` made by a helper are flagged at the helper's report and again at integration, because they change what Harbor runs.
 
-## Efficient teamwork
+## Leads of different conversations
 
-- Share concise findings and output references instead of copying entire conversations.
-- Reuse existing investigation and planning results rather than repeating them.
-- Agree on versioned inputs and outputs early so independent implementation can proceed in parallel.
-- Publish useful partial results at clear checkpoints when another assignment can consume them safely.
-- Continue independent in-scope work while waiting; block only the dependent portion.
-- Notify affected siblings when an interface, specification, or user instruction changes.
-- Batch nonurgent updates and avoid repeated unchanged status messages.
-- Escalate unanswered blocking requests after a bounded wait; avoid message loops and mutual waits.
+Conversations of one project can run at once, each with its own lead, in the same folder.
 
-The application detects circular dependencies and prolonged waiting. The main agent resolves scheduling or dispatches a planner to resolve a substantive conflict. It never implements the fix itself.
+- Only one lead turn edits the project folder at a time; the others wait, shown as queued with the name of the session they wait for. A read-only plan-mode lead does not wait.
+- Each lead prompt lists the other running sessions of its project, from Harbor's own records: id, title, state, the latest user request as its goal, and the helper branches it has. A lead is told not to touch what they are changing.
+- A lead can send another lead one `HARBOR_PEER` line, sparingly, only for something the other cannot otherwise know (a shared interface changed, a file is now yours). The target is matched by id, id prefix, exact title or a unique title fragment; an ambiguous target is not delivered. Messages are queued for the target's next turn; only an `urgent` one wakes an idle lead, at most twice between that session's user messages, because waking costs quota. At most 3 per turn, 600 characters each. The text is information, never an instruction from you. Each peer message is shown in both conversations and recorded as a `peer` coordination entry.
+- Helpers cannot send peer messages, and a lead should not reply to one unless the reply changes what the other session does.
 
 ## Shared agreements and context
 
-Keep material agreements in a project coordination record: participating agents, assignment revisions, decision, affected files or interfaces, prerequisites, and acknowledgement status.
+- The lead's `HARBOR_DECISION` lines (what you settled that must survive a lost session) are stored as `decision` coordination entries, scoped to the conversation, at most 3 per turn. They are given back to a lead whose native session cannot be resumed, framed as the lead's notes of what you said, with your current message winning.
+- Your direct messages, help requests, file conflicts and your answers to conflict questions are also coordination entries, visible as system messages in the relevant conversations.
+- A conversational suggestion between agents is not an agreement; only what you say, or what the lead records and you can read, carries over.
 
-A conversational suggestion is not an agreed contract. When a planner revises a contract, notify affected agents and record whether they have acknowledged it. Results produced against an older revision need reassessment before integration.
+## Efficient teamwork
 
-Direct user instructions remain visible to the main agent. If they affect a sibling, notify that sibling before it proceeds with incompatible dependent work. A peer message cannot override an explicit user instruction or silently enlarge an assignment.
+- A helper's final message is its report; earlier messages are not forwarded. Reports are clipped before they reach the lead, and identical delegations in one turn run once.
+- The lead is woken only when a planner finishes, a helper fails, or no helper of the conversation is still active; reports of everything finished ride along in one turn. Helper and help-request wake-ups count toward the automatic-turn cap (12 per user message); peer wake-ups have their own limit.
+- Independent helpers keep running while another waits for a dependency; only the dependent one waits.
+- Stalled helpers are flagged after 10 minutes without output and stopped at 45 minutes (resumable).
 
-## Main agent visibility
+## Usage
 
-The main agent can inspect all collaboration threads. It receives concise events for material agreements, dependency changes, ownership disputes, scope changes, blockers, and completed handoffs.
+Every wake-up of a lead, every helper session and every integrator check is a real cost. Peer notes and reports are kept short for that reason. See [Limitations](limitations.md) for the estimated multiplier.
 
-Routine questions and answers do not require main-agent approval. Within assigned scope and existing contracts, siblings coordinate freely. This preserves the main agent's monitoring role while avoiding a central message bottleneck.
+## Superseded from the earlier design
 
-Subagents continue to report completion and blockers to the main agent, even when they have already discussed them with peers.
+- Superseded: direct messages and small shared threads between sibling agents, an assignment directory siblings can search, delivery and acknowledgement tracking of peer messages, and discussion between helpers.
+- Superseded: ownership handoff between agents (request, acknowledgement, safe handoff point, release). Worktrees and integration replace it. Only the no-git case keeps locks, and a lock is never transferred by agreement.
+- Superseded: the main agent "monitoring all collaboration threads". There are none.
+- Not built: pausing dependent work until a changed contract is acknowledged by affected workers.
 
-## Usage and interface
+## Acceptance criteria (as implemented)
 
-Account for peer communication and any resulting model calls in the shared usage ledger. Deliver only relevant context and avoid broadcasting every message to every agent or waking every agent for each update.
-
-The interface remains a project-based chat app. Users can open a subagent's conversation, expand its collaboration activity, inspect shared-file ownership, and add clarification. The main conversation presents concise team progress instead of a constant stream of internal messages.
-
-## Example: two features need one settings file
-
-The project picker agent and the session persistence agent both need to update `project-settings.ts`.
-
-The app detects the overlap. The picker agent tells its sibling which field it is adding and references the planner's settings contract. The persistence agent acknowledges and works on its independent storage code while the picker agent owns the shared file.
-
-After its edit, the picker agent releases the file with a revision reference. The persistence agent acknowledges, acquires ownership, reads the updated file, and applies its own bounded change. A testing agent later verifies the combined behavior.
-
-If the shared contract is missing a needed field, the agents request planning help through the main agent instead of improvising conflicting designs. The main agent monitors the handoff and receives reports; it performs no edits.
-
-## Acceptance criteria
-
-- Siblings on different CLIs can communicate directly within their project.
-- Users can inspect peer conversations and add clarification.
-- Agents can discover relevant siblings without reading every conversation.
-- Shared files have one active writer per shared workspace.
-- Ownership transfers require acknowledgement and a current baseline.
-- Isolated changes receive deliberate integration rather than silent overwriting.
-- Material agreements and dependencies are visible to the main agent.
-- Collaboration preserves each agent's role and the prohibition on nested spawning.
-- Blocked agents can continue independent work without duplicating their siblings' efforts.
-- Communication overhead is tracked and unnecessary broadcasts are avoided.
-
-Design only. Messaging, delivery guarantees, workspace controls, and adapter enforcement remain requirements for later implementation.
+- Edit helpers never write the same checkout; conflicts surface at integration, deterministically, with the paths.
+- Only approved, current work can be merged, by pinned commit; your branch moves only on your Apply, fast-forward only.
+- Helpers cannot create agents or message each other; leads of the same project can exchange bounded notes.
+- A second lead in the same folder waits rather than editing at the same time.
+- Overlap in a folder without git is serialized by file ownership, and edits outside a claim are flagged.

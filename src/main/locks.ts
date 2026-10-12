@@ -23,7 +23,7 @@ export class LockTable {
     for (const l of this.holders(projectId)) {
       if (l.agentId === agentId) continue;
       for (const f of wanted) {
-        if (l.file === WHOLE_PROJECT || f === WHOLE_PROJECT || l.file === f) out.push({ file: f === WHOLE_PROJECT ? l.file : f, holder: l.agentId });
+        if (l.file === WHOLE_PROJECT || f === WHOLE_PROJECT || pathsOverlap(l.file, f)) out.push({ file: f === WHOLE_PROJECT ? l.file : f, holder: l.agentId });
       }
     }
     return dedupe(out);
@@ -59,7 +59,26 @@ export class LockTable {
   list(projectId: Id): FileLock[] { return this.holders(projectId); }
 }
 
-export const normFile = (f: string): string => (f === WHOLE_PROJECT ? f : normPath(f).replace(/^\.\//, ''));
+export const normFile = (f: string): string => {
+  if (f === WHOLE_PROJECT) return f;
+  const n = normPath(f).replace(/^\.\//, '').replace(/\/+$/, '');
+  return n === '.' || n === '' ? WHOLE_PROJECT : n;
+};
+
+/** Claims overlap when equal or one is a directory prefix of the other (`src` covers `src/a.ts`), same rule as the outside-claim check. */
+export function pathsOverlap(a: string, b: string): boolean {
+  const x = normFile(a), y = normFile(b);
+  if (x === WHOLE_PROJECT || y === WHOLE_PROJECT || x === y) return true;
+  return y.startsWith(x + '/') || x.startsWith(y + '/');
+}
+
+/**
+ * Whether a helper must take file locks at all. A helper that edits inside its own git worktree cannot collide with anyone
+ * before integration, so it needs neither a whole-project lock nor file locks; only writers in the shared checkout do.
+ */
+export function needsLock(h: { worktree?: string; canEdit: boolean }): boolean {
+  return h.canEdit && !h.worktree;
+}
 
 function dedupe(c: LockConflict[]): LockConflict[] {
   const seen = new Set<string>();

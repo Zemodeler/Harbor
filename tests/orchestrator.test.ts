@@ -78,12 +78,27 @@ describe('concierge: the cheap front desk', () => {
 
   it('does not let the front desk guess about files: a workspace request it answers goes to a medium lead', async () => {
     const h = await harness({ claude: script({ concierge: () => answer('Done, I renamed it.'), lead: () => say('Renamed for real.') }) });
-    await h.svc.send(h.conv.id, 'rename the variable foo to bar in src/utils.ts');
+    await h.svc.send(h.conv.id, 'make the login handler in src/auth.ts reject empty passwords');
     await h.svc.whenIdle();
     const texts = await h.texts();
     expect(texts).not.toContain('Done, I renamed it.');
     expect(texts).toContain('Renamed for real.');
     expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'sonnet' });
+  });
+
+  it('estimates complexity from the request: a one-file rename bypasses the front desk with a cheap lead, hard wording gets a strong one, and the signals are in the reason', async () => {
+    const run = async (text: string) => {
+      const h = await harness({ claude: script({ concierge: () => escalate('medium'), lead: () => say('ok') }) });
+      await h.svc.send(h.conv.id, text); await h.svc.whenIdle();
+      const reason = (await h.svc.listMessages(h.conv.id)).find((m) => m.role === 'assistant' && m.details?.reason)?.details?.reason ?? '';
+      return { model: h.calls(isLead)[0]!.opts.model, reason, concierge: h.calls((c) => !isLead(c)).length };
+    };
+    const small = await run('rename the variable foo to bar in src/utils.ts');
+    expect(small).toMatchObject({ model: 'haiku', concierge: 0 });
+    expect(small.reason).toMatch(/complexity low estimated from the request \(low: small mechanical edit/);
+    const hard = await run('refactor the session handling across the codebase and find the root cause of the flaky logout test');
+    expect(hard.model).toBe('opus');
+    expect(hard.reason).toMatch(/complexity high estimated from the request/);
   });
 
   it('keeps cheap/standard/strong models for low/medium/high complexity', async () => {
@@ -97,12 +112,13 @@ describe('concierge: the cheap front desk', () => {
 
   it('shows its acknowledgement, then escalates to a lead that works directly in the project', async () => {
     const h = await harness({ claude: script({ concierge: () => escalate('medium', 'On it.'), lead: () => say('Fixed the typo.') }) });
-    await h.svc.send(h.conv.id, 'fix the typo in the readme');
+    // Not an obvious workspace request (no file, command or code word): such a message skips the front desk entirely (see concierge bypass tests).
+    await h.svc.send(h.conv.id, 'please look into why startup feels slow');
     await h.svc.whenIdle();
     expect((await h.messages()).filter((m) => m.role === 'assistant').map((m) => m.text)).toEqual(['On it.', 'Fixed the typo.']);
     const [lead] = h.calls(isLead);
     expect(lead!.opts).toMatchObject({ model: 'sonnet', permission: 'edit', cwd: h.repoPath });
-    expect(lead!.prompt).toContain('User:\nfix the typo in the readme');
+    expect(lead!.prompt).toContain('User:\nplease look into why startup feels slow');
     expect(helpers(h)).toHaveLength(0); // no ceremony: a plain edit needs no helpers
     expect((await h.messages()).filter((m) => m.role === 'assistant')[1]!.details).toMatchObject({ model: 'sonnet' });
   });
@@ -247,7 +263,9 @@ describe('lead: delegation and sessions', () => {
     expect((await h.texts()).join('\n')).not.toContain('HARBOR_IMAGE_BRIEF');
   });
 
-  it('retries failed work one complexity level up (retryOf), never above high', async () => {
+  // Changed deliberately (quota audit): a plain failure ("tests failed", rate limit, spawn, network...) says nothing about the work or the
+  // model, so the retry keeps tier and effort and only avoids the model that failed. Escalation after a rejection is in quota.test.ts.
+  it('retries failed work at the same tier and effort, avoiding the model that failed (retryOf)', async () => {
     const tier = (cx: string, retryOf?: string) => ({ ref: 'x', title: 'Do it', role: 'implementer', access: 'edit', instructions: 'do', complexity: cx, ...(retryOf ? { retryOf } : {}) });
     let failedId = '', helperRuns = 0;
     const claude = script({
@@ -265,11 +283,12 @@ describe('lead: delegation and sessions', () => {
     const hs = helpers(h);
     expect(hs.length).toBeGreaterThanOrEqual(2);
     expect(hs[0]!.complexity).toBe('low');
-    expect(hs[1]!.complexity).toBe('medium');
+    expect(hs[1]!.complexity).toBe('low');
     expect(hs[0]!.retry).toBeUndefined();
-    expect(hs[1]!.retry).toBe(true);
-    expect(h.calls(isHelper).at(-1)!.opts.effort).toBe('high'); // a retry gets the highest effort
-    expect((await h.texts()).some((t) => t.startsWith('Retrying "Do it" with a stronger model'))).toBe(true);
+    expect(hs[1]!.retry).toBeUndefined();
+    expect(hs[1]!.avoid).toEqual([{ cli: hs[0]!.cli }]); // whichever CLI the failed run ended on (per CLI: a per-model penalty would buy a pricier sibling)
+    expect(h.calls(isHelper).at(-1)!.opts.effort).toBe('low'); // not raised: nothing says the work needed more
+    expect((await h.texts()).some((t) => t.startsWith('Retrying "Do it" at the same tier and effort'))).toBe(true);
   });
 
   it('falls back to the next CLI on rate limit and records why', async () => {
@@ -365,7 +384,7 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(calls).toHaveLength(2);
     expect(calls[0]!.opts.resumeId).toBeUndefined();
     expect(calls[1]!.opts.resumeId).toBeTruthy();
-    expect(calls[1]!.prompt).toBe('please also handle X');
+    expect(calls[1]!.prompt.startsWith('please also handle X')).toBe(true); // plus this turn's protocol tag instruction
     expect(h.svc.store.getAgent(a.id)!.revision).toBe(2);
     expect(h.svc.store.listCoordination(h.project.id).some((c) => c.kind === 'direct')).toBe(true);
     await h.svc.send(h.conv.id, 'status?');
@@ -473,6 +492,7 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(h.svc.store.getAgent('ghost')!.state).toBe('stopped');
     expect(h.svc.store.getAgent('ghost')!.error).toMatch(/restarted/);
     expect(h.adapters.claude!.calls).toHaveLength(0);
+    await h.svc.whenIdle(); // the startup git work of recover() ends before the folder is removed
   });
 });
 
@@ -545,14 +565,14 @@ describe('questions to the user', () => {
 
   it('a helper asks with HARBOR_ASK, waits without reporting to the lead, and resumes with the answer', async () => {
     const claude = script({
-      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Reviewer A', role: 'reviewer', instructions: 'review', complexity: 'low' }) : say('done')),
+      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Reviewer A', role: 'planner', instructions: 'review', complexity: 'low' }) : say('done')),
       helper: (prompt) => (prompt.includes('Use tabs') ? say('reviewed with tabs') : say('Stopping here.\nHARBOR_ASK: {"question":"Tabs or spaces?","options":["Use tabs","Use spaces"]}'))
     });
     const h = await harness({ claude }, { ids: ['claude'] });
     await h.svc.send(h.conv.id, 'go');
     await h.svc.whenIdle();
     const [q] = questions(h);
-    const agent = helpers(h).find((a) => a.role === 'reviewer')!;
+    const agent = helpers(h).find((a) => a.title === 'Reviewer A')!;
     expect(q).toMatchObject({ prompt: 'Tabs or spaces?', agentId: agent.id });
     expect(agent.state).toBe('waiting');
     expect(h.calls(isLead)).toHaveLength(1); // the lead is not called while the helper waits
@@ -579,6 +599,9 @@ describe('sessions of one project know of each other', () => {
     });
     const h = await harness({ claude }, { ids: ['claude'] });
     const second = await h.svc.newConversation(h.project.id);
+    // Two EDITING leads of one project take turns (see the edit-slot tests); plan-mode leads are read-only and run side by side.
+    await h.svc.setConversationMode(h.conv.id, 'plan');
+    await h.svc.setConversationMode(second.id, 'plan');
     await h.svc.send(h.conv.id, 'AAA task');
     await aStarted.p;
     await h.svc.send(second.id, 'BBB task');

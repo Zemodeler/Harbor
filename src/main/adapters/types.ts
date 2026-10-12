@@ -17,6 +17,13 @@ export interface RunOptions {
   /** Lead runs: forbid git merge/rebase/cherry-pick/reset/push where the CLI can enforce it (the integrator lands branches). */
   denyGitWrites?: boolean;
   /**
+   * Extra directories the run may write to besides its cwd (e.g. the worktree's git metadata dir under the main repo's .git,
+   * without which `git add/commit` fails inside a sandboxed worktree). Codex: sandbox_workspace_write.writable_roots; Claude: --add-dir.
+   */
+  writableDirs?: string[];
+  /** Extra Bash command prefixes a Claude edit run may run unasked (the project's own test commands, e.g. `pnpm test`). */
+  allowedCommands?: string[];
+  /**
    * Asked before the CLI runs a tool outside its allowlist (`edit` runs only; deny rules are applied first).
    * `signal` aborts when the CLI cancels the request or the run stops. Without it, such tools are denied silently as before.
    * Only Claude honours it: `codex exec` has no host approval channel (verified flags: --approve-for-me,
@@ -24,6 +31,11 @@ export interface RunOptions {
    */
   onToolPermission?(req: ToolPermissionRequest, signal: AbortSignal): Promise<ToolPermissionDecision>;
   signal?: AbortSignal;
+  /**
+   * A pure question-and-answer run (the concierge): no tools, no project settings, MCP servers or skills, no saved session, and the
+   * system prompt replaces the CLI's own instead of being appended to it. Claude only; other adapters ignore it.
+   */
+  lean?: boolean;
 }
 
 /** A CLI asking the host whether it may run one tool call. */
@@ -43,9 +55,10 @@ export type Chunk =
   | { kind: 'session'; id: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; text: string }
-  | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number }
+  | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; /** Claude only: prompt-cache reads and writes, which `inputTokens` excludes. */ cacheReadTokens?: number; cacheWriteTokens?: number }
   | { kind: 'limits'; limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }> }
-  | { kind: 'done'; ok: boolean; text?: string; error?: string; rateLimited?: boolean };
+  /** `exitCode` is set only when the CLI ended without a terminal event of its own: 0 with output means it simply finished. */
+  | { kind: 'done'; ok: boolean; text?: string; error?: string; rateLimited?: boolean; exitCode?: number | null };
 
 export interface CliAdapter {
   id: CliId;
@@ -54,3 +67,10 @@ export interface CliAdapter {
 }
 
 export const RATE_LIMIT_RE = /rate.?limit|usage limit|quota|too many requests|\b429\b|overloaded|limit reached|limit will reset/i;
+
+/**
+ * Whether a rate-limit message names one model ("Opus usage limit reached", "limit for gpt-5") rather than the account. Only a
+ * model-specific limit cools that model alone; anything else (the 5h window, a generic 429) holds the whole CLI out.
+ */
+export const isModelSpecific = (text: string | undefined): boolean =>
+  !!text && /\b(?:opus|sonnet|haiku|fable)\b|\bgpt-[\w.-]+|\bo\d(?:-(?:mini|pro))?\b|\bmodel\b/i.test(text);

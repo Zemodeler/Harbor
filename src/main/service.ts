@@ -1,31 +1,44 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, ConversationMode, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, ConversationMode, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
 import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
-import { loadCatalog } from './clis/capabilities';
+import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
 import { Git } from './git';
 import { GitView } from './gitView';
-import { Orchestrator, toAgent } from './orchestrator';
+import { Orchestrator, toAgent, type OrchestratorDeps } from './orchestrator';
 import type { ProcessKiller } from './proc';
 import { newId, Store } from './store';
 import { Journal } from './journal';
+import { buildDiagnostics, startupNotices } from './diagnostics';
+import { readLogTail } from './logger';
+import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage'> & {
+  exportDiagnostics(): Promise<string>;
+  getGitLogPage(projectId: Id, opts?: { branch?: string; limit?: number; skip?: number }): Promise<{ commits: GitCommit[]; hasMore: boolean; note?: string }>;
   onEvent(cb: (e: HarborEvent) => void): () => void;
   /** Main-process extras (not part of the renderer contract). */
   readonly orchestrator: Orchestrator;
   readonly store: Store;
   whenIdle(timeoutMs?: number): Promise<void>;
-  shutdown(): void;
+  /**
+   * Quitting: aborts every run, ends the CLI processes Harbor started (through the injected killer) and persists. The abort and
+   * the flush happen before the first await, so a caller that does not wait still gets state on disk.
+   */
+  shutdown(): Promise<void>;
+  /** Agent runs and lead turns in flight: what quitting would interrupt. */
+  activeRuns(): number;
+  /** The machine woke from sleep: re-arms the permission request timers against their wall-clock deadlines. */
+  onResume(): void;
 };
 
 export interface ServiceOptions {
@@ -52,8 +65,23 @@ export interface ServiceOptions {
   /** Tool permission timeout and timer (tests); defaults in orchestrator.ts. */
   toolPermissionTimeoutMs?: number;
   setTimer?: (fn: () => void, ms: number) => () => void;
+  /** Stall watchdog and per-run time limits (tests); defaults in orchestrator.ts. */
+  stall?: OrchestratorDeps['stall'];
+  /** Tests only: approve a project's checks file without asking the user. */
+  autoApproveChecks?: boolean;
+  /** Cap on automatic lead turns after one user message (default 12; tests lower it). */
+  maxAutoTurns?: number;
+  /** Lead wake-up debounce and clock (tests); defaults in orchestrator.ts. */
+  reportDebounce?: OrchestratorDeps['reportDebounce'];
+  now?: () => number;
+  /** Replace the capability catalog (tests); default: the built-in one with the data folder's capabilities.json on top. */
+  catalog?: CatalogEntry[];
+  /** Shown by exportDiagnostics (index.ts passes app.getVersion(); this module never imports electron). */
+  appVersion?: string;
 }
 
+/** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
+const HARBOR_JOURNAL = '__harbor__';
 const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
 // A Map, not an object: a mime such as "constructor" or "__proto__" must never match an inherited property.
 const IMAGE_EXT = new Map<string, string>([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'], ['image/webp', 'webp']]);
@@ -110,7 +138,11 @@ export const SIGNED_OUT_RE = /not logged in|logged out|not signed in|please run 
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
-  const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), ...opts.ledger });
+  // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog. What it dropped is
+  // reported (log, journal, diagnostics) instead of silently routing on a catalog the owner did not intend.
+  const loadedCatalog = loadCatalogWithWarnings(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined);
+  const catalog = opts.catalog ?? loadedCatalog.catalog;
+  const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), catalog, ...opts.ledger });
   const git = opts.git ?? new Git();
   const dataRoot = opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test');
   const worktreesRoot = opts.worktreesRoot ?? join(dataRoot, 'worktrees');
@@ -171,14 +203,30 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
     verified: (c) => VERIFIED.has(c),
-    // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog.
-    catalog: loadCatalog(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined),
+    catalog,
+    neutralDir: opts.dataDir ? join(opts.dataDir, 'neutral') : undefined,
+    now: opts.now,
+    reportDebounce: opts.reportDebounce,
     maxActivePerProject: opts.maxActivePerProject,
     killer: opts.killer,
     patchesRoot: opts.patchesRoot ?? (opts.dataDir ? join(opts.dataDir, 'patches') : undefined),
     toolPermissionTimeoutMs: opts.toolPermissionTimeoutMs,
-    setTimer: opts.setTimer
+    setTimer: opts.setTimer,
+    stall: opts.stall,
+    maxAutoTurns: opts.maxAutoTurns,
+    autoApproveChecks: opts.autoApproveChecks
   });
+
+  // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
+  // running conversations instead of only in a log nobody reads. Journal entries use a project-less id (diagnostics lists them).
+  for (const n of store.startupNotices) journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: n });
+  for (const w of loadedCatalog.warnings) { console.warn(`[harbor] ${w}`); journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: w }); }
+  store.onFlushError = (e) => {
+    journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: `Harbor could not save its state (${e.message}). It keeps trying; recent changes exist only in memory until then.` });
+    for (const p of store.listProjects()) for (const c of store.listConversations(p.id)) {
+      if (c.activity?.state === 'working') bus.emit({ type: 'message', message: store.addMessage({ id: newId(), conversationId: c.id, role: 'system', text: 'Warning: Harbor could not save its state to disk. Work continues, and it keeps retrying; do not quit until this clears.', time: Date.now() }) });
+    }
+  };
 
   // A CLI that was installed earlier and is now missing is usually a self-update swapping its folder (the Claude
   // desktop app does this), so re-check a few times instead of leaving it "Not installed" until a manual refresh.
@@ -214,7 +262,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   return {
     orchestrator, store,
     whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
-    shutdown: () => { if (recheckTimer) clearTimeout(recheckTimer); store.flush(); },
+    shutdown: async () => {
+      if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
+      await orchestrator.shutdown(); // aborts and flushes before its first await
+      store.flush();
+    },
+    activeRuns: () => orchestrator.activeRunCount(),
+    onResume: () => orchestrator.rearmTimers(),
 
     async listClis() { await ready; return clis.map(toStatus); },
     async refreshClis() { return (await refresh()).map(toStatus); },
@@ -231,7 +285,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async addProject(path) {
       const chosen = path ?? (await opts.pickFolder?.());
       if (!chosen) return null;
-      if (!existsSync(chosen) || !statSync(chosen).isDirectory()) throw new Error(`Not a folder: ${chosen}`);
+      const refusal = projectPathRefusal(chosen);
+      if (refusal) throw new Error(refusal);
       const existing = store.findProjectByPath(chosen);
       const project = store.upsertProject(existing
         ? { ...existing, lastOpened: Date.now() }
@@ -303,10 +358,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return view.overview(projectId, store.listAgentRecords(projectId));
     },
     async getGitLog(projectId, opts) { return (await gitViewOf(projectId)).log(opts); },
+    async getGitLogPage(projectId, opts) { return (await gitViewOf(projectId)).logPage(opts); },
     async getGitChanges(projectId, target) { return (await gitViewOf(projectId)).changes(target); },
     async getGitDiff(projectId, path, target) { return (await gitViewOf(projectId)).diff(path, target); },
     async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
-    async listMessages(conversationId) { return store.listMessages(conversationId); },
+    async listMessages(conversationId, opts) {
+      if (opts !== undefined && (typeof opts !== 'object' || opts === null || (opts.limit !== undefined && (typeof opts.limit !== 'number' || !Number.isFinite(opts.limit))))) throw new Error('Invalid paging options.');
+      return store.listMessages(conversationId, opts);
+    },
     async deleteConversation(id) {
       const c = store.getConversation(id);
       if (!c) return;
@@ -349,7 +408,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async pauseAgent(agentId) { orchestrator.pause(agentId); },
     async resumeAgent(agentId) { orchestrator.resume(agentId); },
     async resumeAgentSession(agentId) { orchestrator.resumeAgent(agentId); },
-    async integrateBranches(projectId, agentIds, target) { await ready; return toAgent(orchestrator.integrateBranches(needProject(projectId).id, agentIds, target)); },
+    async integrateBranches(projectId, agentIds, target) { await ready; return toAgent(await orchestrator.integrateBranches(needProject(projectId).id, agentIds, target)); },
     async applyIntegration(agentId) { return toAgent(await orchestrator.applyIntegration(agentId)); },
     async getChanges(agentId) {
       const a = store.getAgent(agentId);
@@ -384,6 +443,21 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!r) return;
       pending.delete(requestId);
       r.resolve(allow);
+    },
+    async exportDiagnostics() {
+      await ready;
+      const projects = store.listProjects();
+      const agents = store.allAgentRecords();
+      const byState: Record<string, number> = {};
+      for (const a of agents) byState[a.state] = (byState[a.state] ?? 0) + 1;
+      return buildDiagnostics({
+        appVersion: opts.appVersion, clis: clis.map(toStatus),
+        counts: { projects: projects.length, conversations: projects.reduce((n, p) => n + store.listConversations(p.id).length, 0), agents: agents.length, agentsByState: byState },
+        journal: [...projects.flatMap((p) => journal.list(p.id)), ...journal.list(HARBOR_JOURNAL)].sort((a, b) => a.time - b.time).slice(-40),
+        logTail: opts.dataDir ? readLogTail(join(opts.dataDir, 'logs'), 100) : '',
+        notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings,
+          ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
+      });
     },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },

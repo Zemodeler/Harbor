@@ -1,17 +1,17 @@
-# HANDOFF — Harbor core engine (branch `claude/core`)
+# HANDOFF — Harbor core engine
 
 ## Read this first: branch and checkout situation
 
-- Core work lives on **`claude/core`** (pushed). It was developed in a separate git worktree: `C:\Users\andrei\Documents\RoutingManager-core`.
-- Early on, the UI engineer and I shared the single checkout `C:\Users\andrei\Documents\RoutingManager`; they switched it to `gpt/ui`, so my first six commits landed on `gpt/ui` as well, and one of my commits swept in their in-progress `src/renderer/*` files. I re-created the same work on a clean `claude/core` (cherry-picked, UI files removed) and stopped touching that checkout.
-- **To merge:** `claude/core` ships only a 2-file placeholder in `src/renderer/` (`index.html`, `main.tsx`). Take `gpt/ui`'s version of `src/renderer/**` wholesale. The shared files (`package.json`, `tsconfig.json`, `electron.vite.config.ts`) are mine; the UI engineer's renderer expects the same `window.harbor` contract. Because the same core commits exist on `gpt/ui`, expect trivial/identical-content merges there.
-- Recommendation: each engineer works only in their own `git worktree` from now on.
+- The original `claude/core` and `gpt/ui` split is history: both were merged and the renderer is now part of the same tree. Work continues on `harbor/*` branches (this refresh was made on `harbor/recovery-apply-safety`); the owner merges to `main`. Never push to `main`.
+- Branch integration, rollback, tool permissions, queue controls, routing settings, the tray and Electron window hardening all exist now (see `src/shared/CHANGELOG.md`, newest 0.1.21). The "What works" table below is the original core hand-off and is partly older than the code; `BACKLOG.md` and `src/shared/CHANGELOG.md` are current.
+- Each engineer or agent should work in its own git worktree.
+- `HARDENING-PLAN.md` lists the hardening waves; wave 1 covers router, infrastructure, protocol safety and platform/release, wave 2 is the orchestrator and service pass.
 
 ## What works (and how it was checked)
 
 | Area | State | Evidence |
 | --- | --- | --- |
-| Scaffold, `npm run dev/build/test/typecheck/smoke` | works | build + 83 tests + typecheck pass; Electron main process boots and stays up (12 s run, no JS errors) |
+| Scaffold, `npm run dev/build/test/typecheck/smoke` | works | build, tests and typecheck pass (about 440 tests at this refresh); Electron main process boots and stays up (12 s run, no JS errors) |
 | Contract `src/shared/api.ts` + `window.harbor` via typed IPC | works | identical to spec plus one optional field (`CliStatus.authState`, see `src/shared/CHANGELOG.md`); IPC wiring unit-tested for every method, **never exercised from a real renderer** |
 | CLI discovery (claude, codex, gemini) | works | PATH + `%APPDATA%\npm` + `~\.local\bin` + Claude desktop's bundled `claude.exe`; override with `HARBOR_CLAUDE_PATH` etc. Run against the real bundled `claude.exe` 2.1.293 (version + `auth status --json` → signed out). Codex via `codex login status` is parsed from docs (unverified). Gemini has no status command → `unknown` + note |
 | `openLogin` | implemented | opens a visible `cmd /k <cli> login` window (Windows only). **Not clicked/run by me** |
@@ -30,7 +30,7 @@
 
 ## What is stubbed or missing
 
-- Everything in `BACKLOG.md`. Most important: integration/merge of `harbor/*` branches, interactive tool permissions (headless runs deny unlisted tools), queue priority/pause, rollback, API fallback, Gemini adapter, skills/plugins discovery, real provider allowance readings.
+- Everything open in `BACKLOG.md`. Most important: a real signed-in end-to-end run, queue/priority UI, API fallback, Gemini adapter, skills/plugins discovery, real provider allowance readings, and the wave 2 hardening items. Integration/merge of `harbor/*` branches and task rollback exist (contracts 0.1.15-0.1.18).
 - Permission requests live in memory; after a restart a conflict-waiting agent stays `queued` until the next scheduling pass.
 - Worktrees are created from the repository's **committed HEAD**. Uncommitted changes in the project folder (for example the docs edits currently in this repo) are not visible to agents. Commit first.
 - No worktree or branch is ever deleted automatically. `Git.removeWorktree` exists, refuses paths outside Harbor's root, and is unused by the app.
@@ -51,7 +51,7 @@ git worktree add ../RoutingManager-core claude/core     # if you want my worktre
 cd C:\Users\andrei\Documents\RoutingManager-core
 npm install
 node node_modules/electron/install.js      # only if node_modules/electron/dist is missing (install scripts are not auto-run)
-npm test                                   # 83 tests, no network, no real CLIs
+npm test                                   # no network, no real CLIs (about 440 tests)
 npm run typecheck
 npm run build
 npm run dev                                # Electron app; state in %APPDATA%\Harbor
@@ -66,4 +66,4 @@ Environment overrides: `HARBOR_CLAUDE_PATH`, `HARBOR_CODEX_PATH`, `HARBOR_GEMINI
 
 1. Sign in: `claude auth login` (and `codex login`). Commit or stash local changes in the repo you will open.
 2. `npm run smoke -- claude --full` until green.
-3. `npm run dev`, add this repo as a project, send: "Work on BACKLOG.md item 3 (auth-failure handling)". Review the resulting `harbor/*` branch with `git diff main..harbor/<slug>`; merge it yourself.
+3. `npm run dev`, add this repo as a project, send: "Work on the first open item in BACKLOG.md (item 3, auth-failure handling, is already done)". Review the resulting `harbor/*` branch with `git diff main..harbor/<slug>`; merge it yourself.

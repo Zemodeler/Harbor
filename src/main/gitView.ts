@@ -1,7 +1,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import type { AgentState, GitBranch, GitCommit, GitFileChange, GitOverview, GitTarget, GitWorktree, Id } from '../shared/api';
-import { runProcess, type Runner } from './proc';
+import { gitEnv, runProcess, type Runner } from './proc';
 import { reviewable } from './review';
 import { normPath } from './store';
 
@@ -82,10 +82,30 @@ export function parseChanges(nameStatus: string, numstat: string): GitFileChange
 
 // ---- queries ----
 
+/** At most this many git processes at once across the view, so a repository with many worktrees cannot spawn dozens. */
+export const GIT_VIEW_CONCURRENCY = 4;
+
+/** Cheap structural check for a path coming from the renderer, before any git process runs. */
+export function validRepoPath(path: unknown): path is string {
+  if (typeof path !== 'string' || !path || path.length > 4096 || path.includes('\0')) return false;
+  if (path.startsWith('-') || path.startsWith(':') || path.startsWith('/') || /^[A-Za-z]:/.test(path)) return false;
+  return !path.split(/[\\/]/).includes('..');
+}
+
+export interface LogPage { commits: GitCommit[]; /** Set when git timed out or failed, instead of an empty list that looks like "no commits". */ note?: string; hasMore: boolean }
+
 interface Scope { cwd: string; from: string; to?: string; untracked: boolean }
 
 export class GitView {
+  private active = 0;
+  private waiters: Array<() => void> = [];
   private constructor(private top: string, private run: Runner) {}
+
+  private async slot<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= GIT_VIEW_CONCURRENCY) await new Promise<void>((r) => this.waiters.push(r));
+    this.active++;
+    try { return await fn(); } finally { this.active--; this.waiters.shift()?.(); }
+  }
 
   /** Opens the repository that contains `path`, or returns undefined when it is not inside one. */
   static async open(path: string, run: Runner = runProcess): Promise<GitView | undefined> {
@@ -93,7 +113,7 @@ export class GitView {
     return r.code === 0 && r.stdout.trim() ? new GitView(r.stdout.trim(), run) : undefined;
   }
 
-  private git(args: string[], cwd = this.top) { return this.run('git', args, { cwd, timeoutMs: 15000 }); }
+  private git(args: string[], cwd = this.top) { return this.slot(() => this.run('git', args, { cwd, timeoutMs: 15000, env: gitEnv() })); }
   private async out(args: string[], cwd = this.top): Promise<string> {
     const r = await this.git(args, cwd);
     if (r.code !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
@@ -115,10 +135,11 @@ export class GitView {
     return r.code === 0 ? r.stdout.trim().replace(/^origin\//, '') : undefined;
   }
 
-  async worktrees(): Promise<GitWorktree[]> {
+  /** `status: false` skips the per-worktree `git status` (changed counts stay 0) for callers that only need paths and branches. */
+  async worktrees(opts: { status?: boolean } = {}): Promise<GitWorktree[]> {
     const list = parseWorktrees(await this.out(['worktree', 'list', '--porcelain']));
     return Promise.all(list.map(async (w, i) => {
-      const st = w.prunable ? undefined : await this.git(['status', '--porcelain'], w.path);
+      const st = w.prunable || opts.status === false ? undefined : await this.git(['status', '--porcelain', '--untracked-files=normal'], w.path);
       const out: GitWorktree = { path: w.path, head: w.head, changed: st?.code === 0 ? st.stdout.split(/\r?\n/).filter(Boolean).length : 0 };
       if (w.branch) out.branch = w.branch;
       if (i === 0) out.main = true;
@@ -147,11 +168,20 @@ export class GitView {
     return { projectId, ...(base ? { base } : {}), ...(current ? { current } : {}), branches, worktrees, notes };
   }
 
-  async log(opts: { branch?: string; limit?: number } = {}): Promise<GitCommit[]> {
+  async log(opts: { branch?: string; limit?: number; skip?: number } = {}): Promise<GitCommit[]> {
+    return (await this.logPage(opts)).commits;
+  }
+
+  /** Paged log that says so when git timed out or failed, instead of returning an empty list. */
+  async logPage(opts: { branch?: string; limit?: number; skip?: number } = {}): Promise<LogPage> {
     const limit = Math.min(2000, Math.max(1, Math.floor(opts.limit ?? 300)));
+    const skip = Math.max(0, Math.floor(opts.skip ?? 0));
     const revs = opts.branch ? [`refs/heads/${await this.knownBranch(opts.branch)}`] : ['--branches', 'HEAD'];
-    const r = await this.git(['log', '--topo-order', `--max-count=${limit}`, '--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e', ...revs, '--']);
-    return r.code === 0 ? parseLog(r.stdout) : [];   // no commits yet
+    const r = await this.git(['log', '--topo-order', `--max-count=${limit + 1}`, ...(skip ? [`--skip=${skip}`] : []), '--format=%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s%x1e', ...revs, '--']);
+    if (r.timedOut) return { commits: [], note: 'Reading the history timed out. Try again or open a smaller range.', hasMore: false };
+    if (r.code !== 0) return { commits: [], hasMore: false };   // no commits yet
+    const all = parseLog(r.stdout);
+    return { commits: all.slice(0, limit), hasMore: all.length > limit };
   }
 
   async changes(target: GitTarget = {}): Promise<GitFileChange[]> {
@@ -172,15 +202,19 @@ export class GitView {
     return files.slice(0, MAX_CHANGES);
   }
 
-  /** One file's patch. The path must be one of `changes(target)`, so nothing else can be read. */
+  /** One file's patch, read with `git diff -- <path>` after a cheap path check (no full change list is computed). */
   async diff(path: string, target: GitTarget = {}): Promise<string> {
-    const f = (await this.changes(target)).find(c => c.path === path);
-    if (!f) throw new Error('This file has no changes here.');
-    if (f.hidden) return 'Preview hidden for credential files.';
+    if (!validRepoPath(path)) throw new Error('This file has no changes here.');
+    if (!reviewable(path)) return 'Preview hidden for credential files.';
     const s = await this.scope(target);
-    if (f.status === 'untracked') return this.untrackedPatch(s.cwd, f.path);
-    const out = await this.out(['diff', '--no-ext-diff', '--no-textconv', '-M', s.from, ...(s.to ? [s.to] : []), '--', ...(f.oldPath ? [f.oldPath] : []), f.path], s.cwd);
-    return out.length > PREVIEW_LIMIT ? 'Diff exceeds the in-app preview limit. Review this file in your editor.' : out;
+    const literal = `:(top,literal)${path.split(String.fromCharCode(92)).join('/')}`;
+    const out = await this.out(['diff', '--no-ext-diff', '--no-textconv', '-M', s.from, ...(s.to ? [s.to] : []), '--', literal], s.cwd);
+    if (out) return out.length > PREVIEW_LIMIT ? 'Diff exceeds the in-app preview limit. Review this file in your editor.' : out;
+    if (s.untracked) {
+      const un = await this.out(['ls-files', '--others', '--exclude-standard', '-z', '--', literal], s.cwd);
+      if (un.split('\0').includes(path)) return this.untrackedPatch(s.cwd, path);
+    }
+    throw new Error('This file has no changes here.');
   }
 
   private async untrackedPatch(cwd: string, path: string): Promise<string> {
@@ -214,7 +248,7 @@ export class GitView {
       const base = this.baseOf(branches, await this.remoteDefault()) ?? name;
       const mb = await this.git(['merge-base', `refs/heads/${base}`, `refs/heads/${name}`]);
       if (mb.code !== 0) throw new Error(`${name} has no history in common with ${base}.`);
-      const wt = (await this.worktrees()).find(w => w.branch === name && !w.main && normPath(w.path) !== normPath(this.top));
+      const wt = (await this.worktrees({ status: false })).find(w => w.branch === name && !w.main && normPath(w.path) !== normPath(this.top));
       // A helper's worktree also holds work it has not committed yet; the project folder's own edits belong to `{}`.
       return wt ? { cwd: wt.path, from: mb.stdout.trim(), untracked: true } : { cwd: this.top, from: mb.stdout.trim(), to: `refs/heads/${name}`, untracked: false };
     }

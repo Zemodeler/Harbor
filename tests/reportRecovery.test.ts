@@ -365,6 +365,7 @@ describe('helper report delivery across restarts', () => {
     const data = tmp(), repo = tmp();
     const titles = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta'];
     const first = await harbor(data, repo);
+    await first.svc.setSettings({ maxHelpersPerTurn: 8 }); // this scenario delegates six helpers at once; the default brake is four per turn
     await first.svc.send(first.conv.id, `run ${titles.join(' ')}`);
     await first.svc.whenIdle();
     first.svc.shutdown();

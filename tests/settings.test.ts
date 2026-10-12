@@ -87,7 +87,7 @@ describe('settings validation', () => {
 describe('effectiveSettings', () => {
   it('defaults when nothing is set', () => {
     expect(effectiveSettings(DEFAULT_SETTINGS, 'p1')).toEqual({
-      concurrencyLimit: undefined, allowedModels: {}, rolePreferences: {}, effortPolicy: 'adaptive', lowAllowancePolicy: 'reduceEffort', subscriptionReserve: 0
+      concurrencyLimit: undefined, allowedModels: {}, rolePreferences: {}, effortPolicy: 'adaptive', subscriptionReserve: 0
     });
   });
 
@@ -99,7 +99,7 @@ describe('effectiveSettings', () => {
       projectOverrides: { p1: { concurrencyLimit: 1, allowedModels: { claude: ['opus'] }, rolePreferences: { reviewer: { cli: 'codex', model: 'default' } } } }
     };
     expect(effectiveSettings(s, 'p1')).toEqual({
-      concurrencyLimit: 1, effortPolicy: 'conserve', lowAllowancePolicy: 'reduceEffort', subscriptionReserve: 20,
+      concurrencyLimit: 1, effortPolicy: 'conserve', subscriptionReserve: 20,
       allowedModels: { claude: ['opus'], codex: ['default'] },
       rolePreferences: { implementer: { cli: 'codex' }, reviewer: { cli: 'codex', model: 'default' } }
     });

@@ -50,15 +50,18 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
     else if (resetReturn.current) list.current?.querySelector<HTMLElement>(`[data-request="${CSS.escape(resetReturn.current)}"] [data-reset]`)?.focus();
     resetReturn.current = undefined;
   }, [confirming]);
-  if (!permissions.length && !syncError && !notice) return null;
+  // The live region stays mounted in every state (same position in the fragment), otherwise a notice that appears
+  // together with its container is not announced by screen readers.
+  const live = <div role="status" style={SR_ONLY}>{notice ?? ''}</div>;
+  if (!permissions.length && !syncError && !notice) return <>{live}{null}</>;
   // Busy buttons stay focusable (aria-disabled), so focus survives a failed answer; useHarbor ignores repeat clicks.
   const answer = (p: Permission, choice: 'allow' | 'always' | 'deny') => { if (!answering[p.requestId]) void state.answerPermission(p.requestId, choice); };
   const locate = (target: EventTarget | null) => target instanceof Element ? target.closest<HTMLElement>('[data-card]') : null;
-  return <section className={s.panel} aria-labelledby="permission-requests-title">
+  return <>{live}<section className={s.panel} aria-labelledby="permission-requests-title">
     <div className={s.panelHeader}>
       <h2 id="permission-requests-title" className={s.panelTitle}>{permissions.length ? <>Waiting for your answer <span className={s.count}>{permissions.length}</span></> : 'Approval requests'}</h2>
       {permissions.length ? <button className={s.toggle} aria-expanded={!collapsed} aria-controls="permission-requests-cards" onClick={() => setCollapsed(!collapsed)}>{collapsed ? 'Show requests' : 'Hide'}</button> : null}
-      <div className={s.status} role="status">{notice ? <><span>{notice}</span><button className={s.linkButton} onClick={state.dismissPermissionNotice}>Dismiss</button></> : null}</div>
+      <div className={s.status}>{notice ? <><span>{notice}</span><button className={s.linkButton} onClick={state.dismissPermissionNotice}>Dismiss</button></> : null}</div>
     </div>
     {syncError ? <p className={s.syncError} role="alert">{syncError} <button className={s.linkButton} onClick={() => void state.refreshPermissions()}>Check again</button></p> : null}
     {permissions.length && !collapsed ? <div id="permission-requests-cards" className={s.cards} ref={list}
@@ -97,5 +100,7 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
         </article>;
       })}
     </div> : null}
-  </section>;
+  </section></>;
 }
+
+const SR_ONLY: React.CSSProperties = { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' };

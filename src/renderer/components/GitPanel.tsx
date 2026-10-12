@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GitBranch, GitFileChange, GitTarget } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { layoutGraph, type GraphRow } from '../gitGraph';
+import { Clipped } from './Clipped';
 import { SessionStatus } from './SessionStatus';
 import { BranchIcon, RefreshIcon } from './Icons';
 import s from '../Harbor.module.css';
 
-const PAGE = 300, LANE = 14, ROW = 40;
+const PAGE = 300, WINDOW = 100, LANE = 14, ROW = 40;
 const COLORS = ['var(--accent)', '#d08a3a', '#7b6fd0', '#3d8fd1', '#c45a8c', '#6f9c45'];
 const STATUS: Record<GitFileChange['status'], [string, string]> = { added: ['A', 'Added'], modified: ['M', 'Modified'], deleted: ['D', 'Deleted'], renamed: ['R', 'Renamed'], untracked: ['U', 'New, not committed'], other: ['?', 'Changed'] };
 const color = (lane: number) => COLORS[lane % COLORS.length];
@@ -43,6 +44,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
   const [selection, setSelection] = useState<Selection>({ kind: 'local' });
   const [logBranch, setLogBranch] = useState<string>();
   const [limit, setLimit] = useState(PAGE);
+  const [shown, setShown] = useState(WINDOW);
   const [file, setFile] = useState<string>();
   const refresh = () => setTick(t => t + 1);
 
@@ -70,7 +72,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
   }, [o]);
 
   function select(next: Selection) { setSelection(next); setFile(undefined); }
-  function selectBranch(name: string) { select({ kind: 'branch', name }); setLogBranch(name); setLimit(PAGE); }
+  function selectBranch(name: string) { select({ kind: 'branch', name }); setLogBranch(name); setLimit(PAGE); setShown(WINDOW); }
 
   if (!projectId) return <div className={s.empty}><p>Open a project to see its branches and changes.</p></div>;
   if (overview.error && !o) return <div className={s.empty}><p role="alert">{overview.error}</p><button onClick={refresh}>Try again</button></div>;
@@ -106,18 +108,20 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
     </div>
 
     <div className={s.gitColumn}>
-      <div className={s.panelHeading}><h2>History</h2><select aria-label="History scope" value={logBranch ?? ''} onChange={e => { setLogBranch(e.target.value || undefined); setLimit(PAGE); }}><option value="">All branches</option>{o.branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}</select></div>
+      <div className={s.panelHeading}><h2>History</h2><select aria-label="History scope" value={logBranch ?? ''} onChange={e => { setLogBranch(e.target.value || undefined); setLimit(PAGE); setShown(WINDOW); }}><option value="">All branches</option>{o.branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}</select></div>
       {log.error ? <p className={s.reviewNote} role="alert">{log.error}</p> : null}
       {log.loading && !log.data ? <p role="status" className={s.muted}>Reading history…</p> : null}
       {log.data && !log.data.length ? <p className={s.muted}>No commits yet.</p> : null}
-      <ol className={s.gitLog}>{(log.data ?? []).map((c, i) => {
+      <ol className={s.gitLog}>{(log.data ?? []).slice(0, shown).map((c, i) => {
         const on = selection.kind === 'commit' && selection.hash === c.hash;
         return <li key={c.hash}><button className={on ? `${s.gitCommit} ${s.gitItemOn}` : s.gitCommit} aria-pressed={on} title={`${c.hash}\n${c.author}, ${new Date(c.time).toLocaleString()}`} onClick={() => select({ kind: 'commit', hash: c.hash, subject: c.subject })}>
           <GraphCell row={graph.rows[i]!} width={graph.width} hash={c.hash} merge={c.parents.length > 1}/>
           <span className={s.gitCommitText}><span className={s.gitSubject}><span>{c.subject || '(no message)'}</span>{c.refs.slice(0, 3).map(r => <span key={r} className={s.gitBadge}>{r.replace(/^HEAD -> /, '')}</span>)}</span><small>{short(c.hash)} · {c.author} · {when(c.time)}</small></span>
         </button></li>;
       })}</ol>
-      {log.data?.length === limit ? <button onClick={() => setLimit(l => l + PAGE)}>Show older commits</button> : null}
+      {/* Only a window of the loaded commits is in the DOM; "Show more" widens it, then older commits are fetched. */}
+      {log.data && log.data.length > shown ? <button onClick={() => setShown(n => n + WINDOW)}>Show more commits ({log.data.length - shown} loaded)</button> : null}
+      {log.data?.length === limit && log.data.length <= shown ? <button onClick={() => { setLimit(l => l + PAGE); setShown(n => n + WINDOW); }}>Show older commits</button> : null}
     </div>
 
     <div className={s.gitColumn}>
@@ -135,7 +139,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
         {file === f.path ? f.hidden ? <p className={s.reviewNote}>Credential file: Harbor never shows its contents.</p>
           : diff.error ? <p className={s.reviewNote} role="alert">{diff.error}</p>
           : diff.data === undefined ? <p role="status" className={s.muted}>Reading diff…</p>
-          : <pre className={s.gitDiff}>{diff.data.split('\n').map((line, i) => <span key={i} className={line.startsWith('@@') ? s.gitHunk : line.startsWith('+') && !line.startsWith('+++') ? s.diffAdded : line.startsWith('-') && !line.startsWith('---') ? s.diffRemoved : undefined}>{line}{'\n'}</span>)}</pre> : null}
+          : <Clipped key={`${targetKey}|${f.path}`} text={diff.data}>{lines => <pre className={s.gitDiff}>{lines.map((line, i) => <span key={i} className={line.startsWith('@@') ? s.gitHunk : line.startsWith('+') && !line.startsWith('+++') ? s.diffAdded : line.startsWith('-') && !line.startsWith('---') ? s.diffRemoved : undefined}>{line}{'\n'}</span>)}</pre>}</Clipped> : null}
       </li>)}</ul>
     </div>
   </section>;
