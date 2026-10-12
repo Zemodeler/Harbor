@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
+import { isEditorId } from './launcher';
 import type { TrackedProcess } from './proc';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
 
@@ -610,6 +611,7 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
   if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') {
     throw new Error('keepRunningInBackground must be a boolean.');
   }
+  if ('editor' in patch && patch.editor !== undefined && !isEditorId(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
   if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
   if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {

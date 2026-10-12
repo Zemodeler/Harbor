@@ -19,6 +19,9 @@ export function HelperDetails({ state, agent }: { state: HarborState; agent: Age
       : <AgentOutcome agent={agent}/>}
     <QueueControls api={api} agent={agent} agents={agents}/>
     <ResumeControl api={api} agent={agent} openAgent={id => void state.openAgent(id)}/>
+    {agent.worktree && api.openWorkspace ? <div className={s.fxRow}>
+      {(['terminal', 'editor', 'folder'] as const).map(action => <button key={action} onClick={() => void state.run(() => api.openWorkspace!(state.projectId, action, { agentId: agent.id }))}>{action === 'terminal' ? 'Open terminal' : action === 'editor' ? 'Open in editor' : 'Show folder'}</button>)}
+    </div> : null}
     {branch && !agent.rollback ? <div className={s.fxRow}>
       {!agent.integration ? <ChangedFiles api={api} agent={agent}/> : null}
       <RollbackAction api={api} agent={agent} agents={agents}/>

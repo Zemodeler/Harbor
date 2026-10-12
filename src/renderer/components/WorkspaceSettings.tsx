@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { EditorId } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import s from '../Harbor.module.css';
@@ -13,6 +14,11 @@ export function WorkspaceSettings({ state, workspace }: { state: HarborState; wo
     <label className={s.field}>Text size<select value={preferences.textSize} onChange={e => setPreferences(p => ({ ...p, textSize: e.target.value as 'standard' | 'large' }))}><option value="standard">Standard</option><option value="large">Large</option></select></label>
     <label className={s.field}>Navigation spacing<select value={preferences.density} onChange={e => setPreferences(p => ({ ...p, density: e.target.value as 'comfortable' | 'compact' }))}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></label>
     <div className={s.settingsDivider}><h3>Desktop notifications</h3><p className={s.muted}>Notify when a session finishes or needs your attention while Harbor is in the background.</p><label className={s.checkboxRow}><input type="checkbox" checked={state.settings?.desktopNotifications === true} disabled={saving || !!document.documentElement.dataset.demo} onChange={e => { setSaving(true); void state.updateSettings({ desktopNotifications: e.target.checked }).finally(() => setSaving(false)); }}/> Enable desktop notifications</label>{document.documentElement.dataset.demo ? <small>Available in the desktop app.</small> : null}</div>
+    <div className={s.settingsDivider}><h3>Editor</h3><p className={s.muted}>Used by "Open in editor". The editor must be installed; Harbor opens it through its own link, so nothing is run in a shell.</p>
+      <label className={s.field}>Open files and folders in<select value={state.settings?.editor ?? 'code'} disabled={saving || !!document.documentElement.dataset.demo} onChange={e => { setSaving(true); void state.updateSettings({ editor: e.target.value as EditorId }).finally(() => setSaving(false)); }}>
+        <option value="code">VS Code</option><option value="code-insiders">VS Code Insiders</option><option value="cursor">Cursor</option><option value="windsurf">Windsurf</option>
+      </select></label>
+    </div>
     <div className={s.settingsDivider}><h3>Reusable prompts</h3><p className={s.muted}>Save instructions you use often. Insert them from the composer, then edit before sending.</p>
       {preferences.templates.map(t => <div className={s.savedTemplate} key={t.id}><strong>{t.title}</strong><p>{t.text}</p><button onClick={() => setPreferences(p => ({ ...p, templates: p.templates.filter(x => x.id !== t.id) }))}>Remove {t.title}</button></div>)}
       <form onSubmit={e => { e.preventDefault(); if (!title.trim() || !text.trim()) return; setPreferences(p => ({ ...p, templates: [...p.templates, { id: crypto.randomUUID(), title: title.trim(), text: text.trim() }] })); setTitle(''); setText(''); }}>
