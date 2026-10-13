@@ -1,5 +1,7 @@
 import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
+import type { Effort } from './adapters/types';
+import type { TaskSize } from './calibration';
 import type { Complexity } from './router';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
@@ -13,7 +15,17 @@ export interface AgentRecord extends Agent {
   /** Task ids this agent waits on. */
   dependsOn: Id[];
   revision: number;
+  /** User-facing label, derived from `difficulty` when Harbor computed one (<= 3 low, <= 6 medium, else high). */
   complexity?: Complexity;
+  /** 0..10, computed by Harbor from the task's signals (difficulty.ts); the lead's rating was only a hint. Absent on older records. */
+  difficulty?: number;
+  /** Size for the cost estimates, and the signals behind `difficulty` (shown in the routing reason). */
+  size?: TaskSize;
+  difficultySignals?: string[];
+  /** A redo of work rejected on this model and effort: routing raises the effort on it first (RouteRequest.escalateFrom). */
+  escalateFrom?: { cli: CliId; model: string; effort?: Effort };
+  /** A redo after an infrastructure failure: the model and effort to keep when routing stays on that CLI. */
+  keepModel?: { cli: CliId; model: string; effort?: Effort };
   /** What the lead said this work needs; the router matches it against the capability catalog. */
   needs?: Need[];
   /** CLI the lead pinned this helper to (HARBOR_DELEGATE "cli"); routing falls back when it is unavailable. */
@@ -34,9 +46,9 @@ export interface AgentRecord extends Agent {
   helpFor?: Id;
   /** User allowed this agent to overlap file claims held by a sibling. */
   sharedOk?: boolean;
-  /** Redoes work a reviewer or Harbor check rejected, already on the top tier: effort goes to high (one axis moves, never both). */
+  /** Redoes work a reviewer or Harbor check rejected: its difficulty was raised one floor step, and the effort policy never lowers it. */
   retry?: boolean;
-  /** A retry after an infrastructure failure: the CLI/model that failed is a soft penalty in routing, tier and effort are unchanged. */
+  /** A retry after an infrastructure failure: the CLI/model that failed is a soft penalty in routing, difficulty and effort are unchanged. */
   avoid?: Array<{ cli: CliId; model?: string }>;
   /** Number of CLI fallbacks used. */
   attempts: number;
@@ -67,6 +79,27 @@ export interface AgentRecord extends Agent {
   pinnedCheckedOut?: string;
   /** The project folder had uncommitted edits when this helper was delegated; it starts from the committed HEAD without them. */
   dirtyAtStart?: 'dirty' | 'unknown';
+  /** Harbor's estimate of this helper's wall minutes at delegation (sizeGate.estimateTaskMinutes): a prior blended with calibration. */
+  estimatedMinutes?: number;
+  /**
+   * Who stopped it: the user, Harbor's time limit, Harbor's loop guard (loopGuard.ts), or a Harbor restart (absent on older records =
+   * the user). Only Harbor's own stops (cap, loop) wake the lead.
+   */
+  stopKind?: 'user' | 'cap' | 'restart' | 'loop';
+  /** Automatic resumes after a cap stop (softCap.MAX_CAP_RESUMES). */
+  capResumes?: number;
+  /** Automatic resumes after a loop stop (loopGuard.MAX_LOOP_RESUMES). */
+  loopResumes?: number;
+  /** Harbor resumed this stopped helper once because new work depended on it. */
+  depResumed?: boolean;
+  /** Routing said the model only just clears (or does not clear) the floor of hard work: Harbor schedules one reviewer after it. */
+  needsReview?: boolean;
+  reviewReason?: string;
+  /** On an implementer: Harbor already scheduled its automatic reviewer. On that reviewer: the implementer it reviews. */
+  autoReviewed?: boolean;
+  autoReviewOf?: Id;
+  /** Questions this helper sent to the lead in this assignment (askRouting.MAX_LEAD_ASKS). */
+  leadAsks?: number;
 }
 type Id = string;
 
@@ -109,6 +142,8 @@ export interface SessionLink {
   agentId: Id; cli: CliId; sessionId: string; updated: number;
   /** Model and effort of the last run in this session. A resumed session keeps them (changing either rewrites the prompt cache). */
   model?: string; effort?: string;
+  /** The session totals the CLI reported after its last run, for the fields it reports cumulatively (runUsage.perRunUsage). */
+  totals?: Partial<Record<'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'costUsd', number>>;
 }
 
 /** One observed unit of consumption. Never fabricated: fields stay undefined when unknown. */
@@ -117,6 +152,11 @@ export interface UsageEvent {
   inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs: number; ok: boolean;
   /** Claude prompt-cache tokens; `inputTokens` excludes them. */
   cacheReadTokens?: number; cacheWriteTokens?: number;
+  /**
+   * The run ended without the CLI's final usage report (Harbor's time cap, a user stop, a crash): token fields hold only what streamed
+   * before the end, a lower-bound estimate, and may be absent. Duration, CLI and model are still real.
+   */
+  partial?: boolean;
   rateLimited?: boolean;
   /** With `rateLimited`: the message did not name a model, so the whole CLI is held out, not just this model. */
   cliWide?: boolean;

@@ -9,7 +9,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listConversations', 'newConversation', 'deleteConversation',
   'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder', 'openWorkspace',
   'getGitOverview', 'getGitLog', 'getGitLogPage', 'getGitChanges', 'getGitDiff',
-  'listMessages', 'send', 'setConversationMode',
+  'listMessages', 'send', 'setConversationMode', 'setConversationDeadline',
   'listAgents', 'openAgentConversation', 'stopAgent',
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',

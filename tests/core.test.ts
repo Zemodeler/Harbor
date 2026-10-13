@@ -8,6 +8,7 @@ import { DEFAULT_CATALOG, loadCatalog } from '../src/main/clis/capabilities';
 import { Git } from '../src/main/git';
 import { LockTable, WHOLE_PROJECT } from '../src/main/locks';
 import { route, type RouteRequest } from '../src/main/router';
+import { EQUAL_POOLS, ONE_CODEX_MODEL } from './fixtures/catalogs';
 import { Store } from '../src/main/store';
 import { COOLDOWN_MS, FreeResetCoordinator, UsageLedger, WINDOW_MS } from '../src/main/usage';
 
@@ -101,8 +102,9 @@ describe('free reset', () => {
 });
 
 describe('router', () => {
+  // Phase 5: Codex's pool calibrated to Claude's per-token figures (EQUAL_POOLS): these are about two comparable accounts.
   const base = (clis: ResolvedCli[], ledger: UsageLedger, extra = {}) =>
-    ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, ...extra });
+    ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, calibration: EQUAL_POOLS, ...extra });
 
   it('skips uninstalled, signed-out, adapter-less and disabled CLIs and explains why', () => {
     const { ledger } = ledgerAt({ now: 1 });
@@ -112,7 +114,7 @@ describe('router', () => {
     expect(d.cli).toBe('claude');
     expect(d.reason).toMatch(/codex skipped: not installed/);
     expect(d.reason).toMatch(/gemini skipped: login required/);
-    expect(d.model).toBe('sonnet');
+    expect(d.model).toBe('claude-sonnet-5-5');
     expect(d.effort).toBe('medium');
   });
 
@@ -161,21 +163,32 @@ describe('router', () => {
     expect(ledger.pressure('claude', 'opus').level).toBe('exhausted');
     expect(ledger.pressure('claude', 'sonnet').level).toBe('plenty');
     const d = route({ role: 'implementer', complexity: 'high' }, base([cli('claude')], ledger))!;
-    expect(d.model).toBe('claude-fable-5-1'); // the strong tier minus the capped Opus
-    expect(d.reason).toMatch(/opus skipped/);
+    // The capped Opus is skipped and Fable is not auto-routed (catalog v2), so the work goes to Sonnet rather than spending Fable.
+    // Phase 3: Sonnet at high effort just clears high work (difficulty 8), so it is not degraded (was { strong, standard }) but its
+    // result is marked for review.
+    expect(d).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'high', needsReview: true });
+    expect(d.degraded).toBeUndefined();
+    expect(d.reason).toMatch(/claude-opus-5-5 skipped: allowance exhausted/);
   });
 
-  it('lowers effort when allowance is low; a planner follows complexity (strong only for high, standard otherwise)', () => {
+  it('lowers effort when allowance is low (explicit policy); a planner follows its difficulty', () => {
     const t = { now: 1 };
     const { ledger, run } = ledgerAt(t, 10);
     for (let i = 0; i < 8; i++) run('claude');
+    // Phase 3: the price picks the effort (Opus clears high work at low effort); only an explicit low-allowance policy steps it down
+    // further, and only where the work still clears (was: medium, lowered from high by the default policy).
     const d = route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledger))!;
-    expect(d.effort).toBe('medium');
-    expect(d.reason).toMatch(/effort lowered/);
+    expect(d).toMatchObject({ model: 'claude-opus-5-5', effort: 'low' });
+    // Medium planning: Sonnet at medium effort, which an explicit reduceEffort policy cannot step lower (low would not clear it).
+    // Phase 5: was Opus at low effort; low effort is no longer 0.6x the tokens of medium but 0.8x (budgetPriors.EFFORT_TOKEN_MULT:
+    // thinking is a small share of an agentic run's tokens), so Opus low (1.6x Sonnet's quota) no longer undercuts Sonnet medium.
+    const r = route({ role: 'planner', complexity: 'medium' }, base([cli('claude')], ledger, { policy: { lowAllowance: 'reduceEffort' } }))!;
+    expect(r).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'medium' });
     // Changed deliberately (quota audit): planners used to be strong at every complexity, which bought Opus for every plan.
-    expect(route({ role: 'planner', complexity: 'low' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('sonnet');
-    expect(route({ role: 'planner', complexity: 'medium' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('sonnet');
-    expect(route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('opus');
+    // Phase 3: easy planning (difficulty 2) fits Haiku at high effort on the built-in planning scores (was Sonnet).
+    expect(route({ role: 'planner', complexity: 'low' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('claude-haiku-5-5');
+    expect(route({ role: 'planner', complexity: 'medium' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('claude-sonnet-5-5');
+    expect(route({ role: 'planner', complexity: 'high' }, base([cli('claude')], ledgerAt({ now: 1 }).ledger))!.model).toBe('claude-opus-5-5');
   });
 
   it('spreads parallel load', () => {
@@ -186,16 +199,17 @@ describe('router', () => {
 });
 
 describe('router: capability catalog', () => {
+  // Phase 5: Codex's pool calibrated to Claude's per-token figures (EQUAL_POOLS): these are about two comparable accounts.
   const base = (clis: ResolvedCli[], ledger: UsageLedger, extra = {}) =>
-    ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, ...extra });
+    ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, calibration: EQUAL_POOLS, ...extra });
 
   it('maps tiers to the cheapest fitting model', () => {
     const { ledger } = ledgerAt({ now: 1 });
     const inp = base([cli('claude')], ledger);
-    expect(route({ role: 'main', complexity: 'low', tier: 'cheap', effort: 'low' }, inp)!).toMatchObject({ model: 'haiku', effort: 'low' });
-    expect(route({ role: 'main', complexity: 'medium', tier: 'standard' }, inp)!.model).toBe('sonnet');
-    expect(route({ role: 'main', complexity: 'high', tier: 'strong', needs: ['planning'] }, inp)!.model).toBe('opus');
-    expect(route({ role: 'main', complexity: 'high', tier: 'strong' }, inp)!.reason).toContain('claude/opus (strong)');
+    expect(route({ role: 'main', complexity: 'low', tier: 'cheap', effort: 'low' }, inp)!).toMatchObject({ model: 'claude-haiku-5-5', effort: 'low' });
+    expect(route({ role: 'main', complexity: 'medium', tier: 'standard' }, inp)!.model).toBe('claude-sonnet-5-5');
+    expect(route({ role: 'main', complexity: 'high', tier: 'strong', needs: ['planning'] }, inp)!.model).toBe('claude-opus-5-5');
+    expect(route({ role: 'main', complexity: 'high', tier: 'strong' }, inp)!.reason).toContain('claude/claude-opus-5-5 (strong)');
   });
 
   it('lets stated needs pull the choice toward a model that is good at them', () => {
@@ -209,18 +223,20 @@ describe('router: capability catalog', () => {
     expect(route({ role: 'main', complexity: 'low', tier: 'cheap', needs: ['chat'] }, inp)!.cli).toBe('claude');
   });
 
-  // The routing outcomes the weights are tuned for, with both subscriptions signed in and verified.
+  // The routing outcomes the weights are tuned for, with both subscriptions signed in and verified. Phase 3: on ONE_CODEX_MODEL (Codex
+  // priced like Sonnet), so these stay about difficulty and effort rather than the built-in catalog's Codex price priors; efforts are
+  // now the price's choice (hard work clears on Opus at low effort; a rejected retry gets one effort step more on the same model).
   it.each([
-    ['front desk', { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'] }, 'claude/haiku', 'low'],
-    ['plain medium work goes to a standard model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'] }, 'claude/sonnet', 'medium'],
-    ['planning alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'planning'] }, 'claude/sonnet', 'medium'],
-    ['a long context alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'long-context'] }, 'claude/sonnet', 'medium'],
-    ['hard work: strong model at medium effort', { role: 'main', complexity: 'high', tier: 'strong', needs: ['code'] }, 'claude/opus', 'medium'],
-    ['hard planning keeps high effort', { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/opus', 'high'],
-    ['a retry gets high effort', { role: 'implementer', complexity: 'medium', needs: ['code'], retry: true }, 'claude/sonnet', 'high'],
-    ['a review', { role: 'reviewer', complexity: 'medium', needs: ['review'] }, 'claude/sonnet', 'medium']
+    ['front desk', { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', needs: ['chat'] }, 'claude/claude-haiku-5-5', 'low'],
+    ['plain medium work goes to a standard model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'] }, 'claude/claude-sonnet-5-5', 'medium'],
+    ['planning alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'planning'] }, 'claude/claude-sonnet-5-5', 'medium'],
+    ['a long context alone does not buy the strong model', { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code', 'long-context'] }, 'claude/claude-sonnet-5-5', 'medium'],
+    ['hard work: strong model at low effort', { role: 'main', complexity: 'high', tier: 'strong', needs: ['code'] }, 'claude/claude-opus-5-5', 'low'],
+    ['hard planning: strong model', { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/claude-opus-5-5', 'low'],
+    ['a rejected retry: one effort step more on the same model', { role: 'implementer', complexity: 'medium', difficulty: 6.5, needs: ['code'], retry: true, escalateFrom: { cli: 'claude', model: 'claude-sonnet-5-5', effort: 'medium' } }, 'claude/claude-sonnet-5-5', 'high'],
+    ['a review', { role: 'reviewer', complexity: 'medium', needs: ['review'] }, 'claude/claude-sonnet-5-5', 'medium']
   ] as const)('scenario: %s', (_name, req, pick, effort) => {
-    const inp = base([cli('claude'), cli('codex')], ledgerAt({ now: 1 }).ledger, { verified: () => true });
+    const inp = base([cli('claude'), cli('codex')], ledgerAt({ now: 1 }).ledger, { verified: () => true, catalog: ONE_CODEX_MODEL });
     const d = route({ ...req, needs: [...req.needs] } as RouteRequest, inp)!;
     expect(`${d.cli}/${d.model}`).toBe(pick);
     expect(d.effort).toBe(effort);
@@ -231,13 +247,17 @@ describe('router: capability catalog', () => {
     const { ledger, run } = ledgerAt(t, 20);
     for (let i = 0; i < 13; i++) run('claude'); // ~65% of the window
     for (let i = 0; i < 2; i++) run('codex'); // ~10%
-    const inp = base([cli('claude'), cli('codex')], ledger, { verified: () => true });
-    for (const needs of [['code'], ['code', 'planning'], ['review']] as const)
-      expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: [...needs] }, inp)!.cli).toBe('codex');
+    // Phase 3: on ONE_CODEX_MODEL, so the subscriptions' state decides, not the built-in Codex price priors.
+    const inp = base([cli('claude'), cli('codex')], ledger, { verified: () => true, catalog: ONE_CODEX_MODEL });
+    expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'] }, inp)!.cli).toBe('codex');
+    // Phase 3: the floor is per need. The fixture's Codex model scores 3 for planning and review, below medium work (4.1): those stay
+    // on claude however its allowance stands (was: codex for every need).
+    for (const needs of [['code', 'planning'], ['review']] as const)
+      expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: [...needs] }, inp)!.cli).toBe('claude');
     // A small difference does not flip the choice, and the session the lead already holds still wins.
     const close = ledgerAt({ now: 1 }, 40);
     close.run('claude');
-    expect(route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, base([cli('claude'), cli('codex')], close.ledger, { verified: () => true }))!.cli).toBe('claude');
+    expect(route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, base([cli('claude'), cli('codex')], close.ledger, { verified: () => true, catalog: ONE_CODEX_MODEL }))!.cli).toBe('claude');
     expect(route({ role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'], continuity: 'claude' }, inp)!.cli).toBe('claude');
   });
 

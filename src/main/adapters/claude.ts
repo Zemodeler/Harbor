@@ -185,15 +185,28 @@ export function parseClaudeLine(line: string): Chunk[] {
       if (c.type === 'text' && c.text) out.push({ kind: 'text', text: c.text });
       else if (c.type === 'tool_use') out.push({ kind: 'tool', text: `${c.name} ${summarizeInput(c.input)}`.trim() });
     }
+    // Per-message usage, so a run stopped before its `result` still records what it used (the result's totals win when it comes).
+    const u = j.message.usage;
+    if (u && typeof u === 'object') {
+      out.push({
+        kind: 'usage', partial: true, ...(typeof j.message.id === 'string' ? { messageId: j.message.id } : {}),
+        ...(typeof u.input_tokens === 'number' ? { inputTokens: u.input_tokens } : {}),
+        ...(typeof u.output_tokens === 'number' ? { outputTokens: u.output_tokens } : {}),
+        ...(typeof u.cache_read_input_tokens === 'number' ? { cacheReadTokens: u.cache_read_input_tokens } : {}),
+        ...(typeof u.cache_creation_input_tokens === 'number' ? { cacheWriteTokens: u.cache_creation_input_tokens } : {})
+      });
+    }
   } else if (j.type === 'rate_limit_event') {
     // The account's real 5h / 7-day utilization (0..1) as the subscription sees it, not just Harbor's runs.
     const uw = j.rate_limit_info?.unifiedWindows, asOf = Date.now();
     const limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }> = [];
     // `five_hour` / `seven_day` are account-wide; `seven_day_<model>` (e.g. opus, fable) is a per-model cap. The
-    // per-model key names are inferred from that pattern, not verified against every plan (see BACKLOG).
+    // per-model key names are inferred from that pattern, not verified against every plan (see BACKLOG). A real Max account
+    // (2026-10-12) also sends `seven_day_overage_included`: not a model, so it is not read as a model scope (meaning unverified).
     for (const [key, w] of Object.entries(uw ?? {}) as [string, any][]) {
       const m = /^(five_hour|seven_day)(?:_(.+))?$/.exec(key);
       if (!m || !w || typeof w.utilization !== 'number' || typeof w.resetsAt !== 'number') continue;
+      if (m[2] && /^overage/i.test(m[2])) continue;
       limits.push({ period: m[1] === 'five_hour' ? 'session' : 'weekly', usedPct: w.utilization * 100, resetsAt: w.resetsAt * 1000, asOf, ...(m[2] ? { scope: m[2].toLowerCase() } : {}) });
     }
     if (limits.length) out.push({ kind: 'limits', limits });

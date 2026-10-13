@@ -1,7 +1,7 @@
 import type { CliId, Id, UsageWindow } from '../shared/api';
 import type { ReportedLimit } from './codexLimits';
 import { newId, type Store } from './store';
-import { DEFAULT_CATALOG, USD_PER_WEIGHT, costWeightOf, type CatalogEntry } from './clis/capabilities';
+import { DEFAULT_CATALOG, USD_PER_WEIGHT, costWeightOf, entryFor, type CatalogEntry } from './clis/capabilities';
 import type { UsageEvent } from './types';
 
 export type UsageLevel = 'plenty' | 'limited' | 'low' | 'exhausted';
@@ -65,13 +65,42 @@ export interface LedgerOptions {
  * says so in the window label. Percentages are Harbor-run estimates relative to an assumed budget; a
  * rate-limit reported by the CLI itself is the only 'reported' signal and forces 100%.
  */
+/** Readings seen during runs (UsageLedger.observe) are kept this long in memory: the burn rate looks back about a day. */
+export const OBSERVED_KEEP_MS = 48 * 60 * 60 * 1000;
+
 export class UsageLedger {
   private now: () => number;
   private windowMs: number;
+  /** Provider readings the CLIs printed during runs still in flight (their usage events, which persist them, come at the end). */
+  private observed: Array<{ cli: CliId; limit: ReportedLimit }> = [];
 
   constructor(private store: Store, private opts: LedgerOptions = {}) {
     this.now = opts.now ?? Date.now;
     this.windowMs = opts.windowMs ?? WINDOW_MS;
+  }
+
+  /** The ledger's clock (injected in tests): routing judges pools at this time when it is given no clock of its own. */
+  time(): number { return this.now(); }
+
+  /**
+   * Every provider reading Harbor has seen for a CLI: the CLI's own logs plus the limits it printed during Harbor runs (each window
+   * and scope, any age). The budget governor derives burn rates from successive readings, so nothing is deduplicated here.
+   */
+  readings(cli: CliId): ReportedLimit[] {
+    const out = [...(this.opts.reported?.(cli) ?? [])];
+    for (const u of this.store.listUsage()) if (u.cli === cli) for (const l of u.limits ?? []) out.push(l);
+    for (const o of this.observed) if (o.cli === cli) out.push(o.limit);
+    return out;
+  }
+
+  /**
+   * A reading the CLI printed during a run (Claude's rate_limit_event): visible to routing at once instead of when the run ends and its
+   * usage event is recorded. A 40-minute run would otherwise hide its own readings, and every other run's, for 40 minutes (Phase 5).
+   */
+  observe(cli: CliId, limits: readonly ReportedLimit[]): void {
+    const now = this.now();
+    this.observed = this.observed.filter((o) => o.limit.asOf >= now - OBSERVED_KEEP_MS);
+    for (const limit of limits) this.observed.push({ cli, limit });
   }
 
   record(e: Omit<UsageEvent, 'id' | 'time'> & { time?: number }): UsageEvent {
@@ -93,6 +122,7 @@ export class UsageLedger {
     };
     this.opts.reported?.(cli).forEach(see);
     for (const u of this.store.listUsage()) if (u.cli === cli) u.limits?.forEach(see);
+    for (const o of this.observed) if (o.cli === cli) see(o.limit);
     return last;
   }
 
@@ -109,10 +139,9 @@ export class UsageLedger {
     if (live) return live;
     // Limits the CLI printed during Harbor's own runs: newest observation wins; rolled-over windows are stale.
     let best: ReportedLimit | undefined;
-    for (const u of this.store.listUsage()) {
-      if (u.cli !== cli) continue;
-      for (const l of u.limits ?? []) if (l.period === period && l.scope === scope && l.resetsAt > this.now() && (!best || l.asOf >= best.asOf)) best = l;
-    }
+    const consider = (l: ReportedLimit) => { if (l.period === period && l.scope === scope && l.resetsAt > this.now() && (!best || l.asOf >= best.asOf)) best = l; };
+    for (const u of this.store.listUsage()) if (u.cli === cli) u.limits?.forEach(consider);
+    for (const o of this.observed) if (o.cli === cli) consider(o.limit);
     return best;
   }
 
@@ -174,9 +203,16 @@ export class UsageLedger {
     let last = 0;
     // A rate limit hit before a reset the CLI has since reported no longer holds the CLI out.
     const reset = this.lastKnownReset(cli);
-    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited && u.time > reset && (model === undefined || u.model === model || u.cliWide)) last = Math.max(last, u.time);
+    for (const u of this.store.listUsage()) if (u.cli === cli && u.rateLimited && u.time > reset && (model === undefined || this.sameModel(cli, u.model, model) || u.cliWide)) last = Math.max(last, u.time);
     const until = last + COOLDOWN_MS;
     return last && until > this.now() ? until : undefined;
+  }
+
+  /** One model under two names (a run recorded under an old alias such as 'opus' and its full id now). */
+  private sameModel(cli: CliId, a: string, b: string): boolean {
+    if (a === b) return true;
+    const catalog = this.opts.catalog ?? DEFAULT_CATALOG, ea = entryFor(catalog, cli, a);
+    return !!ea && ea === entryFor(catalog, cli, b);
   }
 
   /** `cooldown`: whether a recent rate limit on any model counts as the whole CLI being out (display) or not (routing, which cools models individually). */
@@ -201,6 +237,7 @@ export class UsageLedger {
     const add = (l: ReportedLimit) => { if (l.scope && l.resetsAt > this.now()) out.add(l.scope); };
     this.opts.reported?.(cli).forEach(add);
     for (const u of this.store.listUsage()) if (u.cli === cli) u.limits?.forEach(add);
+    for (const o of this.observed) if (o.cli === cli) add(o.limit);
     return [...out];
   }
 

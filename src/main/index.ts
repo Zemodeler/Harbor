@@ -3,6 +3,7 @@ import { statSync } from 'node:fs';
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, shell, Tray } from 'electron';
 import { registerIpc, type IpcHost } from './ipc';
 import { readCodexLimits } from './codexLimits';
+import { readCodexModels } from './clis/codexModels';
 import { createLogger } from './logger';
 import { createHarborService } from './service';
 import { editorUrl, launchTerminal } from './launcher';
@@ -96,6 +97,8 @@ if (startupAction === 'start') app.whenReady().then(() => {
     // Codex logs its real 5h/weekly limits locally. Claude's come from the rate_limit_event in its own stream
     // during Harbor runs (see usage.ts), so they appear after the first Claude run and are estimates before that.
     ledger: { reported: (cli) => (cli === 'codex' ? readCodexLimits() : []) },
+    // Codex caches the account's model list locally; only that file is read (never auth files).
+    codexModels: () => readCodexModels(),
     pickFolder: async () => {
       const r = await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Open project folder' });
       return r.canceled ? undefined : r.filePaths[0];

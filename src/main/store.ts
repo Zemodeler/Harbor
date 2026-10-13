@@ -4,13 +4,14 @@ import { dirname, join } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
 import type { TrackedProcess } from './proc';
+import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
 
 /**
  * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
  * report delivery (`AgentRecord.reportDelivery`); its absence means a file written before that existed.
  */
-type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive };
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive; calibration?: Calibration };
 
 /** Totals of usage events pruned from `usage`, so lifetime cost figures survive pruning. */
 export interface UsageTotals { runs: number; inputTokens: number; outputTokens: number; costUsd: number }
@@ -402,6 +403,8 @@ export class Store {
     if (i >= 0) this.state.sessions[i] = link; else this.state.sessions.push(link);
     this.dirty();
   }
+  /** Models of the saved native sessions of one CLI: a resumed session must keep its model even when a model list drops it. */
+  sessionModels(cli: CliId): string[] { return [...new Set(this.state.sessions.filter((s) => s.cli === cli && s.model).map((s) => s.model!))]; }
   clearSession(agentId: Id): void { this.state.sessions = this.state.sessions.filter((s) => s.agentId !== agentId); this.dirty(); }
 
   // ---- usage
@@ -441,6 +444,13 @@ export class Store {
     return out;
   }
   listUsage(): UsageEvent[] { return this.state.usage; }
+
+  /** Cost figures learned from measured runs (calibration.ts); absent until the first run, and in files written before Phase 3. */
+  getCalibration(): Calibration | undefined {
+    const c = this.state.calibration;
+    return c && c.version === 1 && typeof c.throughTime === 'number' && c.pctPerKTok && c.tokensK && c.minutes ? c : undefined;
+  }
+  setCalibration(c: Calibration): void { this.state.calibration = c; this.dirty(); }
   addResetApproval(r: State['resetApprovals'][number]): void { this.state.resetApprovals.push(r); this.dirty(); }
   listResetApprovals(): State['resetApprovals'] { return this.state.resetApprovals; }
 

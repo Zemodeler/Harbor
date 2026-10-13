@@ -94,7 +94,7 @@ export function buildHandoff(i: HandoffInput): string {
     const stale = (e: HandoffEvidence) => !!e.tested && !!e.head && e.tested !== e.head;
     const ordered = [...i.evidence.filter(stale), ...i.evidence.filter((e) => !stale(e))];
     const lines = ordered.map((e) => `- ${evidenceLine(e)}`);
-    parts.push(`Verification evidence (valid only for the commit shown; anything committed since is unverified):\n${fit(lines, BUDGET.evidence, 'entries').join('\n')}`);
+    parts.push(`Verification evidence (valid only for the commit shown; anything committed since is unverified; the full test suite and any database setup run once, in one validation step, not per helper):\n${fit(lines, BUDGET.evidence, 'entries').join('\n')}`);
   }
   if (i.applied.length) parts.push(`Already applied to the user's branch:\n${fit(i.applied.map((a) => `- ${line(a)}`), BUDGET.applied, 'entries').join('\n')}`);
   if (!parts.length) return '';

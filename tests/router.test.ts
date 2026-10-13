@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_CATALOG, loadCatalog, loadCatalogWithWarnings, type CatalogEntry } from '../src/main/clis/capabilities';
 import type { ResolvedCli } from '../src/main/clis/discovery';
-import { ROUTING_WEIGHTS as W, explainNoRoute, finalEffort, route, usagePenalty, type RouteRequest, type RouterInput, type RoutingPolicy } from '../src/main/router';
+import { ROUTING_WEIGHTS as W, explainNoRoute, finalEffort, route, type RouteRequest, type RouterInput, type RoutingPolicy } from '../src/main/router';
+import { PRICE_CAP, PRICE_POINTS_PER_DOUBLING } from '../src/main/routePrice';
 import { Store } from '../src/main/store';
 import { UsageLedger } from '../src/main/usage';
+import { EQUAL_POOLS, ONE_CODEX_MODEL } from './fixtures/catalogs';
 
 const NOW = 50_000_000_000;
 const HOUR = 3_600_000;
@@ -28,69 +30,41 @@ function mkLedger(o: { runs?: Record<string, number>; budget?: number; limits?: 
   return { ledger, t, rec };
 }
 
+// Phase 5: Codex's pool calibrated to Claude's per-token figures (EQUAL_POOLS) unless a test passes its own calibration (the realistic
+// fleets below use the measured priors as they are).
 const mkInput = (ledger: UsageLedger, extra: Partial<RouterInput> = {}, clis: ResolvedCli[] = [cli('claude'), cli('codex')]): RouterInput =>
-  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, ...extra });
+  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, calibration: EQUAL_POOLS, ...extra });
 const pick = (d: ReturnType<typeof route>) => (d ? `${d.cli}/${d.model}` : undefined);
 
 const twin = (cli: string, model = 'default'): CatalogEntry => ({ cli, model, tier: 'standard', strengths: ['code'] });
 
+// Phase 3: the tier terms and the usage/headroom curves are gone (the price term replaced them); these are the claims that remain.
 describe('ROUTING_WEIGHTS invariants (the claims in the comments)', () => {
-  it('a missing need costs less than overspending a tier; the needs term cannot buy a tier step', () => {
-    expect(W.needMiss).toBeLessThan(W.tierOver);
-    expect(W.needCap).toBeLessThan(W.tierUnder);
+  it('the needs term cannot outweigh a doubling of price twice over', () => {
+    expect(W.needCap).toBeLessThan(2 * PRICE_POINTS_PER_DOUBLING);
   });
-  it('request > settings preference > continuity; one tier step either way < preference', () => {
-    expect(W.requested).toBeGreaterThan(W.preferred);
+  it('request > whole price term; settings preference > continuity', () => {
+    expect(W.requested).toBeGreaterThan(PRICE_CAP);
     expect(W.preferred).toBeGreaterThan(W.continuity);
-    expect(W.preferred).toBeGreaterThan(W.tierUnder);
-    expect(W.preferred).toBeGreaterThan(W.tierOver);
+    expect(W.preferred).toBeGreaterThan(W.switchGap);
+    expect(W.switchGap).toBeGreaterThan(W.continuity);
   });
   it('avoid beats continuity but not an explicit request; history is bounded', () => {
     expect(W.avoid).toBeGreaterThan(W.continuity);
     expect(W.avoid).toBeLessThan(W.requested);
     expect(W.historyMax).toBeLessThan(W.requested);
   });
-  it('reduceEffort usage cap stays below continuity', () => {
+  it('reduceEffort price cap stays below continuity', () => {
     expect(W.reduceEffortUsageCap).toBeLessThan(W.continuity);
-  });
-  it('the usage curve is increasing, flat in the noise band, and its steepest slope times a 10% run stays under continuity', () => {
-    const c = W.usageCurve;
-    expect(c[0][1]).toBe(0);
-    let steepest = 0;
-    for (let i = 1; i < c.length; i++) {
-      expect(c[i][0]).toBeGreaterThan(c[i - 1][0]);
-      expect(c[i][1]).toBeGreaterThanOrEqual(c[i - 1][1]);
-      steepest = Math.max(steepest, (c[i][1] - c[i - 1][1]) / (c[i][0] - c[i - 1][0]));
-    }
-    expect(steepest * 10).toBeLessThan(W.continuity);
-  });
-  it('level floors match the curve at the level thresholds (no cliff) and estimates count for less', () => {
-    expect(usagePenalty(50, 'limited', 'reported')).toBeCloseTo(W.levelFloor.limited);
-    expect(usagePenalty(80, 'low', 'reported')).toBeCloseTo(W.levelFloor.low);
-    expect(W.estimatedUsageFactor).toBeGreaterThan(0);
-    expect(W.estimatedUsageFactor).toBeLessThan(1);
   });
 });
 
-describe('A5: no cliff at 80%', () => {
-  it('penalty is monotone and never jumps by more than 1 point per percent, across every threshold', () => {
-    const level = (p: number) => (p >= 80 ? 'low' : p >= 50 ? 'limited' : 'plenty') as 'low' | 'limited' | 'plenty';
-    for (const src of ['reported', 'estimated'] as const) {
-      let prev = usagePenalty(0, 'plenty', src);
-      for (let p = 1; p < 100; p++) {
-        const cur = usagePenalty(p, level(p), src);
-        expect(cur).toBeGreaterThanOrEqual(prev);
-        expect(cur - prev).toBeLessThanOrEqual(1);
-        prev = cur;
-      }
-    }
-    expect(usagePenalty(80, 'low', 'reported') - usagePenalty(79, 'limited', 'reported')).toBeLessThan(1);
-  });
-
+describe('A5: stability', () => {
   it('under reduceEffort, one extra run never flips a lead off the CLI that holds its session (reported 0-99%)', () => {
     for (let pct = 0; pct < 100; pct++) {
       const { ledger } = mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: pct, resetsAt: NOW + 4 * HOUR }] });
-      const d = route({ role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'], continuity: 'claude' }, mkInput(ledger, { policy: { lowAllowance: 'reduceEffort' } }))!;
+      // Phase 3: a lead is interactive (it may use the reserve); a helper would be held out near the top by the reserve.
+      const d = route({ role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'], continuity: 'claude', interactive: true }, mkInput(ledger, { policy: { lowAllowance: 'reduceEffort' } }))!;
       expect(d.cli, `${pct}%`).toBe('claude');
     }
   });
@@ -120,17 +94,22 @@ describe('A5: no cliff at 80%', () => {
     expect(new Set(seq).size).toBe(1);
   });
 
-  it('without continuity, parallel work balances: the two CLIs never drift more than 3 runs apart and it settles', () => {
+  // Phase 3 (was: "parallel work balances, never more than 3 runs apart"): a pool in surplus is not dearer for being used, so sequential
+  // work stays on one CLI while its pool is comfortable and moves before that pool runs short; running agents (load) still spread
+  // parallel work. On ONE_CODEX_MODEL so the two CLIs are priced alike.
+  it('sequential work moves before a pool runs short, and parallel load spreads work', () => {
     const { ledger, rec } = mkLedger({ budget: 40 });
     const runs: Record<string, number> = { claude: 0, codex: 0 };
-    const seq: string[] = [];
-    for (let i = 0; i < 20; i++) {
-      const d = route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, mkInput(ledger, { verified: () => true }))!;
-      runs[d.cli]++; seq.push(d.cli); rec(d.cli);
-      expect(Math.abs(runs['claude'] - runs['codex'])).toBeLessThanOrEqual(5);
+    for (let i = 0; i < 40; i++) {
+      const d = route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, mkInput(ledger, { verified: () => true, catalog: ONE_CODEX_MODEL }))!;
+      // Never onto a CLI past 3/4 of its (estimated) 5h window while the other is under half.
+      const other = d.cli === 'claude' ? 'codex' : 'claude';
+      expect(runs[d.cli]! >= 30 && runs[other]! < 20, `${i}: ${d.cli}`).toBe(false);
+      runs[d.cli]++; rec(d.cli);
     }
-    // After the opening stretch the choice alternates rather than thrashing.
-    expect(Math.abs(runs['claude'] - runs['codex'])).toBeLessThanOrEqual(3);
+    expect(Math.min(runs['claude']!, runs['codex']!)).toBeGreaterThanOrEqual(10);
+    const busy = route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, mkInput(mkLedger().ledger, { catalog: ONE_CODEX_MODEL, load: (c) => (c === 'claude' ? 1 : 0) }))!;
+    expect(busy.cli).toBe('codex');
   });
 });
 
@@ -178,14 +157,18 @@ describe('A1: structured decision', () => {
     expect(d.cli).toBe('codex'); // claude is at 50% estimated, codex fresh
   });
 
-  it('lists skips, and marks a degraded tier when the strong model is unavailable', () => {
+  // Phase 3: degraded means nothing that clears the floor was available. Planning needs are stated so the fixture's Codex model
+  // (planning 3) cannot clear hard planning even at high effort (with code 4 it would just clear it, and get a review instead).
+  it('lists skips, and marks a degraded choice when nothing that clears the floor is available', () => {
     const { ledger } = mkLedger();
-    const d = route({ role: 'planner', complexity: 'high' }, mkInput(ledger, {}, [cli('claude', { installed: false }), cli('codex')]))!;
+    const d = route({ role: 'planner', complexity: 'high', needs: ['planning'] }, mkInput(ledger, { catalog: ONE_CODEX_MODEL }, [cli('claude', { installed: false }), cli('codex')]))!;
     expect(pick(d)).toBe('codex/default');
-    expect(d.degraded).toEqual({ wantedTier: 'strong', gotTier: 'standard' });
+    // The cheapest tier that would have cleared it on these CLIs: Sonnet (standard) at high effort, had claude been installed.
+    expect(d.degraded).toEqual({ wantedTier: 'standard', gotTier: 'standard' });
+    expect(d.needsReview).toBe(true);
     expect(d.skipped).toContainEqual({ cli: 'claude', why: 'not installed' });
-    expect(d.reason).toMatch(/tier lowered/);
-    const ok = route({ role: 'planner', complexity: 'high' }, mkInput(ledger))!;
+    expect(d.reason).toMatch(/degraded: nothing that clears difficulty 8 was available/);
+    const ok = route({ role: 'planner', complexity: 'high', needs: ['planning'] }, mkInput(ledger))!;
     expect(ok.degraded).toBeUndefined();
   });
 
@@ -196,7 +179,7 @@ describe('A1: structured decision', () => {
     const req: RouteRequest = { role: 'implementer', complexity: 'medium' };
     expect(route(req, inp)).toBeUndefined();
     const text = explainNoRoute(req, inp);
-    expect(text).toMatch(/claude\/sonnet: allowance exhausted or rate limited \(available again around \d{4}-/);
+    expect(text).toMatch(/claude\/claude-sonnet-5-5: allowance exhausted or rate limited \(available again around \d{4}-/);
     expect(text).toContain(new Date(reset).toISOString().slice(0, 16).replace('T', ' '));
     expect(text).toMatch(/codex: not installed/);
     expect(text).toMatch(/gemini: login required/);
@@ -232,12 +215,12 @@ describe('A3: needs', () => {
   it('a required need skips models without it, with a note; with none left there is no route', () => {
     const { ledger } = mkLedger();
     const d = route({ role: 'main', complexity: 'low', tier: 'cheap', required: ['vision'] }, mkInput(ledger))!;
-    expect(pick(d)).toBe('claude/sonnet'); // haiku and codex have no vision in the catalog
-    expect(d.reason).toMatch(/claude\/haiku skipped: lacks required vision/);
-    expect(d.reason).toMatch(/codex\/default skipped: lacks required vision/);
+    expect(pick(d)).toBe('claude/claude-sonnet-5-5'); // haiku and codex have no vision in the catalog
+    expect(d.reason).toMatch(/claude\/claude-haiku-5-5 skipped: lacks required vision/);
+    expect(d.reason).toMatch(/codex\/gpt-6\.1-sol skipped: lacks required vision/);
     const none = mkInput(ledger, {}, [cli('codex')]);
     expect(route({ role: 'main', complexity: 'low', required: ['vision'] }, none)).toBeUndefined();
-    expect(explainNoRoute({ role: 'main', complexity: 'low', required: ['vision'] }, none)).toMatch(/codex\/default: lacks required vision/);
+    expect(explainNoRoute({ role: 'main', complexity: 'low', required: ['vision'] }, none)).toMatch(/codex\/gpt-6-luna: lacks required vision/);
   });
   it('a CLI missing from the catalog has unknown capabilities: usable, but never for a required need', () => {
     const { ledger } = mkLedger();
@@ -266,20 +249,20 @@ describe('A4: usage confidence', () => {
     expect(r).toMatchObject({ level: 'low', projectedPct: 120, source: 'reported' });
   });
 
+  // Phase 3: the budget governor pulls an estimate's scarcity halfway to neutral (trust 0.5), so the same percentage moves the price
+  // less than a provider reading (was: the usage term counted an estimate's used% for half).
   it('the same percentage costs less when it is only Harbor\'s estimate', () => {
     const est = mkLedger({ runs: { claude: 6 } });
-    const rep = mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: 60, resetsAt: NOW + 1.5 * HOUR }] }); // pace projects ~86%: the level stays limited
-    const req: RouteRequest = { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'] };
+    // Same state both ways: 60% used, burning at the pace that empties the window at its reset (the estimate's rolling window starts now).
+    const rep = mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: 60, resetsAt: NOW + 2.5 * HOUR }] });
+    const req: RouteRequest = { role: 'main', complexity: 'medium', tier: 'standard', needs: ['code'], interactive: true };
     const a = route(req, mkInput(est.ledger, {}, [cli('claude')]))!, b = route(req, mkInput(rep.ledger, {}, [cli('claude')]))!;
-    // Headroom routing: an estimate's used% counts for W.estimatedUsageFactor of itself, so it costs well under half of the same reported reading.
-    expect(a.scored![0].terms['usage']).toBeLessThan(0);
-    expect(Math.abs(a.scored![0].terms['usage'])).toBeLessThan(Math.abs(b.scored![0].terms['usage']) * W.estimatedUsageFactor + 1e-9);
-    // Explicit stay-put policy keeps the older curve, where the penalty is exactly scaled.
-    const pol = { lowAllowance: 'reduceEffort' as const };
-    const a2 = route(req, mkInput(est.ledger, { policy: pol }, [cli('claude')]))!, b2 = route(req, mkInput(rep.ledger, { policy: pol }, [cli('claude')]))!;
-    expect(a2.scored![0].terms['usage']).toBeCloseTo(b2.scored![0].terms['usage'] * W.estimatedUsageFactor, 5);
+    expect(a.model).toBe(b.model);
+    expect(a.price!.scarcity).toBeGreaterThan(1);
+    expect(a.price!.scarcity).toBeLessThan(b.price!.scarcity);
     expect(a.reason).toMatch(/~60% estimated/);
-    expect(b.reason).not.toMatch(/estimated/);
+    expect(a.reason).toMatch(/estimate from Harbor runs only, not the provider's quota/);
+    expect(b.reason).not.toMatch(/~60% estimated/);
   });
 });
 
@@ -301,30 +284,33 @@ describe('A6: effort composition', () => {
     expect(finalEffort({ ...input }).effort).toBe(expected);
   });
 
-  it('route() uses it: a retry keeps high effort at low allowance, a fixed effort is untouched', () => {
-    const { ledger } = mkLedger({ runs: { claude: 8 } });
-    const inp = mkInput(ledger, {}, [cli('claude')]);
-    expect(route({ role: 'implementer', complexity: 'medium', retry: true }, inp)!.effort).toBe('high');
+  // Phase 3: route() prices the effort instead of composing a label; the precedence stays: a fixed effort is untouched, a retry is
+  // never lowered by policy, and a low allowance lowers only where the work still clears (explicit policy).
+  it('route() keeps the precedence: fixed untouched, a retry never lowered, a policy lowers only what still clears', () => {
+    const inp = mkInput(mkLedger().ledger, { policy: { effortPolicy: 'conserve' } }, [cli('claude')]);
     expect(route({ role: 'main', complexity: 'medium', tier: 'standard', effort: 'medium', fixedEffort: true }, inp)!.effort).toBe('medium');
-    expect(route({ role: 'implementer', complexity: 'medium' }, inp)!.effort).toBe('low');
+    // The hardest work runs on Opus at medium (low only just clears it): conserve lowers it, but never a retry's.
+    expect(route({ role: 'implementer', complexity: 'high', difficulty: 10, retry: true }, inp)!.effort).toBe('medium');
+    expect(route({ role: 'implementer', complexity: 'high', difficulty: 10 }, inp)!.effort).toBe('low');
+    expect(route({ role: 'implementer', complexity: 'medium' }, inp)!.effort).toBe('medium');
   });
 });
 
+// Phase 3: the hardest work (difficulty 10) is the case with effort to spare (Opus at medium; low only just clears); the default policy
+// no longer lowers effort for allowance (the price already weighs it), only the explicit policies do, and only where the work clears.
 describe('low allowance policies', () => {
-  const lead: RouteRequest = { role: 'planner', complexity: 'high', continuity: 'claude' };
+  const lead: RouteRequest = { role: 'implementer', complexity: 'high', difficulty: 10, continuity: 'claude' };
   it("'reduceEffort' keeps the session's CLI and lowers effort; it does not switch even with a healthy alternative", () => {
     const { ledger } = mkLedger({ runs: { claude: 9 } });
-    for (const lowAllowance of [undefined, 'reduceEffort'] as const) {
-      const d = route(lead, mkInput(ledger, { policy: { lowAllowance } }))!;
-      expect(d).toMatchObject({ cli: 'claude', effort: 'medium' });
-      expect(d.reason).toMatch(/effort lowered: allowance low/);
-    }
+    const d = route(lead, mkInput(ledger, { policy: { lowAllowance: 'reduceEffort' } }))!;
+    expect(d).toMatchObject({ cli: 'claude', model: 'claude-opus-5-5', effort: 'low' });
+    expect(d.reason).toMatch(/effort medium → low: allowance low/);
   });
   it("'switch' moves to a healthy CLI, and still lowers effort when it is the only choice", () => {
     const { ledger } = mkLedger({ runs: { claude: 9 } });
     expect(route(lead, mkInput(ledger, { policy: { lowAllowance: 'switch' } }))!.cli).toBe('codex');
     const alone = route(lead, mkInput(ledger, { policy: { lowAllowance: 'switch' } }, [cli('claude')]))!;
-    expect(alone).toMatchObject({ cli: 'claude', effort: 'medium' });
+    expect(alone).toMatchObject({ cli: 'claude', effort: 'low' });
     expect(alone.reason).toMatch(/no healthier option/);
   });
 });
@@ -343,7 +329,7 @@ describe('A7: avoid and history', () => {
   });
   it('avoid can name one model; an explicit request still outweighs it', () => {
     const { ledger } = mkLedger();
-    expect(pick(route({ role: 'implementer', complexity: 'medium', avoid: [{ cli: 'claude', model: 'sonnet' }] }, mkInput(ledger, {}, [cli('claude')])))).toBe('claude/opus'); // one tier over costs 8, avoid costs 30
+    expect(pick(route({ role: 'implementer', complexity: 'medium', avoid: [{ cli: 'claude', model: 'sonnet' }] }, mkInput(ledger, {}, [cli('claude')])))).toBe('claude/claude-opus-5-5'); // one tier over costs 8, avoid costs 30
     const asked = route({ ...req, prefer: 'claude', avoid: [{ cli: 'claude' }] }, mkInput(ledger, { catalog }))!;
     expect(asked.cli).toBe('claude');
   });
@@ -374,31 +360,44 @@ describe('hard limits', () => {
   it('exclude and requireCli are hard; disabled and adapter-less CLIs are skipped', () => {
     const { ledger } = mkLedger();
     expect(route({ role: 'implementer', complexity: 'low', exclude: ['claude', 'codex'] }, mkInput(ledger))).toBeUndefined();
-    expect(pick(route({ role: 'implementer', complexity: 'low', requireCli: 'codex' }, mkInput(ledger)))).toBe('codex/default');
+    expect(pick(route({ role: 'implementer', complexity: 'low', requireCli: 'codex' }, mkInput(ledger)))).toBe('codex/gpt-6-luna');
     const d = route({ role: 'implementer', complexity: 'low' }, mkInput(ledger, { enabled: (c) => c !== 'claude', hasAdapter: (c) => c !== 'gemini' }, [cli('claude'), cli('codex'), cli('gemini')]))!;
     expect(d.cli).toBe('codex');
-    expect(d.skipped!.map((s) => s.why)).toEqual(['disabled in settings', 'no headless adapter yet']);
+    // Catalog v2: legacy and not-auto-routed Codex models are listed as skips too, so the reason says why they were not used.
+    expect(d.skipped!.map((s) => s.why)).toEqual(['disabled in settings', 'legacy model', 'legacy model', 'legacy model', 'not auto-routed', 'no headless adapter yet']);
   });
 });
 
+// Phase 3: on the built-in catalog the price decides. Phase 5: with the priors measured on 2026-10-12 a Codex token is ~9x the share of
+// Codex's weekly window that a Claude token is of Claude's, so fresh-vs-fresh Claude wins the comparisons Codex's cheaper per-token
+// models used to win (Phase 3 expected codex/gpt-6.1-sol for medium code, codex/gpt-6-astra for a hard plan, codex/gpt-6-sol for the
+// reviewer). The equal-priors case keeps Codex's pool calibrated to Claude's (EQUAL_POOLS) and still ties on catalog order.
+const EQUAL = { ...EQUAL_POOLS };
 describe('realistic fleets', () => {
-  const cases: Array<[string, () => RouterInput, RouteRequest, string, { tied?: boolean; degraded?: boolean }?]> = [
-    ['both fresh, medium code: claude by catalog order', () => mkInput(mkLedger().ledger, { verified: () => true }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'claude/sonnet', { tied: true }],
-    ['both fresh, hard plan: claude opus', () => mkInput(mkLedger().ledger), { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/opus'],
-    ['codex only, hard plan: degraded', () => mkInput(mkLedger().ledger, {}, [cli('codex')]), { role: 'planner', complexity: 'high' }, 'codex/default', { degraded: true }],
-    ['claude 90% reported, medium work moves to codex', () => mkInput(mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: 90, resetsAt: NOW + 3 * HOUR }] }).ledger), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/default'],
-    ['opus capped, strong work goes to fable', () => mkInput(mkLedger({ rateLimited: [['claude', 'opus']] }).ledger, {}, [cli('claude')]), { role: 'implementer', complexity: 'high' }, 'claude/claude-fable-5-1'],
+  const cases: Array<[string, () => RouterInput, RouteRequest, string, { tied?: boolean; degraded?: boolean; review?: boolean }?]> = [
+    ['both fresh, medium code: the capable model with the cheaper pool (claude)', () => mkInput(mkLedger().ledger, { verified: () => true }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'claude/claude-sonnet-5-5', { tied: false }],
+    ['both fresh, medium code on equal priors: claude by catalog order', () => mkInput(mkLedger().ledger, { verified: () => true, catalog: ONE_CODEX_MODEL, calibration: EQUAL }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'claude/claude-sonnet-5-5', { tied: true }],
+    ['both fresh, hard plan: the strong planner with the cheaper pool (opus)', () => mkInput(mkLedger().ledger), { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/claude-opus-5-5'],
+    ['claude only, hard plan: opus', () => mkInput(mkLedger().ledger, {}, [cli('claude')]), { role: 'planner', complexity: 'high', needs: ['planning'] }, 'claude/claude-opus-5-5'],
+    ['codex only, hard plan: the cheapest model that clears it', () => mkInput(mkLedger().ledger, {}, [cli('codex')]), { role: 'planner', complexity: 'high' }, 'codex/gpt-6.1-sol', { degraded: false }],
+    ['claude 90% reported, medium work moves to codex', () => mkInput(mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: 90, resetsAt: NOW + 3 * HOUR }] }).ledger), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/gpt-6.1-sol'],
+    // Fable is not auto-routed (catalog v2): with Opus capped, strong work is degraded to Sonnet instead of spending Fable.
+    ['opus capped, strong work does not reach fable: sonnet at high effort, reviewed', () => mkInput(mkLedger({ rateLimited: [['claude', 'opus']] }).ledger, {}, [cli('claude')]), { role: 'implementer', complexity: 'high' }, 'claude/claude-sonnet-5-5', { degraded: false, review: true }],
     ['unknown CLI only: default model', () => mkInput(mkLedger().ledger, {}, [cli('gemini')]), { role: 'main', complexity: 'low' }, 'gemini/default'],
-    ['cheap chat front desk', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'] }, 'claude/haiku'],
-    ['user asked for codex', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'medium', tier: 'standard', prefer: 'codex', continuity: 'claude' }, 'codex/default'],
-    ['role preference for codex', () => mkInput(mkLedger().ledger, { policy: { preference: { cli: 'codex' } } }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/default'],
-    ['reviewer in a worktree with claude at 70% estimated and codex fresh', () => mkInput(mkLedger({ runs: { claude: 7 } }).ledger), { role: 'reviewer', complexity: 'medium', needs: ['review'] }, 'codex/default']
+    ['cheap chat front desk', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'] }, 'claude/claude-haiku-5-5'],
+    ['user asked for codex', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'medium', tier: 'standard', prefer: 'codex', continuity: 'claude' }, 'codex/gpt-6.1-sol'],
+    ['role preference for codex', () => mkInput(mkLedger().ledger, { policy: { preference: { cli: 'codex' } } }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/gpt-6.1-sol'],
+    // An estimate (Harbor's run count against an assumed budget) moves prices at half trust; it does not outweigh the pools' sizes.
+    ['reviewer in a worktree with claude at 70% estimated and codex fresh', () => mkInput(mkLedger({ runs: { claude: 7 } }).ledger), { role: 'reviewer', complexity: 'medium', needs: ['review'] }, 'claude/claude-sonnet-5-5']
   ];
   it.each(cases)('%s', (_n, inp, req, expected, flags) => {
-    const d = route(req, inp())!;
+    // The measured priors as they are (no EQUAL_POOLS): these are the built-in fleets.
+    const i = inp();
+    const d = route(req, i.calibration === EQUAL_POOLS ? { ...i, calibration: undefined } : i)!;
     expect(pick(d)).toBe(expected);
     if (flags?.tied !== undefined) expect(d.tied).toBe(flags.tied);
-    if (flags?.degraded) expect(d.degraded).toBeDefined();
+    if (flags?.degraded !== undefined) expect(!!d.degraded).toBe(flags.degraded);
+    if (flags?.review !== undefined) expect(!!d.needsReview).toBe(flags.review);
   });
 });
 
@@ -432,5 +431,15 @@ describe('A8: catalog warnings', () => {
     expect(loadCatalogWithWarnings(f).warnings[0]).toMatch(/must be a list/);
     writeFileSync(f, '[]');
     expect(loadCatalogWithWarnings(f).warnings[0]).toMatch(/no usable entry/);
+  });
+
+  // Review finding: Math.min(10, Math.max(0, NaN)) is NaN, which made every price and floor NaN.
+  it('route() treats a NaN difficulty or urgency like an absent one', () => {
+    const inp = mkInput(mkLedger().ledger, {}, [cli('claude')]);
+    const base = route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, inp)!;
+    const bad = route({ role: 'implementer', complexity: 'medium', needs: ['code'], difficulty: NaN, urgency: NaN }, inp)!;
+    expect(bad.difficulty).toBe(base.difficulty);
+    expect(Number.isFinite(bad.difficulty)).toBe(true);
+    expect(bad.model).toBe(base.model);
   });
 });

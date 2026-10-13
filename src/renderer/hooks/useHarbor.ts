@@ -312,12 +312,12 @@ export function useHarbor() {
       return updated;
     });
   }
-  async function send(text: string, attachments?: ImageUpload[]) {
+  async function send(text: string, attachments?: ImageUpload[], opts?: { steer?: boolean }) {
     const c = conversation;
     if (!c) return false;
     setSending(s => new Set(s).add(c.id));
     let success = false;
-    await run(async () => { await (attachments?.length ? api.send(c.id, text, attachments) : api.send(c.id, text)); success = true;
+    await run(async () => { await (opts?.steer ? api.send(c.id, text, attachments?.length ? attachments : undefined, opts) : attachments?.length ? api.send(c.id, text, attachments) : api.send(c.id, text)); success = true;
       const cs = await api.listConversations(c.projectId);
       if (current.current.projectId === c.projectId) setConversations(cs);
     });

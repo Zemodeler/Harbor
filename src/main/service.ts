@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
 import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
 import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
+import { mergeCodexModels, type CodexModel } from './clis/codexModels';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
 import { Git } from './git';
@@ -23,7 +24,8 @@ import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline'> & {
+  setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
   openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
   getGitLogPage(projectId: Id, opts?: { branch?: string; limit?: number; skip?: number }): Promise<{ commits: GitCommit[]; hasMore: boolean; note?: string }>;
@@ -71,6 +73,8 @@ export interface ServiceOptions {
   setTimer?: (fn: () => void, ms: number) => () => void;
   /** Stall watchdog and per-run time limits (tests); defaults in orchestrator.ts. */
   stall?: OrchestratorDeps['stall'];
+  /** How long a helper's question to the user waits before Harbor answers with the safe default (tests); default in askRouting.ts. */
+  questionTimeoutMs?: number;
   /** Tests only: approve a project's checks file without asking the user. */
   autoApproveChecks?: boolean;
   /** Cap on automatic lead turns after one user message (default 12; tests lower it). */
@@ -80,6 +84,11 @@ export interface ServiceOptions {
   now?: () => number;
   /** Replace the capability catalog (tests); default: the built-in one with the data folder's capabilities.json on top. */
   catalog?: CatalogEntry[];
+  /**
+   * Codex's live model list (index.ts reads ~/.codex/models_cache.json; tests inject a fixture). Undefined result or option:
+   * the catalog's Codex priors are used as they are. See clis/codexModels.ts.
+   */
+  codexModels?: () => CodexModel[] | undefined;
   /** Shown by exportDiagnostics (index.ts passes app.getVersion(); this module never imports electron). */
   appVersion?: string;
 }
@@ -139,13 +148,26 @@ const VERIFIED = new Set<CliId>(['claude', 'codex']);
 /** Login failures from either CLI. Claude reports them in its result text; codex uses the same wording as discovery (clis/registry.ts). */
 export const SIGNED_OUT_RE = /not logged in|logged out|not signed in|please run \/login/i;
 
+/** Codex models the user's settings (global and per project) or a saved session name: they stay in the catalog even when Codex stops listing them. */
+function namedCodexModels(store: Store): string[] {
+  const s = store.getSettings();
+  const scopes = [s, ...Object.values(s.projectOverrides ?? {})];
+  const out = new Set<string>(store.sessionModels('codex'));
+  for (const x of scopes) {
+    for (const m of x.allowedModels?.['codex'] ?? []) out.add(m);
+    for (const p of Object.values(x.rolePreferences ?? {})) if (p?.cli === 'codex' && p.model) out.add(p.model);
+  }
+  return [...out];
+}
+
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
   // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog. What it dropped is
   // reported (log, journal, diagnostics) instead of silently routing on a catalog the owner did not intend.
   const loadedCatalog = loadCatalogWithWarnings(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined);
-  const catalog = opts.catalog ?? loadedCatalog.catalog;
+  // Codex's own model list corrects the catalog: models it stopped listing drop out, new ones join with middle priors.
+  const catalog = mergeCodexModels(opts.catalog ?? loadedCatalog.catalog, opts.codexModels?.(), namedCodexModels(store));
   const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), catalog, ...opts.ledger });
   const git = opts.git ?? new Git();
   const dataRoot = opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test');
@@ -217,6 +239,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     toolPermissionTimeoutMs: opts.toolPermissionTimeoutMs,
     setTimer: opts.setTimer,
     stall: opts.stall,
+    questionTimeoutMs: opts.questionTimeoutMs,
     maxAutoTurns: opts.maxAutoTurns,
     autoApproveChecks: opts.autoApproveChecks
   });
@@ -407,12 +430,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       try { rmSync(attachmentDir(dataRoot, id),{ recursive: true, force: true }); } catch { /* best effort: only Harbor's own copies */ }
       for (const k of [`lead:${id}`, `concierge:${id}`]) store.clearSession(k);
     },
-    async send(conversationId, text, attachments) {
+    async send(conversationId, text, attachments, opts) {
       await ready;
       if (!text.trim() && !attachments?.length) return;
       if (!store.getConversation(conversationId)) throw new Error('This conversation is no longer available.');
       const saved = attachments?.length ? saveAttachments(attachmentDir(dataRoot, conversationId), attachments) : [];
-      await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved);
+      await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved, { steer: opts?.steer === true });
     },
     async setConversationMode(conversationId, mode, goal) {
       const c = store.getConversation(conversationId);
@@ -423,6 +446,16 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const previous = c.mode ?? 'default';
       store.patchConversation(conversationId, { mode, goal: mode === 'goal' ? text!.slice(0, 2000) : undefined });
       orchestrator.modeChanged(conversationId, previous, mode);
+      bus.emit({ type: 'conversation', conversation: { ...c } });
+      return { ...c };
+    },
+    async setConversationDeadline(conversationId, deadline) {
+      const c = store.getConversation(conversationId);
+      if (!c) throw new Error('This conversation is no longer available.');
+      if (deadline !== null && !(typeof deadline === 'number' && Number.isFinite(deadline) && deadline > 0)) throw new Error('The deadline must be a time (epoch milliseconds), or null to clear it.');
+      // Routing reads it on the next decision (urgency from the deadline and the unfinished work's estimated minutes).
+      if (deadline === null) delete c.deadline;
+      store.patchConversation(conversationId, deadline === null ? {} : { deadline: Math.round(deadline) });
       bus.emit({ type: 'conversation', conversation: { ...c } });
       return { ...c };
     },

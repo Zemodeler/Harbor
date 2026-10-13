@@ -1,6 +1,7 @@
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines } from './stream';
+import { isEmittableEffort } from '../clis/effort';
 
 /**
  * Codex headless adapter (`codex exec --json`, JSONL events on stdout).
@@ -12,6 +13,12 @@ import { streamLines } from './stream';
  * Config values are passed WITHOUT embedded double quotes: Codex parses `-c key=value` as TOML and falls back to the raw string,
  * and a `"` would be rejected by the .cmd shim quoting in proc.ts (that bug silently routed every Codex run to Claude).
  * Paths in arrays use TOML literal strings ('...'), which also need no double quotes.
+ * Effort: `model_reasoning_effort` gets the per-model native value (clis/effort.ts) when the orchestrator passes one, else Harbor's
+ * low/medium/high. codex-cli 0.162 lists xhigh, max and ultra for some models; Harbor never emits them (guarded here as well).
+ * NOT VERIFIED: whether `codex exec` accepts xhigh/max through `-c model_reasoning_effort` (never sent today). `ultra` is excluded
+ * on purpose: it turns on automatic task delegation, and helpers never spawn agents.
+ * Mid-run token counts: `codex exec --json` was not seen to emit usage before `turn.completed`, so a stopped Codex run records
+ * duration and model but no tokens (marked partial). Not verified against a long run.
  */
 export function codexArgs(o: RunOptions): string[] {
   const a = ['exec'];
@@ -24,7 +31,7 @@ export function codexArgs(o: RunOptions): string[] {
   const roots = (o.writableDirs ?? []).filter((d) => d && !/[\r\n\0'%"]/.test(d));
   if (roots.length && o.permission === 'edit') a.push('-c', `sandbox_workspace_write.writable_roots=[${roots.map((d) => `'${d}'`).join(',')}]`);
   if (o.model && o.model !== 'default') a.push('-m', o.model);
-  a.push('-c', `model_reasoning_effort=${o.effort}`);
+  a.push('-c', `model_reasoning_effort=${isEmittableEffort(o.nativeEffort) ? o.nativeEffort : o.effort}`);
   a.push('-');
   return a;
 }
@@ -47,7 +54,13 @@ export function parseCodexLine(line: string): Chunk[] {
     else if (it.type === 'command_execution') out.push({ kind: 'tool', text: String(it.command ?? '').slice(0, 120) });
     else if (it.type === 'file_change') out.push({ kind: 'tool', text: 'file change' });
   } else if (t === 'turn.completed') {
-    out.push({ kind: 'usage', inputTokens: j.usage?.input_tokens, outputTokens: j.usage?.output_tokens });    out.push({ kind: 'done', ok: true });
+    // Codex's input count includes the cached part (its session logs show cached_input_tokens <= input_tokens, ~97% of it on a long
+    // thread): split it so cache reads are weighed as such (calibration.billableKTok), as Claude's are.
+    const u = j.usage ?? {};
+    const cached = typeof u.cached_input_tokens === 'number' ? u.cached_input_tokens : undefined;
+    const input = typeof u.input_tokens === 'number' ? (cached !== undefined ? Math.max(0, u.input_tokens - cached) : u.input_tokens) : undefined;
+    out.push({ kind: 'usage', inputTokens: input, outputTokens: u.output_tokens, ...(cached !== undefined ? { cacheReadTokens: cached } : {}) });
+    out.push({ kind: 'done', ok: true });
   } else if (t === 'turn.failed') {
     // A bare `error` event is often a transient notice (reconnecting, stream retry); only turn.failed ends the run.
     const msg = String(j.error?.message ?? j.message ?? 'codex error');
