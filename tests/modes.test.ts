@@ -10,6 +10,7 @@ import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { parseProtocol, stripProtocol } from '../src/main/prompts';
 import { attachmentDir, createHarborService, saveAttachments } from '../src/main/service';
+import { ONE_CODEX_MODEL } from './fixtures/catalogs';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-modes-')); dirs.push(d); return d; };
@@ -44,7 +45,9 @@ async function harness(scripts: Record<string, FakeScript>, ids = ['claude', 'co
   const adapters: Record<string, FakeAdapter> = {};
   for (const id of ids) adapters[id] = new FakeAdapter(id, scripts[id] ?? (() => say('ok')));
   const dataDir = tmp();
-  const svc = createHarborService({ dataDir, discover: async () => ids.map(fakeCli), adapterFor: (id) => adapters[id], worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3 });
+  // Phase 3: priced routing would hand the lead to the built-in catalog's cheaper Codex model; these tests are about modes, so Codex is
+  // the one Sonnet-priced model of the fixture and claude wins ties by catalog order, as before.
+  const svc = createHarborService({ dataDir, discover: async () => ids.map(fakeCli), adapterFor: (id) => adapters[id], worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3, catalog: ONE_CODEX_MODEL });
   const project = (await svc.addProject(gitRepo()))!;
   const [conv] = await svc.listConversations(project.id);
   const texts = async () => (await svc.listMessages(conv!.id)).map((m) => m.text);
@@ -229,7 +232,8 @@ describe('session activity and CLI pinning', () => {
     await h.svc.whenIdle();
     const a = (await h.svc.listConversations(h.project.id))[0]!.activity!;
     expect(a.complexity).toBe('high');
-    expect(a.effort).toBe('medium');
+    // Phase 3: the price picks the effort; Opus clears high work (difficulty 8) at low effort with half a level to spare (was medium).
+    expect(a.effort).toBe('low');
     expect(a.cli).toBe('claude');
   });
 

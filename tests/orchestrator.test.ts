@@ -3,11 +3,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ONE_CODEX_MODEL } from './fixtures/catalogs';
 import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { createHarborService } from '../src/main/service';
 import type { HarborEvent, Message } from '../src/shared/api';
+import { calmReported, onPaceReported } from './fixtures/calmReadings';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-orch-')); dirs.push(d); return d; };
@@ -40,7 +42,7 @@ const script = (r: Roles): FakeScript => (prompt, o, i) => {
   return (r.helper ?? (() => say('ok')))(prompt, o, i);
 };
 
-async function harness(scripts: Record<string, FakeScript | undefined>, opts: { git?: boolean; ids?: string[] } = {}) {
+async function harness(scripts: Record<string, FakeScript | undefined>, opts: { git?: boolean; ids?: string[]; reported?: 'calm' | 'onPace' } = {}) {
   const adapters: Record<string, FakeAdapter> = {};
   for (const id of opts.ids ?? ['claude', 'codex']) adapters[id] = new FakeAdapter(id, scripts[id] ?? (() => say('ok')));
   const events: HarborEvent[] = [];
@@ -48,7 +50,10 @@ async function harness(scripts: Record<string, FakeScript | undefined>, opts: { 
     discover: async () => Object.keys(adapters).map(fakeCli),
     adapterFor: (id) => adapters[id],
     worktreesRoot: join(tmp(), 'wt'),
-    maxActivePerProject: 3
+    maxActivePerProject: 3,
+    ...(opts.reported ? { ledger: { reported: opts.reported === 'onPace' ? onPaceReported : calmReported } } : {}), // parallel helpers need a provider reading
+    // One Codex model, as in catalog v1: these tests are about orchestration, and the Claude fakes script every role.
+    catalog: ONE_CODEX_MODEL
   });
   svc.onEvent((e) => events.push(e));
   const repoPath = opts.git === false ? tmp() : gitRepo();
@@ -70,9 +75,9 @@ describe('concierge: the cheap front desk', () => {
     await h.svc.whenIdle();
     expect(await h.texts()).toEqual(['hello', 'Hi there!']);
     expect(h.adapters.claude!.calls).toHaveLength(1);
-    expect(h.adapters.claude!.calls[0]!.opts).toMatchObject({ model: 'haiku', effort: 'low', permission: 'read-only' });
+    expect(h.adapters.claude!.calls[0]!.opts).toMatchObject({ model: 'claude-haiku-5-5', effort: 'low', permission: 'read-only' });
     const reply = (await h.messages()).find((m) => m.role === 'assistant')!;
-    expect(reply.details).toMatchObject({ cli: 'claude', model: 'haiku' });
+    expect(reply.details).toMatchObject({ cli: 'claude', model: 'claude-haiku-5-5' });
     expect(reply.details!.reason).toMatch(/cheap/);
   });
 
@@ -83,7 +88,7 @@ describe('concierge: the cheap front desk', () => {
     const texts = await h.texts();
     expect(texts).not.toContain('Done, I renamed it.');
     expect(texts).toContain('Renamed for real.');
-    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'sonnet' });
+    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'claude-sonnet-5-5' });
   });
 
   it('estimates complexity from the request: a one-file rename bypasses the front desk with a cheap lead, hard wording gets a strong one, and the signals are in the reason', async () => {
@@ -94,10 +99,10 @@ describe('concierge: the cheap front desk', () => {
       return { model: h.calls(isLead)[0]!.opts.model, reason, concierge: h.calls((c) => !isLead(c)).length };
     };
     const small = await run('rename the variable foo to bar in src/utils.ts');
-    expect(small).toMatchObject({ model: 'haiku', concierge: 0 });
+    expect(small).toMatchObject({ model: 'claude-haiku-5-5', concierge: 0 });
     expect(small.reason).toMatch(/complexity low estimated from the request \(low: small mechanical edit/);
     const hard = await run('refactor the session handling across the codebase and find the root cause of the flaky logout test');
-    expect(hard.model).toBe('opus');
+    expect(hard.model).toBe('claude-opus-5-5');
     expect(hard.reason).toMatch(/complexity high estimated from the request/);
   });
 
@@ -107,7 +112,7 @@ describe('concierge: the cheap front desk', () => {
       await h.svc.send(h.conv.id, 'x'); await h.svc.whenIdle();
       return h.calls(isLead)[0]!.opts.model;
     };
-    expect([await pick('low'), await pick('medium'), await pick('high')]).toEqual(['haiku', 'sonnet', 'opus']);
+    expect([await pick('low'), await pick('medium'), await pick('high')]).toEqual(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']);
   });
 
   it('shows its acknowledgement, then escalates to a lead that works directly in the project', async () => {
@@ -117,18 +122,19 @@ describe('concierge: the cheap front desk', () => {
     await h.svc.whenIdle();
     expect((await h.messages()).filter((m) => m.role === 'assistant').map((m) => m.text)).toEqual(['On it.', 'Fixed the typo.']);
     const [lead] = h.calls(isLead);
-    expect(lead!.opts).toMatchObject({ model: 'sonnet', permission: 'edit', cwd: h.repoPath });
+    expect(lead!.opts).toMatchObject({ model: 'claude-sonnet-5-5', permission: 'edit', cwd: h.repoPath });
     expect(lead!.prompt).toContain('User:\nplease look into why startup feels slow');
     expect(helpers(h)).toHaveLength(0); // no ceremony: a plain edit needs no helpers
-    expect((await h.messages()).filter((m) => m.role === 'assistant')[1]!.details).toMatchObject({ model: 'sonnet' });
+    expect((await h.messages()).filter((m) => m.role === 'assistant')[1]!.details).toMatchObject({ model: 'claude-sonnet-5-5' });
   });
 
   it('picks the lead model from the work: strong for hard problems', async () => {
     const h = await harness({ claude: script({ concierge: () => escalate('high'), lead: () => say('done') }) });
     await h.svc.send(h.conv.id, 'redesign the storage layer');
     await h.svc.whenIdle();
-    // The strong model already covers hard work; high effort on top is kept for planners, retries and /deep.
-    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'opus', effort: 'medium' });
+    // The strong model already covers hard work. Phase 3: the price picks the effort, and Opus clears high work (difficulty 8) at low
+    // effort with half a level to spare (was medium).
+    expect(h.calls(isLead)[0]!.opts).toMatchObject({ model: 'claude-opus-5-5', effort: 'low' });
   });
 
   it('a short go-ahead continues the last request at its size without a new front-desk call', async () => {
@@ -139,7 +145,7 @@ describe('concierge: the cheap front desk', () => {
     await h.svc.send(h.conv.id, 'Yes, build the panel');
     await h.svc.whenIdle();
     expect(h.calls(isConcierge)).toHaveLength(1);
-    expect(h.calls(isLead).map((c) => [c.opts.model, c.opts.effort])).toEqual([['sonnet', 'medium'], ['sonnet', 'medium']]);
+    expect(h.calls(isLead).map((c) => [c.opts.model, c.opts.effort])).toEqual([['claude-sonnet-5-5', 'medium'], ['claude-sonnet-5-5', 'medium']]);
     await h.svc.send(h.conv.id, 'thanks!');
     await h.svc.whenIdle();
     expect(h.calls(isConcierge)).toHaveLength(2); // small talk still goes to the cheap front desk
@@ -158,7 +164,7 @@ describe('concierge: the cheap front desk', () => {
     await h.svc.whenIdle();
     expect(h.calls(isConcierge)).toHaveLength(0);
     const [lead] = h.calls(isLead);
-    expect(lead!.opts).toMatchObject({ model: 'opus', effort: 'high' }); // explicitly asked for: the one lead turn at high effort
+    expect(lead!.opts).toMatchObject({ model: 'claude-opus-5-5', effort: 'high' }); // explicitly asked for: the one lead turn at high effort
     expect(lead!.prompt).toContain('User:\nfix everything');
   });
 
@@ -192,7 +198,8 @@ describe('lead: delegation and sessions', () => {
         return say(o.permission === 'edit' ? 'Implemented login.ts' : 'Library X is best.');
       }
     });
-    const h = await harness({ claude });
+    // Claude only: with a reading for both CLIs the cheap edit helper may go to the (unscripted) Codex fake, and this test scripts Claude.
+    const h = await harness({ claude }, { ids: ['claude'], reported: 'onPace' });
     await h.svc.send(h.conv.id, 'add login and tell me which auth library to use');
     await h.svc.whenIdle();
 
@@ -205,8 +212,8 @@ describe('lead: delegation and sessions', () => {
 
     // Each helper got the cheapest model that fits its complexity.
     const helperCalls = h.calls(isHelper);
-    expect(helperCalls.find((c) => c.opts.permission === 'edit')!.opts).toMatchObject({ model: 'haiku', cwd: impl.worktree });
-    expect(helperCalls.find((c) => c.opts.permission === 'read-only')!.opts).toMatchObject({ model: 'sonnet', cwd: h.repoPath });
+    expect(helperCalls.find((c) => c.opts.permission === 'edit')!.opts).toMatchObject({ model: 'claude-haiku-5-5', cwd: impl.worktree });
+    expect(helperCalls.find((c) => c.opts.permission === 'read-only')!.opts).toMatchObject({ model: 'claude-sonnet-5-5', cwd: h.repoPath });
 
     // Edits happened in the worktree and the main checkout stays clean.
     const log = spawnSync('git', ['log', '--oneline', impl.branch], { cwd: h.repoPath, encoding: 'utf8' }).stdout;
@@ -288,7 +295,8 @@ describe('lead: delegation and sessions', () => {
     expect(hs[1]!.retry).toBeUndefined();
     expect(hs[1]!.avoid).toEqual([{ cli: hs[0]!.cli }]); // whichever CLI the failed run ended on (per CLI: a per-model penalty would buy a pricier sibling)
     expect(h.calls(isHelper).at(-1)!.opts.effort).toBe('low'); // not raised: nothing says the work needed more
-    expect((await h.texts()).some((t) => t.startsWith('Retrying "Do it" at the same tier and effort'))).toBe(true);
+    // Phase 3 wording: the retry keeps difficulty, model and effort.
+    expect((await h.texts()).some((t) => t.startsWith('Retrying "Do it" at the same difficulty, model and effort'))).toBe(true);
   });
 
   it('falls back to the next CLI on rate limit and records why', async () => {
@@ -484,6 +492,27 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     h.svc.shutdown();
   });
 
+  it('steering cuts the running lead turn short and answers the new message at once, without a stop', async () => {
+    let leadCalls = 0;
+    const h = await harness({ claude: script({
+      lead: (_p, o) => leadCalls++ === 0 ? new Promise<Chunk[]>(r => o.signal?.addEventListener('abort', () => r(say('Late answer')), { once: true })) : say('Switched course')
+    }) }, { ids: ['claude'], git: false });
+    await h.svc.send(h.conv.id, 'First request');
+    for (let i = 0; i < 200 && h.calls(isLead).length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    await h.svc.send(h.conv.id, 'Actually do this instead', undefined, { steer: true });
+    await h.svc.whenIdle();
+    const leads = h.calls(isLead);
+    expect(leads).toHaveLength(2);
+    expect(leads[1]!.prompt).toContain('Actually do this instead');
+    expect(leads[1]!.prompt).toContain('cut off mid-way');
+    const texts = await h.texts();
+    expect(texts).toContain('Interrupted to follow your new message.');
+    expect(texts).not.toContain('Stopped.');
+    expect(texts).toContain('Switched course');
+    expect(h.svc.store.getConversation(h.conv.id)?.activity?.state).toBe('done');
+    h.svc.shutdown();
+  });
+
   it('recover() marks agents that were mid-run as stopped and never replays them', async () => {
     const h = await harness({ claude: script(oneHelper()) }, { ids: ['claude'] });
     const main = h.svc.store.mainAgent(h.project.id)!;
@@ -504,7 +533,7 @@ describe('file conflicts', () => {
     helper: () => say('edited')
   });
   const run = async (allow: boolean) => {
-    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false });
+    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
     h.svc.onEvent((e) => { if (e.type === 'permission') void h.svc.answerPermission(e.requestId, allow); });
     await h.svc.send(h.conv.id, 'go');
     await h.svc.whenIdle();
@@ -512,7 +541,7 @@ describe('file conflicts', () => {
   };
 
   it('withdraws an unanswered conflict question once the waiting agent got its files', async () => {
-    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false });
+    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
     let asked = 0;
     h.svc.onEvent((e) => { if (e.type === 'permission') asked++; });
     await h.svc.send(h.conv.id, 'go');
@@ -563,23 +592,23 @@ describe('questions to the user', () => {
     await expect(h.svc.answerQuestion(q!.requestId, 'again')).rejects.toThrow(/no longer pending/);
   });
 
-  it('a helper asks with HARBOR_ASK, waits without reporting to the lead, and resumes with the answer', async () => {
+  // Phase 4: a helper's question about scope goes to the lead first (askRouting.ts); the lead's plain-text answer is forwarded and the
+  // user is never asked. Was: every HARBOR_ASK popped up for the user. The user-owned cases are in phase4Coordination.test.ts.
+  it('a helper asks with HARBOR_ASK: the lead answers, Harbor forwards it, and the user is not asked', async () => {
     const claude = script({
-      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Reviewer A', role: 'planner', instructions: 'review', complexity: 'low' }) : say('done')),
+      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Reviewer A', role: 'planner', instructions: 'review', complexity: 'low' })
+        : prompt.includes('Question from helper "Reviewer A"') ? say('Use tabs, as the rest of the project does.') : say('done')),
       helper: (prompt) => (prompt.includes('Use tabs') ? say('reviewed with tabs') : say('Stopping here.\nHARBOR_ASK: {"question":"Tabs or spaces?","options":["Use tabs","Use spaces"]}'))
     });
     const h = await harness({ claude }, { ids: ['claude'] });
     await h.svc.send(h.conv.id, 'go');
     await h.svc.whenIdle();
-    const [q] = questions(h);
     const agent = helpers(h).find((a) => a.title === 'Reviewer A')!;
-    expect(q).toMatchObject({ prompt: 'Tabs or spaces?', agentId: agent.id });
-    expect(agent.state).toBe('waiting');
-    expect(h.calls(isLead)).toHaveLength(1); // the lead is not called while the helper waits
-    await h.svc.answerQuestion(q!.requestId, 'Use tabs');
-    await h.svc.whenIdle();
+    expect(questions(h)).toHaveLength(0);
+    expect(h.calls(isLead)[1]!.prompt).toContain('Tabs or spaces?');
     expect(h.svc.store.getAgent(agent.id)!.state).toBe('done');
     expect(h.svc.store.getAgent(agent.id)!.report).toContain('reviewed with tabs');
+    expect((await h.texts()).some((t) => t.includes('"Reviewer A" asked the lead: Tabs or spaces?'))).toBe(true);
   });
 });
 

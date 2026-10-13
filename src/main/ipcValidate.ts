@@ -13,7 +13,7 @@ export function validateInvoke(method: string, args: unknown[]): void {
   const bad = (what: string): never => { throw new Error(`Invalid request to ${method}: ${what}.`); };
   switch (method) {
     case 'send': {
-      const [id, text, attachments] = args;
+      const [id, text, attachments, opts] = args;
       if (!isId(id)) bad('conversation id must be a short non-empty string');
       if (typeof text !== 'string' || text.length > MAX_TEXT) bad(`text must be a string of at most ${MAX_TEXT} characters`);
       if (attachments !== undefined && attachments !== null) {
@@ -23,11 +23,16 @@ export function validateInvoke(method: string, args: unknown[]): void {
           if (!o || typeof o !== 'object' || typeof o.name !== 'string' || o.name.length > 260 || typeof o.mime !== 'string' || o.mime.length > 100 || typeof o.dataBase64 !== 'string') bad('each attachment needs a name, mime type and base64 data');
         }
       }
+      if (opts !== undefined && opts !== null && (typeof opts !== 'object' || Array.isArray(opts) || ((opts as { steer?: unknown }).steer !== undefined && typeof (opts as { steer?: unknown }).steer !== 'boolean'))) bad('options must be an object with an optional boolean steer');
       break;
     }
     case 'answerQuestion':
       if (!isId(args[0])) bad('request id must be a short non-empty string');
       if (typeof args[1] !== 'string' || args[1].length > MAX_ANSWER) bad(`answer must be a string of at most ${MAX_ANSWER} characters`);
+      break;
+    case 'setConversationDeadline':
+      if (!isId(args[0])) bad('conversation id must be a short non-empty string');
+      if (args[1] !== null && (typeof args[1] !== 'number' || !Number.isFinite(args[1]) || args[1] <= 0)) bad('deadline must be an epoch time in milliseconds, or null to clear it');
       break;
     case 'setAgentPriority':
       if (!isId(args[0])) bad('agent id must be a short non-empty string');

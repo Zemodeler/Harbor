@@ -149,7 +149,9 @@ describe('stall watchdog and run limits', () => {
     expect(h.helper('Write a').summary).not.toBe('possibly stuck');
   });
 
-  it('stops a run at its hard limit, marks it stopped, and leaves it resumable', async () => {
+  // Phase 4: a run stopped at its hard limit is resumed ONCE automatically from its saved session, to finish and report (was: left
+  // stopped for the user to resume). `helperCapMs` is the hard limit; the second cap stop and the lead wake are in phase4Wake.test.ts.
+  it('stops a run at its hard limit and resumes it once from its saved session to finish', async () => {
     const m = manualTimers();
     const g = gate();
     let started = false, calls = 0;
@@ -163,11 +165,13 @@ describe('stall watchdog and run limits', () => {
     g.open();
     await h.svc.whenIdle();
     const a = h.helper('Write a');
-    expect(a.state).toBe('stopped');
-    expect(a.error).toMatch(/45 minute limit.*Resume/);
-    await h.svc.resumeAgentSession(a.id);
-    await h.svc.whenIdle();
-    expect(h.helper('Write a').state).toBe('done');
+    expect(a.state).toBe('done');
+    expect(a.capResumes).toBe(1);
+    const helperCalls = h.calls(isHelper);
+    expect(helperCalls).toHaveLength(2);
+    expect(helperCalls[1]!.prompt).toContain('Harbor stopped your run at its time limit');
+    expect(helperCalls[1]!.opts.resumeId).toBeTruthy(); // its own saved session
+    expect((await h.texts()).some((t) => t.includes('hard limit of 45 minutes') && t.includes('resumes it once'))).toBe(true);
   });
 });
 

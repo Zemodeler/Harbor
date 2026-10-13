@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { EQUAL_POOLS } from './fixtures/catalogs';
 import { describe, expect, it } from 'vitest';
 import { CodexAdapter } from '../src/main/adapters/codex';
 import { claudeArgs, parseClaudeLine } from '../src/main/adapters/claude';
@@ -9,6 +10,7 @@ import type { ResolvedCli } from '../src/main/clis/discovery';
 import { askedCounts } from '../src/main/orchestrator';
 import { quoteWinArg } from '../src/main/proc';
 import { ROUTING_WEIGHTS as W, explainNoRoute, route, tierFor, type RouteRequest, type RouterInput } from '../src/main/router';
+import { PRICE_CAP } from '../src/main/routePrice';
 import { Store } from '../src/main/store';
 import { DEFAULT_RUNS_PER_WINDOW, UsageLedger, buildHistory } from '../src/main/usage';
 import { delegate, escalate, harness, isConcierge, isLead, say, script, tmp, until, type Roles } from './hardeningHarness';
@@ -29,7 +31,8 @@ function ledgerWith(limits: Limit[] = [], o: { runs?: Record<string, number> } =
   return { ledger, t, rec };
 }
 const input = (ledger: UsageLedger, extra: Partial<RouterInput> = {}, clis = [cli('claude'), cli('codex')]): RouterInput =>
-  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, ...extra });
+  // Phase 5: Codex's pool calibrated to Claude's per-token figures (EQUAL_POOLS): two comparable accounts, as these tests assume.
+  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, calibration: EQUAL_POOLS, ...extra });
 const pick = (d: ReturnType<typeof route>) => (d ? `${d.cli}/${d.model}` : undefined);
 
 describe('item 10: model-specific rate limits', () => {
@@ -60,36 +63,37 @@ describe('item 10: model-specific rate limits', () => {
   });
 });
 
-// The old 5h-window 'expiring' bonus was replaced by weekly pacing (tests/weeklyPacing.test.ts has the full scenarios); these keep the same intent.
-describe('item 10: use it or lose it (now weekly pacing)', () => {
+// The old 5h-window 'expiring' bonus became weekly pacing, and Phase 3 replaced that with the budget governor's use-it-or-lose-it
+// credit (routePrice.wasteCredit): quota a fresh provider reading projects to expire unused costs nothing. Same intent, new mechanism.
+describe('item 10: use it or lose it (now the waste credit)', () => {
   const catalog = [twin('claude'), twin('codex')];
   const soon = (pct: number, inMs: number) => ledgerWith([{ cli: 'codex', period: 'weekly', usedPct: pct, resetsAt: NOW + inMs }]);
 
-  it('the bonus is capped, and an explicit request outweighs it', () => {
-    expect(W.spendCap).toBeGreaterThan(0);
-    expect(W.spendCap).toBeLessThan(W.requested);
+  it('the price term is capped below an explicit request', () => {
+    expect(PRICE_CAP).toBeLessThan(W.requested);
   });
-  it('a mostly unused reported weekly window that resets soon wins a near-tie, and the reason says so', () => {
+  it('a mostly unused reported weekly window that resets soon wins, and the reason says so', () => {
     const { ledger } = soon(12, HOUR);
     const d = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { catalog, now: () => NOW }))!;
     expect(pick(d)).toBe('codex/default');
-    expect(d.reason).toContain('would be lost');
-    expect(d.scored![0]!.terms['pacing']).toBeGreaterThan(30);
+    expect(d.reason).toContain('would expire unused');
+    expect(d.price!.wasteCreditPct).toBeGreaterThan(0);
   });
+  // 'no clock given' was dropped: route() now judges pools at the ledger's own (injected) clock when it is given none.
   it.each([
-    ['no clock given (route() never reads the wall clock)', 12, HOUR, false],
-    ['the reset is far away', 12, 6 * 24 * HOUR, true],
-    ['the window is already used at the pace of the week', 99, HOUR, true]
-  ])('no bonus: %s', (_why, pct, inMs, withNow) => {
+    ['the reset is far away', 12, 6 * 24 * HOUR],
+    ['the window is already used at the pace of the week', 99, HOUR]
+  ])('no credit: %s', (_why, pct, inMs) => {
     const { ledger } = soon(pct, inMs);
-    const d = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { catalog, ...(withNow ? { now: () => NOW } : {}) }))!;
+    const d = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { catalog, now: () => NOW }))!;
     expect(pick(d)).toBe('claude/default');
-    expect(d.reason).not.toContain('spending it');
+    expect(d.reason).not.toContain('would expire unused');
   });
-  it('Harbor-only estimates against an uncalibrated budget earn nothing', () => {
+  it('Harbor-only estimates earn no credit', () => {
     const { ledger } = ledgerWith([], { runs: { codex: 1 } });
     const d = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { catalog, now: () => NOW }))!;
-    expect(d.scored!.every((s) => s.terms['pacing'] === 0)).toBe(true);
+    expect(d.price!.wasteCreditPct).toBe(0);
+    expect(d.runnerUp!.wasteCreditPct).toBe(0);
   });
 });
 
@@ -111,15 +115,15 @@ describe('item 5: a resumed session keeps its model and effort', () => {
   it('never moves down: a kept opus stays opus when the work wants standard or cheap', () => {
     for (const complexity of ['low', 'medium'] as const) {
       const d = route({ role: 'main', complexity, keep: { cli: 'claude', model: 'opus', effort: 'high' } }, only())!;
-      expect(pick(d)).toBe('claude/opus');
+      expect(pick(d)).toBe('claude/claude-opus-5-5');
       expect(d.reason).toContain('keeps the session model');
-      expect(d.skipped?.some((s) => s.model === 'sonnet' && /prompt cache/.test(s.why))).toBe(true);
+      expect(d.skipped?.some((s) => s.model === 'claude-sonnet-5-5' && /prompt cache/.test(s.why))).toBe(true);
     }
   });
   it('may move up a tier when the work wants it', () => {
     const d = route({ role: 'main', complexity: 'high', keep: { cli: 'claude', model: 'sonnet', effort: 'medium' } }, only())!;
-    expect(pick(d)).toBe('claude/opus');
-    expect(d.reason).toContain('session model sonnet → opus');
+    expect(pick(d)).toBe('claude/claude-opus-5-5');
+    expect(d.reason).toContain('session model sonnet → claude-opus-5-5');
   });
   it('does not flip effort inside a session, but an explicit effort still wins', () => {
     const kept = route({ role: 'main', complexity: 'high', keep: { cli: 'claude', model: 'opus', effort: 'low' } }, only())!;
@@ -132,10 +136,10 @@ describe('item 5: a resumed session keeps its model and effort', () => {
     const l = ledgerWith();
     l.rec('claude', { model: 'opus', ok: false, rateLimited: true });
     const d = route({ role: 'main', complexity: 'medium', keep: { cli: 'claude', model: 'opus', effort: 'high' } }, input(l.ledger, {}, [cli('claude')]))!;
-    expect(pick(d)).toBe('claude/sonnet');
+    expect(pick(d)).toBe('claude/claude-sonnet-5-5');
   });
   it('a fresh session (no keep) routes normally', () => {
-    expect(pick(route({ role: 'main', complexity: 'medium' }, only()))).toBe('claude/sonnet');
+    expect(pick(route({ role: 'main', complexity: 'medium' }, only()))).toBe('claude/claude-sonnet-5-5');
   });
 });
 
@@ -199,7 +203,11 @@ describe('item 8: usage accounting', () => {
   const rec = (l: UsageLedger, extra: object) => l.record({ cli: 'claude', model: 'sonnet', projectId: 'p', agentId: 'a', durationMs: 1, ok: true, ...extra });
 
   it('the catalog carries a per-model run weight (haiku 1, sonnet 12, opus 25, codex 10)', () => {
-    expect(DEFAULT_CATALOG.map((e) => [e.model, e.costWeight])).toEqual([['haiku', 1], ['sonnet', 12], ['opus', 25], ['claude-fable-5-1', 25], ['default', 10]]);
+    expect(DEFAULT_CATALOG.map((e) => [e.model, e.costWeight])).toEqual([
+      ['claude-haiku-5-5', 1], ['claude-sonnet-5-5', 12], ['claude-opus-5-5', 25], ['claude-fable-5-1', 25],
+      ['gpt-6.1-sol', 10], ['gpt-6-astra', 25], ['gpt-6-sol', 8], ['gpt-6-luna', 3], ['gpt-5.6-sol', 8], ['gpt-5.6-terra', 6], ['gpt-5.6-luna', 3], ['default', 10]
+    ]);
+    expect(costWeightOf(DEFAULT_CATALOG, 'claude', 'claude-opus-5-5')).toBe(25);
     expect(costWeightOf(DEFAULT_CATALOG, 'claude', 'opus')).toBe(25);
     expect(costWeightOf(DEFAULT_CATALOG, 'codex', 'whatever')).toBe(10); // the CLI's default entry
     expect(costWeightOf(DEFAULT_CATALOG, 'gemini', 'x')).toBe(10); // unknown CLI: the middle
@@ -382,9 +390,11 @@ describe('item 1: the orchestrator wires the router outputs', () => {
     await h.svc.whenIdle();
     const m = (await h.messages()).find((x) => x.role === 'assistant' && x.details)!;
     expect(m.details!.scored!.length).toBeGreaterThan(0);
-    expect(m.details!.scored![0]).toMatchObject({ cli: 'claude', model: 'sonnet' });
+    // Phase 3: on the built-in catalog the price may hand the lead to Codex's cheaper model; what matters here is the wiring.
+    expect(m.details!.scored![0]).toMatchObject({ cli: m.details!.cli, model: m.details!.model });
     expect(m.details).toHaveProperty('margin');
-    expect(m.details!.reason).toContain('sonnet');
+    expect(m.details!.reason).toContain(m.details!.model);
+    expect(typeof m.details!.difficulty).toBe('number');
   });
   it('recent failures of a model reach the router as history', async () => {
     const h = await harness({ claude: script({ lead: () => say('done') }) });
@@ -393,7 +403,7 @@ describe('item 1: the orchestrator wires the router outputs', () => {
     await h.svc.whenIdle();
     const m = (await h.messages()).find((x) => x.role === 'assistant' && x.details)!;
     // The penalty is real enough to matter: sonnet carries it, and a pricier sibling may now win the lead's own routing.
-    expect(m.details!.scored!.find((s) => s.model === 'sonnet')!.terms['history']).toBeLessThan(0);
+    expect(m.details!.scored!.find((s) => s.model === 'claude-sonnet-5-5')!.terms['history']).toBeLessThan(0);
   });
   it('when nothing can run, the message says why and when it clears', async () => {
     const resetsAt = Date.now() + 2 * HOUR;
@@ -445,22 +455,28 @@ describe('item 2: retries escalate one axis, and only after a rejection', () => 
   const write = (name: string): Roles['helper'] => (_p, o) => { writeFileSync(join(o.cwd, name), 'x'); return say('Done'); };
   const failingCheck = (repo: string) => { mkdirSync(join(repo, '.harbor')); writeFileSync(join(repo, '.harbor', 'checks.json'), JSON.stringify({ checks: ['node -e "process.exit(1)"'] })); };
 
-  it('a failed Harbor check escalates the tier one step (medium -> high), without raising effort', async () => {
+  // Phase 3: a rejection raises the capability floor one step (difficulty), met by more effort on the same model first and a stronger
+  // model only when that is clearly cheaper; an infrastructure failure keeps difficulty, model and effort (was: tier first, then effort).
+  it('a failed Harbor check raises the floor one step: the next capability step when the old model has no effort left', async () => {
     const h = await retryScenario([task({ ref: 'i', title: 'Build', role: 'implementer', access: 'edit', complexity: 'medium', files: ['a.txt'] })],
       task({ ref: 'i2', title: 'Build again', role: 'implementer', access: 'edit', complexity: 'medium', files: ['a.txt'] }), write('a.txt'), failingCheck);
     const [first, second] = h.helpers();
     expect(first!.checks?.some((c) => !c.ok)).toBe(true);
-    expect(second).toMatchObject({ complexity: 'high', model: 'opus' });
-    expect(second!.retry).toBeUndefined();
-    expect(second!.effort).toBe('medium'); // effortFor(implementer, high); the one axis that moved is the model
-    expect((await h.texts()).some((t) => t.startsWith('Retrying "Build again" with a stronger model'))).toBe(true);
+    // Harbor rates the first run 4 (medium hint, one file, short, checked): Haiku at high effort, its last effort step.
+    expect(first).toMatchObject({ difficulty: 4, model: 'claude-haiku-5-5', effort: 'high' });
+    expect(second!.difficulty).toBeGreaterThan(first!.difficulty!);
+    expect(second).toMatchObject({ retry: true, model: 'claude-sonnet-5-5', escalateFrom: { cli: 'claude', model: 'claude-haiku-5-5', effort: 'high' } });
+    expect((await h.texts()).some((t) => t.startsWith('Retrying "Build again" with the capability floor one step higher'))).toBe(true);
   });
-  it('already on the top tier, a rejection raises effort instead (high), and only then', async () => {
-    const h = await retryScenario([task({ ref: 'i', title: 'Build', role: 'implementer', access: 'edit', complexity: 'high', files: ['a.txt'] })],
-      task({ ref: 'i2', title: 'Build again', role: 'implementer', access: 'edit', complexity: 'high', files: ['a.txt'] }), write('a.txt'), failingCheck);
-    const second = h.helpers()[1]!;
-    expect(second).toMatchObject({ complexity: 'high', retry: true, effort: 'high', model: 'opus' });
-    expect((await h.texts()).some((t) => t.startsWith('Retrying "Build again" at high effort'))).toBe(true);
+  it('a rejection on a model with effort to spare raises the effort on that model first', async () => {
+    // Phase 4: a "high" counts only with a one-line reason, so these carry one.
+    const why = 'touches the shared billing ledger';
+    const h = await retryScenario([task({ ref: 'i', title: 'Build', role: 'implementer', access: 'edit', complexity: 'high', reason: why, files: ['a.txt'] })],
+      task({ ref: 'i2', title: 'Build again', role: 'implementer', access: 'edit', complexity: 'high', reason: why, files: ['a.txt'] }), write('a.txt'), failingCheck);
+    const [first, second] = h.helpers();
+    // A bare "high" with no risk words rates 6: Sonnet at medium. The retry needs one more step: Sonnet at high, not Opus.
+    expect(first).toMatchObject({ difficulty: 6, model: 'claude-sonnet-5-5', effort: 'medium' });
+    expect(second).toMatchObject({ retry: true, model: 'claude-sonnet-5-5', effort: 'high' });
   });
   it('a reviewer verdict of "changes" escalates too', async () => {
     const helper: Roles['helper'] = (p, o) => {
@@ -471,33 +487,36 @@ describe('item 2: retries escalate one axis, and only after a rejection', () => 
       task({ ref: 'i', title: 'Build', role: 'implementer', access: 'edit', complexity: 'low', files: ['a.txt'] }),
       task({ ref: 'r', title: 'Review it', role: 'reviewer', complexity: 'low', dependsOn: ['i'] })
     ], task({ ref: 'i2', title: 'Build again', role: 'implementer', access: 'edit', complexity: 'low', files: ['a.txt'] }), helper);
-    const second = h.helpers().find((a) => a.title === 'Build again')!;
-    expect(second.complexity).toBe('medium');
-    expect(second.retry).toBeUndefined();
+    const first = h.helper('Build'), second = h.helper('Build again');
+    expect(second.difficulty).toBeGreaterThan(first.difficulty!);
+    expect(second.retry).toBe(true);
+    expect(second.escalateFrom).toMatchObject({ model: first.model });
   });
-  it('a failure with no rejection keeps tier and effort and records what to avoid', async () => {
+  it('a failure with no rejection keeps difficulty, model and effort and records what to avoid', async () => {
     let runs = 0;
     const h = await retryScenario([task({ ref: 'i', title: 'Build', role: 'implementer', access: 'edit', complexity: 'medium', files: ['a.txt'] })],
       task({ ref: 'i2', title: 'Build again', role: 'implementer', access: 'edit', complexity: 'medium', files: ['a.txt'] }),
       () => (runs++ === 0 ? [{ kind: 'done', ok: false, error: 'connection to the model dropped' }] : say('Done')));
     const [first, second] = h.helpers();
     expect(first!.state).toBe('failed');
-    expect(second).toMatchObject({ complexity: 'medium', model: 'sonnet' });
+    expect(second).toMatchObject({ difficulty: first!.difficulty, model: first!.model, effort: first!.effort });
     expect(second!.retry).toBeUndefined();
     expect(second!.avoid).toEqual([{ cli: 'claude' }]); // per CLI: avoiding sonnet alone would buy opus
   });
 });
 
 describe('item 3: planner tier follows complexity', () => {
-  const plannerModel = async (complexity: string) => {
-    const h = await harness({ claude: script({ lead: (p) => (p.includes('User:\n') ? delegate('plan', task({ ref: 'p', title: 'Plan it', role: 'planner', complexity })) : say('ok')) }) });
+  const plannerModel = async (complexity: string, reason?: string) => {
+    const h = await harness({ claude: script({ lead: (p) => (p.includes('User:\n') ? delegate('plan', task({ ref: 'p', title: 'Plan it', role: 'planner', complexity, ...(reason ? { reason } : {}) })) : say('ok')) }) });
     await h.svc.send(h.conv.id, 'plan the migration');
     await h.svc.whenIdle();
     return h.helper('Plan it');
   };
-  it('medium -> sonnet, high -> opus', async () => {
-    expect((await plannerModel('medium')).model).toBe('sonnet');
-    expect((await plannerModel('high')).model).toBe('opus');
+  it('medium -> sonnet, high with a reason -> opus (a bare high counts as medium)', async () => {
+    expect((await plannerModel('medium')).model).toBe('claude-sonnet-5-5');
+    // Phase 4: "high" counts only with a one-line reason (leads overrate their work); without one it is medium.
+    expect((await plannerModel('high')).model).toBe('claude-sonnet-5-5');
+    expect((await plannerModel('high', 'cross-package schema migration with a data backfill')).model).toBe('claude-opus-5-5');
   });
   it('the lead prompt tells it to skip the planner it does not need and to delegate only sizeable chunks', async () => {
     const h = await harness({ claude: script({ lead: () => say('ok') }) });
@@ -505,7 +524,8 @@ describe('item 3: planner tier follows complexity', () => {
     await h.svc.whenIdle();
     const sys = h.calls(isLead)[0]!.opts.systemPrompt!;
     expect(sys).toMatch(/Skip the planner when you have already read the code/);
-    expect(sys).toMatch(/30k tokens/);
+    // Phase 4: the size rule is one concern per helper of about 25 minutes (was: chunks over roughly 30k tokens).
+    expect(sys).toMatch(/one concern or package per helper, about 25 minutes of work or less/);
     expect(sys).toMatch(/One reviewer per integrated change, not per branch/);
     expect(sys).toMatch(/diff stat and the Harbor check results/);
   });
@@ -569,7 +589,7 @@ describe('item 5: the lead keeps its model and effort inside a conversation', ()
       await h.svc.whenIdle();
     }
     const leads = h.calls(isLead).map((c) => [c.opts.model, c.opts.effort]);
-    expect(leads).toEqual([['sonnet', 'medium'], ['opus', 'medium'], ['opus', 'medium']]);
+    expect(leads).toEqual([['claude-sonnet-5-5', 'medium'], ['claude-opus-5-5', 'medium'], ['claude-opus-5-5', 'medium']]);
     expect(h.calls(isLead)[2]!.opts.resumeId).toBeTruthy();
   });
   it('a new conversation starts fresh and routes normally', async () => {

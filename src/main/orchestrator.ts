@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity } from '../shared/api';
 import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
-import type { CatalogEntry, Need, Tier } from './clis/capabilities';
+import { DEFAULT_CATALOG, autoRoutable, entryFor, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
+import type { TaskSize } from './calibration';
+import { nativeEffort } from './clis/effort';
+import { RunUsage, perRunUsage } from './runUsage';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
 import type { ResolvedCli } from './clis/discovery';
 import { harborBranchFor, staleWorktrees, type Git, type WorktreeEntry } from './git';
@@ -13,15 +16,31 @@ import { Journal, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT, needsLock } from './locks';
 import {
   CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, newProtocolNonce, nonceInstruction, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
-  type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type Protocol, type SessionPeer
+  type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type Protocol, type ReplyRequest, type SessionPeer
 } from './prompts';
 import { buildHandoff, type HandoffEvidence } from './handoff';
 import { matchesTracked, reapTrackedProcesses, setSpawnObserver, systemKiller, type ProcessKiller } from './proc';
 import { EXTERNAL_EFFECTS_NOTE, previewRollback, relatedAgents } from './rollback';
 import { combineComplexity, estimateComplexity } from './complexity';
-import { effortFor, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
+import { calibrate, type Calibration } from './calibration';
+import { conversationUrgency } from './deadline';
+import { COMPLEXITY_DIFFICULTY, complexityOf, difficultyOf, raiseDifficulty, strongestLevel } from './difficulty';
+import { EFFORT_BONUS, capabilityOf } from './budgetCost';
+import { bindingNeed, committedFor, inFlightKTokSoFar, newestReadingAt, type InFlightRun } from './routePrice';
+import { CAP_RESUME_PROMPT, DEPENDENCY_RESUME_PROMPT, capLimits, capReason, capResumeAllowed, softCheck, type CapKind } from './softCap';
+import { describeLoop, loopResumeAllowed, loopResumePrompt, type LoopEvidence } from './loopGuard';
+import { LoopWatch, type LoopGuardSettings } from './loopWatch';
+import { gitProgressProbe } from './progressProbe';
+import { USER_QUESTION_TIMEOUT_MS, routeAsk, safeDefault, type UserAskKind } from './askRouting';
+import { SPLIT_ADVICE, describeDrivers, estimateTaskMinutes, fmtMinutes, gateSize, gateTask, planEta } from './sizeGate';
+import { STATUS_ARGS, dirtyOverlap, parseStatusV2, underPrefix } from './dirtyBase';
+import { helperLimitFromLedger, type HelperLimit } from './helperLimit';
+import { MAX_HELPERS_CAP } from './budget';
+import { calibrationSample, finishedRuns, overlapKTok, readingsDuring } from './runCalibration';
+import { effortFor, evaluate, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
 import { DEFAULT_CONCURRENCY, DEFAULT_HELPERS_PER_TURN, DEFAULT_PLANNERS_PER_TURN, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
-import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot } from './types';
+import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
+import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
 import { isModelSpecific } from './adapters/types';
 import type { EventBus } from './events';
@@ -59,7 +78,15 @@ export interface OrchestratorDeps {
   /** Starts a timer and returns its cancel function; injected so tests control time. */
   setTimer?: (fn: () => void, ms: number) => () => void;
   /** Stall watchdog and per-run caps (defaults below). Its timer and clock are separate from `setTimer`, so retry waits never trip it. */
-  stall?: { stallMs?: number; leadCapMs?: number; helperCapMs?: number; setTimer?: (fn: () => void, ms: number) => () => void; now?: () => number };
+  /**
+   * `helperCapMs` is the HARD limit of a helper run and `helperSoftCapMs` its soft limit (an active run continues past it, an idle one
+   * stops); `activeWindowMs` is how recent output must be to count as active (see softCap.ts).
+   */
+  stall?: { stallMs?: number; leadCapMs?: number; helperCapMs?: number; helperSoftCapMs?: number; activeWindowMs?: number; setTimer?: (fn: () => void, ms: number) => () => void; now?: () => number;
+    /** Loop guard for helpers (loopGuard.ts): on by default; the lead only gets a notice. */
+    loopGuard?: LoopGuardSettings };
+  /** How long a helper's question to the user waits before the safe default applies (default askRouting.USER_QUESTION_TIMEOUT_MS). */
+  questionTimeoutMs?: number;
   /** Test hook: approve every project checks file without asking (the real flow asks the user once per file content). */
   autoApproveChecks?: boolean;
   /** Working folder of runs that need no repository (the concierge); default: `harbor-neutral` under the OS temp folder. */
@@ -72,9 +99,8 @@ export interface OrchestratorDeps {
 
 /** A run with no output for this long is flagged as possibly stuck (it is never killed for that alone). */
 export const STALL_MS = 10 * 60_000;
-/** Hard limits for one run: past them Harbor stops the process tree and marks the agent stopped (resumable). */
+/** Hard limit of one lead turn: past it Harbor stops the process tree and marks the turn stopped. Helpers have soft and hard limits (softCap.ts). */
 export const LEAD_CAP_MS = 60 * 60_000;
-export const HELPER_CAP_MS = 45 * 60_000;
 
 /** Helper results that finish within this window wake the lead together (see scheduleReport). */
 export const REPORT_DEBOUNCE_MS = 400;
@@ -134,7 +160,8 @@ export interface OrphanSweep { killed: number[]; skipped: number[] }
 const RESTART_ERROR = 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.';
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
-const CX_UP_ORDER: Complexity[] = ['low', 'medium', 'high'];
+/** Difficulty of a /deep lead turn: above what a weaker model reaches by effort alone (see budgetCost.REQUIRED_LEVEL_KNOTS). */
+const DEEP_DIFFICULTY = 9;
 const TERMINAL: AgentState[] = ['done', 'failed', 'stopped'];
 const DEFAULT_TITLE = 'New conversation';
 const GOAL_MAX_CONTINUATIONS = 8;
@@ -158,12 +185,24 @@ export function detailsOf(d: RouteDecision): NonNullable<Message['details']> {
   return {
     cli: d.cli, model: d.model, effort: d.effort, reason: d.reason,
     ...(d.scored ? { scored: d.scored } : {}), ...(d.margin !== undefined ? { margin: d.margin } : {}), ...(d.tied ? { tied: true } : {}),
-    ...(d.degraded ? { degraded: d.degraded } : {}), ...(d.skipped?.length ? { skipped: d.skipped } : {})
+    ...(d.degraded ? { degraded: d.degraded } : {}), difficulty: d.difficulty,
+    ...(d.needsReview ? { needsReview: true, ...(d.reviewReason ? { reviewReason: d.reviewReason } : {}) } : {}),
+    ...(d.skipped?.length ? { skipped: d.skipped } : {})
   };
 }
 
+/** Runs that ended this recently may have burned quota no reading shows yet (committedNow). */
+const RECENT_RUNS_MS = 30 * 60_000;
+/** A helper held for quota with no known reset time is tried again after this long. */
+const QUOTA_RECHECK_MS = 10 * 60_000;
+
 interface RoutedRun {
   ok: boolean;
+  /**
+   * No model could take this helper only for reasons that clear by themselves (quota held in reserve, too little left for the run,
+   * a cooldown): it goes back to the queue until `until` (when known) instead of failing.
+   */
+  held?: { until?: number };
   text: string;
   /** Every text chunk of the run, not only the final answer: protocol lines can be anywhere. */
   allText?: string;
@@ -180,8 +219,12 @@ interface RoutedRun {
   nonce?: string;
   /** Tool calls the run made (a goal continuation without any made no progress). */
   toolCalls?: number;
-  /** Harbor stopped the run at its hard time limit (not the user): resumable. */
+  /** Harbor stopped the run at its time limit (not the user): resumable. */
   capped?: boolean;
+  /** Which limit: idle past the soft limit, or the hard limit (softCap.ts). */
+  capKind?: CapKind;
+  /** Harbor's loop guard stopped the run (loopGuard.ts): what looped. Resumable, like a cap stop. */
+  loop?: LoopEvidence;
   /** The CLI ended without a completion event after producing output (exit code 0); counted as finished, with a warning. */
   noCompletion?: boolean;
 }
@@ -206,6 +249,16 @@ interface RoutedOptions {
   contextIfNoResume?: string | (() => Promise<string> | string);
   role: AgentRole;
   complexity: Complexity;
+  /** Harbor's difficulty (difficulty.ts) and its signals; absent = derived from `complexity`. */
+  difficulty?: number;
+  difficultySignals?: string[];
+  size?: TaskSize;
+  /** The owner is waiting on this run (lead, concierge): it may use the quota reserve. */
+  interactive?: boolean;
+  /** A redo of rejected work: more effort on that model first (RouteRequest.escalateFrom). */
+  escalateFrom?: { cli: CliId; model: string; effort?: Effort };
+  /** A redo after an infrastructure failure: keep this model and effort when routing stays on its CLI. */
+  keepModel?: { cli: CliId; model: string; effort?: Effort };
   tier?: Tier;
   needs?: Need[];
   /** Question-and-answer run (the concierge): the adapter drops tools and the CLI's own environment (see RunOptions.lean). */
@@ -281,12 +334,21 @@ export class Orchestrator {
   private planHeldNoted = new Set<Id>();
   /** Open questions to the user. In memory only: after a restart the question text is still in the chat to answer by typing. */
   private questions = new Map<Id, { agentId: Id; conversationId: Id }>();
+  /** Per helper: the token of its pending question's safe-default timer (a newer question or any answer invalidates it). */
+  private askTokens = new Map<Id, number>();
+  /** Conversations told that helpers wait for a quota reset; the reset time the pump timer is armed for. */
+  private quotaHeld = new Map<Id, number>();
+  private quotaArmedFor?: number;
+  /** Conversation + uncommitted-files fingerprint already mentioned (the dirty-folder note is said once per state). */
+  private dirtyNoted = new Set<string>();
   /** Peer messages waiting for a lead's next turn, by target conversation. In memory: a restart ends the sessions they were meant for. */
   private peerInbox = new Map<Id, PeerMessage[]>();
   /** Urgent wake-ups of an idle lead since the user last wrote to it; bounded so two leads cannot wake each other forever. */
   private peerWakes = new Map<Id, number>();
   private sessionGeneration = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
+  /** Conversations whose running lead turn was aborted to make room for a newer user message (not a user stop). */
+  private steered = new Set<Id>();
   /** Pending tool permission requests by request id. */
   private toolAsks = new Map<Id, ToolAsk>();
   private runSeq = 0;
@@ -310,6 +372,12 @@ export class Orchestrator {
   private startup: Promise<void> = Promise.resolve();
 
   private startedAt = Date.now();
+  /** Runs handed to an adapter and not yet ended, for the quota they will still burn (committedNow). */
+  private inFlight = new Map<symbol, InFlightRun>();
+  /** Helpers routing held for quota (RoutedRun.held), not started again before this time. */
+  private heldUntil = new Map<Id, number>();
+  /** The follow-up text of a helper whose follow-up run was held for quota; delivered when the pump releases it. */
+  private heldFollowUps = new Map<Id, string>();
   /** Settles when the orphan sweep started by recover() is done. */
   private sweep: Promise<OrphanSweep> = Promise.resolve({ killed: [], skipped: [] });
   readonly journal: Journal;
@@ -363,6 +431,7 @@ export class Orchestrator {
 
   private setState(a: AgentRecord, state: AgentState, patch: Partial<AgentRecord> = {}): void {
     Object.assign(a, patch, { state, updated: Date.now() });
+    if (state !== 'queued') { this.heldUntil.delete(a.id); this.heldFollowUps.delete(a.id); } // a stopped/cancelled/finished helper is no longer held
     this.d.store.upsertAgent(a);
     this.publish(a);
   }
@@ -531,7 +600,7 @@ export class Orchestrator {
     // The pump below must not fail dependents of these agents (or start a lead turn): they wait until the user resumes or stops.
     const interrupted: AgentRecord[] = [];
     for (const a of this.d.store.allAgentRecords()) {
-      if (a.state === 'working') { this.setState(a, 'stopped', { error: RESTART_ERROR }); if (a.role !== 'main') interrupted.push(a); }
+      if (a.state === 'working') { this.setState(a, 'stopped', { error: RESTART_ERROR, stopKind: 'restart' }); if (a.role !== 'main') interrupted.push(a); }
       if (a.role === 'main') this.setState(a, 'waiting');
     }
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
@@ -636,7 +705,7 @@ export class Orchestrator {
   // ------------------------------------------------------------ user input
 
   /** `attachments` are already validated and written to disk by the service (each has a `path`). */
-  async userMessage(conversationId: Id, text: string, attachments: Attachment[] = []): Promise<void> {
+  async userMessage(conversationId: Id, text: string, attachments: Attachment[] = [], opts: { steer?: boolean } = {}): Promise<void> {
     const conv = this.d.store.getConversation(conversationId);
     if (!conv) throw new Error('Unknown conversation');
     const agent = this.d.store.getAgent(conv.agentId);
@@ -660,11 +729,27 @@ export class Orchestrator {
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
       this.peerWakes.delete(conversationId);
+      if (opts.steer) this.interruptLead(conversationId);
       const images = attachments.map((a) => a.path).filter((p): p is string => !!p);
       this.enqueueMain(agent.projectId, { kind: 'user', text, ...(images.length ? { images } : {}) }, conversationId);
     } else {
       this.direct(agent, text, conversationId);
     }
+  }
+
+  /**
+   * Steering: the user sent a message while the lead is mid-turn and wants it acted on now, not after the turn. The running turn
+   * is aborted (its native session, helpers and files stay) and the message starts the next one, which resumes that session.
+   * Turns already chained behind it are dropped like on a stop; their reports stay held and ride along with the new turn.
+   */
+  private interruptLead(conversationId: Id): void {
+    const lead = this.leads.get(conversationId);
+    if (!lead || lead.ctl.signal.aborted) return;
+    this.steered.add(conversationId);
+    this.sessionGeneration.set(conversationId, (this.sessionGeneration.get(conversationId) ?? 0) + 1);
+    this.denyToolAsks((p) => p.conversationId === conversationId, 'the user sent a new message');
+    this.addNote(conversationId, 'The user sent a new message while you were working, so your previous turn was cut off mid-way. Check the current state of the folder (git status, git log) before continuing and do not repeat steps that already finished. Follow the new message; drop earlier plans it contradicts.');
+    lead.ctl.abort();
   }
 
   /**
@@ -705,7 +790,7 @@ export class Orchestrator {
     this.denyToolAsks((p) => p.agentId === a.id, 'the agent was stopped');
     this.controllers.get(a.id)?.abort();
     if (!this.running.has(a.id) && !TERMINAL.includes(a.state)) {
-      this.setState(a, 'stopped', { error: 'Stopped by the user before it started.' });
+      this.setState(a, 'stopped', { error: 'Stopped by the user before it started.', stopKind: 'user' });
       this.locks.release(a.id);
       this.finished(a);
     }
@@ -787,19 +872,20 @@ export class Orchestrator {
       if (trigger.kind === 'user') {
         const deep = /^\/deep\b\s*/i.exec(trigger.text);
         if (deep) {
-          // "/deep" skips the front desk and gives the lead a strong model.
-          plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high' };
+          // "/deep" skips the front desk and gives the lead the strongest reasoning: difficulty 9 is beyond what any model reaches
+          // only by thinking harder, so the price cannot trade it down to a weaker model at high effort.
+          plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high', difficulty: DEEP_DIFFICULTY };
           trigger = { ...trigger, text: trigger.text.slice(deep[0].length) || trigger.text };
         } else if (trigger.images?.length) {
           // The front desk cannot see images, so it never triages them: straight to a lead that can.
           plan = this.estimated(conversationId, trigger.text, trigger.images.length);
         } else if ((this.plans.has(conversationId) || this.goAhead.has(conversationId)) && isApproval(trigger.text)) {
           // A go-ahead continues the last request at its size: no front-desk call, no fresh guess. A one-off "/deep" is not inherited.
-          plan = { ...plan, effort: undefined };
+          plan = { ...plan, effort: undefined, difficulty: undefined };
         } else if (!this.leadAsked.has(conversationId) && this.heldReports(project.id, conversationId).items.length) {
           // Held reports need the lead: the front desk sees only their summaries and would answer "continue" itself, leaving
           // them stranded. Decided here, when the turn runs, so reports settled or queued meanwhile count as they are now.
-          plan = { ...plan, effort: undefined };
+          plan = { ...plan, effort: undefined, difficulty: undefined };
         } else if (!this.leadAsked.has(conversationId)) {
           // Obvious work (a file, a command, a named CLI) and replies to the lead's question never need the front desk's guess:
           // deciding that before the call saves the call.
@@ -834,7 +920,9 @@ export class Orchestrator {
       } finally { release?.(); }
     } finally {
       this.leads.delete(conversationId);
-      if (ctl.signal.aborted) this.sessionState(conversationId, 'stopped', 'Stopped by you.');
+      const steered = this.steered.delete(conversationId);
+      if (steered) { /* the next turn is already queued and sets the state itself */ }
+      else if (ctl.signal.aborted) this.sessionState(conversationId, 'stopped', 'Stopped by you.');
       else if (this.d.store.getConversation(conversationId)?.activity?.state === 'working') this.sessionState(conversationId, 'done', 'The lead has finished its turn.');
       const n = (this.leadActive.get(projectId) ?? 1) - 1;
       if (n <= 0) { this.leadActive.delete(projectId); this.setState(main, 'waiting'); } else this.leadActive.set(projectId, n);
@@ -978,7 +1066,7 @@ export class Orchestrator {
   private async concierge(project: Project, main: AgentRecord, conversationId: Id, text: string, signal: AbortSignal): Promise<'handled' | Escalation> {
     const out = await this.runRouted(main, {
       prompt: conciergePrompt(project.name, this.registerFor(project.id, conversationId), this.chatHistory(conversationId, true).slice(-8), text), system: CONCIERGE_SYSTEM,
-      role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'], permission: 'read-only',
+      role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'], permission: 'read-only', interactive: true,
       // It answers from its prompt (project name, helper list, recent chat), so it needs neither the repository nor any of the CLI's
       // tools or environment: a neutral folder and a lean run keep the cheap model cheap.
       cwd: this.neutralCwd(project.path), lean: true,
@@ -1040,7 +1128,6 @@ export class Orchestrator {
     this.frontDesk.delete(conversationId);
     if (front.length) notes.push(`The front desk answered these without you since your last turn:\n${front.map((e) => `User: ${clip(e.user, 300)}\nFront desk: ${clip(e.answer, 400)}`).join('\n')}`);
     const history = this.chatHistory(conversationId, trigger.kind === 'user');
-    const tier: Tier = plan.complexity === 'high' ? 'strong' : plan.complexity === 'low' ? 'cheap' : 'standard';
     const inbox = this.peerInbox.get(conversationId) ?? [];
     this.peerInbox.delete(conversationId);
     const conv = this.d.store.getConversation(conversationId);
@@ -1068,7 +1155,9 @@ export class Orchestrator {
       out = await this.runRouted(main, {
         prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held, checksConfigured: checkCmds.length > 0 }), system: LEAD_SYSTEM,
         contextIfNoResume: context,
-        role: 'main', complexity: plan.complexity, tier, effort: plan.effort ?? effortFor('main', plan.complexity), fixedEffort: plan.effort !== undefined, needs: plan.needs, preferCli: plan.preferCli, complexityNote: plan.note,
+        // The lead's difficulty comes from the concierge's rating, already raised by the request's own signals (combineComplexity).
+        role: 'main', complexity: plan.complexity, difficulty: plan.difficulty ?? COMPLEXITY_DIFFICULTY[plan.complexity], interactive: true,
+        ...(plan.effort ? { effort: plan.effort, fixedEffort: true } : {}), needs: plan.needs, preferCli: plan.preferCli, complexityNote: plan.note,
         // A turn with images goes only to a model the catalog says can see them; one that cannot is skipped with that reason.
         ...(trigger.kind === 'user' && trigger.images?.length ? { required: ['vision' as const] } : {}),
         permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
@@ -1083,6 +1172,10 @@ export class Orchestrator {
       if (!turn.settled) this.settleReports(turn, turn.started ? 'interrupted' : 'notStarted', conversationId);
     }
     await this.detectLeadMerge(project, main, conversationId, headBefore);
+    if (!out.ok && out.stopped && this.steered.has(conversationId)) {
+      this.post(conversationId, 'system', 'Interrupted to follow your new message.', { agentId: main.id });
+      return;
+    }
     if (!out.ok) {
       const capMinutes = Math.round((this.d.stall?.leadCapMs ?? LEAD_CAP_MS) / 60_000);
       this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.capped ? 'Stopped: the turn hit its time limit.' : out.error);
@@ -1103,18 +1196,27 @@ export class Orchestrator {
     delegations = this.dedupeDelegations(delegations, conversationId);
     delegations = this.fanOutBrake(delegations, conversationId, trigger.kind === 'user' ? trigger.text : undefined);
     for (const text of proto.decision) this.d.store.addCoordination({ projectId: project.id, kind: 'decision', from: main.id, text, conversationId });
-    const dirty = await this.dirtyAtDelegation(project, delegations, conversationId);
+    const screened = await this.screenDelegations(project, delegations, conversationId);
+    delegations = screened.kept;
     const pin = delegations.some((t) => t.integrate) ? await this.pinTarget(project) : undefined;
-    const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty });
+    const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty });
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
+    const replied = new Set(proto.reply.map((r) => this.deliverReply(project.id, conversationId, r)).filter((x): x is Id => !!x));
     const started = created.filter((c) => c.state !== 'failed');
     if (started.length) {
       this.post(conversationId, 'system', 'Delegated: ' + started.map((c, i) => `${i + 1}. ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
+      this.postPlanEstimate(conversationId, started, main.id);
     }
     const asking = proto.ask[0];
     const shown = stripProtocol(out.text, { nonce: out.nonce });
-    if (asking) {
+    // A helper's question the lead decided is the user's: asked on the helper's behalf, so the answer goes straight back to it.
+    const asker = trigger.kind === 'help' && trigger.question ? this.d.store.getAgent(trigger.from.id) : undefined;
+    const forHelper = !!asking && !!asker && asker.state === 'waiting' && !replied.has(asker.id) && !created.some((c) => c.helpFor === asker.id);
+    if (asking && forHelper) {
+      this.post(conversationId, 'assistant', `${asker!.title} needs your decision: ${asking.question}`, { agentId: main.id });
+      this.askUserForHelper(asker!, asking, 'lead');
+    } else if (asking) {
       this.leadAsked.add(conversationId);
       if (!shown.includes(asking.question)) this.post(conversationId, 'assistant', asking.question, { agentId: main.id });
       this.askUser(main.id, conversationId, asking);
@@ -1122,10 +1224,16 @@ export class Orchestrator {
       // A question in prose: the user's next message answers it, so it goes to the lead, not the front desk.
       this.leadQuestion.add(conversationId);
     }
-    if (trigger.kind === 'help' && !created.some((c) => c.helpFor === trigger.from.id)) {
-      // No helper assigned: tell the blocked agent so it can continue on its own judgment.
-      this.followUp(trigger.from, `The lead did not assign another helper for your request. Response: ${shown || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
+    if (trigger.kind === 'help' && !forHelper && !replied.has(trigger.from.id) && !created.some((c) => c.helpFor === trigger.from.id)) {
+      if (trigger.question) {
+        // The lead answered the helper's question in prose: forwarded as its next message (only while it still waits for it).
+        if (asker?.state === 'waiting') this.followUp(asker, `The lead answers your question: ${shown || 'decide within your assignment (do not widen its scope or edit files outside the ones you own), and say in your report what you assumed.'}`);
+      } else {
+        // No helper assigned: tell the blocked agent so it can continue on its own judgment.
+        this.followUp(trigger.from, `The lead did not assign another helper for your request. Response: ${shown || 'proceed with your best judgment within scope, or report that you are blocked.'}`);
+      }
     }
+    if (screened.refused.length) this.refusedNotice(project.id, conversationId, screened.refused, !!asking || signal.aborted);
     this.pump(project.id);
     // Lines Harbor did not act on (bad JSON, unknown fields, or no protocol tag) are reported once and the lead gets one chance to fix them.
     const ignored = ignoredProtocolLines(out.allText ?? out.text, proto, out.nonce);
@@ -1202,17 +1310,126 @@ export class Orchestrator {
     }));
   }
 
-  /** A helper starts from the committed HEAD: warn once when the folder has uncommitted edits (or git could not say). */
-  private async dirtyAtDelegation(project: Project, tasks: PlannedTask[], conversationId: Id): Promise<'dirty' | 'unknown' | undefined> {
-    if (!tasks.some((t) => t.access === 'edit' && !t.integrate) || this.repoKind.get(project.id) !== 'git') return undefined;
-    const d = await this.d.git.isDirtyDetailed(project.path);
-    if (d.timedOut || d.failed) {
+  /**
+   * A helper starts from the committed HEAD. The project folder's uncommitted files (git status, Harbor's own .harbor/ left out): `tracked`
+   * changes and `paths` (tracked plus untracked). Tracked changes are mentioned once per state; git failing is said every time.
+   */
+  private async dirtyBase(project: Project, tasks: PlannedTask[], conversationId: Id): Promise<{ state?: 'dirty' | 'unknown'; paths: string[]; tracked: string[] }> {
+    if (!tasks.some((t) => t.access === 'edit' && !t.integrate) || this.repoKind.get(project.id) !== 'git') return { paths: [], tracked: [] };
+    const r = await this.d.git.exec(project.path, STATUS_ARGS);
+    if (!r.ok) {
       this.post(conversationId, 'system', 'git timed out (or failed) while checking the project folder, so Harbor cannot say whether it has uncommitted edits. Edit helpers start from the committed HEAD and would not contain them.');
-      return 'unknown';
+      return { state: 'unknown', paths: [], tracked: [] };
     }
-    if (!d.dirty) return undefined;
-    this.post(conversationId, 'system', 'The project folder has uncommitted changes. Edit helpers start from the committed HEAD in their own worktree, so they will NOT contain those edits (and their results may conflict with them). Commit first if they should build on them.');
-    return 'dirty';
+    const prefix = await this.prefixOf(project);
+    const own = (p: string) => !/^\.harbor\//i.test(p);
+    const st = parseStatusV2(r.stdout);
+    const tracked = underPrefix(st.tracked, prefix).filter(own);
+    const paths = [...tracked, ...underPrefix(st.untracked, prefix).filter(own)];
+    if (tracked.length) {
+      const key = `${conversationId}:${createHash('sha256').update([...tracked].sort().join('\n')).digest('hex').slice(0, 16)}`;
+      if (!this.dirtyNoted.has(key)) {
+        this.dirtyNoted.add(key);
+        this.post(conversationId, 'system', 'The project folder has uncommitted changes. Edit helpers start from the committed HEAD in their own worktree, so they will NOT contain those edits (and their results may conflict with them). Harbor holds a helper whose files overlap them; commit first if helpers should build on them.');
+      }
+    }
+    return { ...(tracked.length ? { state: 'dirty' as const } : {}), paths, tracked };
+  }
+
+  /**
+   * Before anything is created: the size gate (sizeGate.ts) and the dirty-base check (dirtyBase.ts). A refused task is not created;
+   * whatever waits on it in this turn is withheld with it. The lead is told why and what to do instead (refusedNotice).
+   */
+  private async screenDelegations(project: Project, tasks: PlannedTask[], conversationId: Id): Promise<{ kept: PlannedTask[]; refused: Array<{ task: PlannedTask; why: string }>; dirty?: 'dirty' | 'unknown' }> {
+    const why = new Map<string, string>();
+    for (const t of tasks) {
+      if (t.access !== 'edit' || t.integrate) continue;
+      const e = this.estimateFor(project, t);
+      const r = gateTask({ title: t.title, instructions: t.instructions, access: t.access, files: t.files, minutes: e.minutes, detail: e.detail });
+      if (r) why.set(t.ref, `${r}. ${SPLIT_ADVICE}`);
+    }
+    const base = await this.dirtyBase(project, tasks.filter((t) => !why.has(t.ref)), conversationId);
+    if (base.paths.length) {
+      for (const t of tasks) {
+        if (t.access !== 'edit' || t.integrate || why.has(t.ref)) continue;
+        // A whole-project claim is held only for tracked changes: an untracked scratch file would otherwise hold every such helper.
+        const overlap = dirtyOverlap(t.files, t.files.length ? base.paths : base.tracked);
+        if (!overlap.length) continue;
+        const list = `${overlap.slice(0, 5).join(', ')}${overlap.length > 5 ? `, and ${overlap.length - 5} more` : ''}`;
+        why.set(t.ref, `its files overlap uncommitted edits in the project folder (${clip(list, 240)}), and it would start from the last commit without them. Commit those files first and delegate it again, narrow its "files" to exclude them, or delegate it with "access":"read"`);
+      }
+    }
+    if (!why.size) return { kept: tasks, refused: [], ...(base.state ? { dirty: base.state } : {}) };
+    // Whatever waits on a refused task is withheld with it (it would otherwise fail as an unresolved reference).
+    const held = new Set(why.keys());
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const t of tasks) {
+        if (held.has(t.ref) || ![...t.dependsOn, ...(t.specFrom ? [t.specFrom] : []), ...(t.integrate?.sources ?? [])].some((r) => held.has(r))) continue;
+        held.add(t.ref);
+        why.set(t.ref, 'it depends on a task Harbor did not start');
+        grew = true;
+      }
+    }
+    return { kept: tasks.filter((t) => !held.has(t.ref)), refused: tasks.filter((t) => held.has(t.ref)).map((task) => ({ task, why: why.get(task.ref)! })), ...(base.state ? { dirty: base.state } : {}) };
+  }
+
+  /** Refused delegations: the user sees which, and the lead is woken with the reasons (or told at its next turn when it waits on the user). */
+  private refusedNotice(projectId: Id, conversationId: Id, refused: Array<{ task: PlannedTask; why: string }>, later: boolean): void {
+    const lines = refused.map((r) => `- "${clip(r.task.title, 80)}": ${r.why}`);
+    this.post(conversationId, 'system', `Harbor did not start ${refused.length} delegation(s):\n${lines.map((l) => clip(l, 400)).join('\n')}`);
+    this.log({ kind: 'protocol', projectId, conversationId, text: `refused ${refused.length} delegation(s): ${clip(refused.map((r) => `${r.task.title}: ${r.why}`).join(' | '), 400)}` });
+    const text = `Harbor did NOT start these delegations, so nothing was run for them:\n${lines.join('\n')}\nRe-delegate them accordingly; do not redo work that already finished.`;
+    if (later || !this.autoTurn(conversationId)) { this.addNote(conversationId, clip(text, 300)); return; }
+    this.enqueueMain(projectId, { kind: 'notice', text }, conversationId);
+  }
+
+  /** Harbor's size and minutes estimate of a delegation (difficulty.ts + sizeGate.ts), before any retry adjustment. */
+  private estimateFor(project: Project, t: PlannedTask, hasSpec = false, difficulty?: number): { minutes: number; difficulty: number; detail: string } {
+    const est = difficultyOf({ role: t.role, text: t.instructions, files: t.files, readOnly: t.access === 'read', hint: t.complexity, verify: t.access === 'edit' && this.checkCommands(project).length > 0, hasSpec });
+    const d = difficulty ?? est.difficulty;
+    const calibration = this.d.store.getCalibration();
+    const size = gateSize(est.size, est.drivers);
+    return { difficulty: d, detail: describeDrivers(est.drivers, size), minutes: estimateTaskMinutes({ role: t.role, size, difficulty: d, needs: t.needs, catalog: this.usableCatalog(), ...(calibration ? { calibration } : {}) }) };
+  }
+
+  /** Catalog entries of the CLIs Harbor can run now (all of the catalog when none is known yet). */
+  private usableCatalog(): CatalogEntry[] {
+    const catalog = this.d.catalog ?? DEFAULT_CATALOG;
+    const clis = new Set(this.d.getClis().filter((c) => c.installed && this.d.enabled(c.id)).map((c) => c.id));
+    const mine = catalog.filter((e) => clis.has(e.cli));
+    return mine.length ? mine : catalog;
+  }
+
+  /** One system message per delegation turn: the plan's estimated wall time (helpers at once from the budget) and each task's estimate. */
+  private postPlanEstimate(conversationId: Id, started: AgentRecord[], mainId: Id): void {
+    const userMax = effectiveSettings(this.d.store.getSettings(), started[0]!.projectId).concurrencyLimit ?? this.d.maxActivePerProject ?? DEFAULT_CONCURRENCY;
+    const limit = Math.max(1, Math.min(userMax, this.budgetLimit().limit || 1));
+    const eta = planEta(started.map((c) => ({ id: c.id, minutes: c.estimatedMinutes ?? 0, dependsOn: c.dependsOn })), limit);
+    const per = started.map((c, i) => `${i + 1}. ${clip(c.title, 60)} ${c.integration ? '(Harbor merges)' : fmtMinutes(c.estimatedMinutes ?? 0)}`).join('; ');
+    this.post(conversationId, 'system', `Plan estimate: about ${fmtMinutes(eta.minutes)} of wall time with up to ${limit} helper(s) at once (longest chain ${fmtMinutes(eta.criticalPathMinutes)}). Per task: ${per}. Estimates are Harbor's priors and measured runs, not a promise.`, { agentId: mainId });
+  }
+
+  /**
+   * A lead's HARBOR_REPLY: forwarded to a helper of this conversation that waits (its answer) or was stopped (it continues in its own
+   * session, on its branch). Returns the helper's id when delivered.
+   */
+  private deliverReply(projectId: Id, conversationId: Id, r: ReplyRequest): Id | undefined {
+    const q = r.to.trim().toLowerCase();
+    const mine = this.registerFor(projectId, conversationId).filter((x) => !x.integration && !x.rollback);
+    const hits = mine.filter((x) => x.id.toLowerCase() === q);
+    const target = hits[0] ?? (q.length >= 6 ? (mine.filter((x) => x.id.toLowerCase().startsWith(q)).length === 1 ? mine.find((x) => x.id.toLowerCase().startsWith(q)) : undefined) : undefined);
+    if (!target) { this.post(conversationId, 'system', `Harbor could not deliver the lead's reply to "${clip(r.to, 60)}": no single helper of this conversation has that id.`); return undefined; }
+    if (!['waiting', 'stopped', 'working', 'queued'].includes(target.state)) {
+      this.post(conversationId, 'system', `Harbor did not deliver the lead's reply to "${target.title}": it is ${target.state}. Delegate new work (with "retryOf" to redo it) instead.`, { agentId: target.id });
+      return undefined;
+    }
+    this.d.store.addCoordination({ projectId, kind: 'direct', from: this.d.store.mainAgent(projectId)?.id, to: target.id, text: r.text });
+    this.post(conversationId, 'system', `The lead replied to "${target.title}": ${clip(r.text, 200)}`, { agentId: target.id });
+    if (target.state === 'queued') { const f = this.followups.get(target.id) ?? []; f.push(r.text); this.followups.set(target.id, f); return target.id; }
+    if (target.state === 'stopped') { this.reported.delete(reportKey(target)); this.d.store.clearReportDelivery(target.id); }
+    this.followUp(target, `Message from the lead: ${r.text}`);
+    return target.id;
   }
 
   /** The checked-out branch now: an integrator queued without a target is pinned to it, and refuses to run once the folder is on another branch. */
@@ -1280,8 +1497,35 @@ export class Orchestrator {
     this.enqueueMain(projectId, { kind: 'goal', continuation: n + 1, max: GOAL_MAX_CONTINUATIONS }, conversationId);
   }
 
-  private createTasks(project: Project, tasks: PlannedTask[], conversationId: Id, requester?: Id, ctx: { pin?: { checkedOut?: string }; dirty?: 'dirty' | 'unknown' } = {}): AgentRecord[] {
+  /**
+   * A reviewer delegated without "dependsOn" has nothing to review. With exactly one candidate (the one edit helper of this turn, or else
+   * the one finished edit helper of this conversation nobody reviewed) Harbor binds it and says so; otherwise the reviewer is refused
+   * with the candidate ids, so the lead can fix it in one step. Only in a git repository (elsewhere a reviewer reads the folder).
+   */
+  private bindReviewers(project: Project, tasks: PlannedTask[], conversationId: Id): { tasks: PlannedTask[]; refused: Map<string, string> } {
+    const refused = new Map<string, string>();
+    if (this.repoKind.get(project.id) !== 'git') return { tasks, refused };
+    const loose = tasks.filter((t) => t.role === 'reviewer' && !t.integrate && !t.dependsOn.length && !t.specFrom);
+    if (!loose.length) return { tasks, refused };
+    const thisTurn = tasks.filter((t) => t.access === 'edit' && !t.integrate);
+    const earlier = this.registerFor(project.id, conversationId).filter((a) => this.canEdit(a) && a.state === 'done' && !!a.branch && !a.integration && !a.rollback && !this.reviewersOf(project.id, a).length);
+    const out = tasks.map((t) => {
+      if (!loose.includes(t)) return t;
+      const bind = thisTurn.length === 1 ? { ref: thisTurn[0]!.ref, title: thisTurn[0]!.title } : !thisTurn.length && earlier.length === 1 ? { ref: earlier[0]!.id, title: earlier[0]!.title } : undefined;
+      if (bind) {
+        this.post(conversationId, 'system', `Harbor bound the reviewer "${clip(t.title, 60)}" to "${clip(bind.title, 60)}", the only change it can review.`);
+        return { ...t, dependsOn: [bind.ref] };
+      }
+      const cands = thisTurn.length ? thisTurn.map((c) => `ref ${c.ref} ("${clip(c.title, 40)}")`) : earlier.map((c) => `id=${c.id} ("${clip(c.title, 40)}")`);
+      refused.set(t.ref, `Refused: this reviewer depends on no helper, so there is no change to review. ${cands.length ? `Candidates: ${cands.slice(0, 6).join(', ')}.` : 'There is no finished, unreviewed edit helper to bind it to.'} Delegate it with "dependsOn" naming the implementer to review. Nothing was run.`);
+      return t;
+    });
+    return { tasks: out, refused };
+  }
+
+  private createTasks(project: Project, input: PlannedTask[], conversationId: Id, requester?: Id, ctx: { pin?: { checkedOut?: string }; dirty?: 'dirty' | 'unknown' } = {}): AgentRecord[] {
     const { store } = this.d;
+    const { tasks, refused: unbound } = this.bindReviewers(project, input, conversationId);
     const refToId = new Map<string, Id>(tasks.map((t) => [t.ref, newId()]));
     const resolve = (r: string): Id | undefined => refToId.get(r) ?? store.listAgentRecords(project.id).find((a) => a.id === r)?.id;
     const out: AgentRecord[] = [];
@@ -1324,34 +1568,48 @@ export class Orchestrator {
       const deps = graph.get(id)!;
       const wantedSpec = t.specFrom ? resolve(t.specFrom) : undefined;
       const specFromId = wantedSpec && deps.has(wantedSpec) ? wantedSpec : undefined;
-      // A retry escalates ONE axis, and only when the work itself was judged wanting (a reviewer asked for changes, or a check Harbor ran
-      // failed): first the model tier (one complexity level up), and only when it is already on the top tier, effort. A failure of the
-      // infrastructure (rate limit, spawn, sign-in, stopped, dependency failed, network) says nothing about the work or the model: the
-      // retry keeps tier and effort and merely avoids the CLI/model that failed.
+      // Harbor rates the work itself from concrete signals; the lead's complexity is only a hint (difficulty.ts).
+      const est = difficultyOf({
+        role: t.role, text: t.instructions, files: t.files, readOnly: t.access === 'read', hint: t.complexity,
+        verify: t.access === 'edit' && this.checkCommands(project).length > 0, hasSpec: !!specFromId
+      });
+      // A retry spends more only when the work itself was judged wanting (a reviewer asked for changes, or a check Harbor ran failed):
+      // the capability floor goes up one step, which the router meets with more effort on the same model first, and with a stronger
+      // model only when that is the cheaper way (never one kept out of automatic routing, never past the strongest one). A failure of
+      // the infrastructure (rate limit, spawn, sign-in, stopped, dependency failed, network) says nothing about the work or the model:
+      // the retry keeps difficulty, model and effort and merely avoids the CLI that failed.
       const prior = t.retryOf ? store.listAgentRecords(project.id).find((a) => a.id === t.retryOf) : undefined;
       const rejected = !!prior && this.workRejected(project.id, prior);
-      const topTier = !!prior && Math.max(CX_UP_ORDER.indexOf(t.complexity), CX_UP_ORDER.indexOf(prior.complexity ?? 'medium')) >= CX_UP_ORDER.length - 1;
-      const complexity: Complexity = rejected && !topTier ? CX_UP_ORDER[Math.max(CX_UP_ORDER.indexOf(t.complexity), CX_UP_ORDER.indexOf(prior!.complexity ?? 'medium')) + 1]! : rejected ? 'high' : t.complexity;
-      const raiseEffort = rejected && topTier;
-      const avoid = prior && !rejected && (prior.state === 'failed' || prior.state === 'stopped') && prior.cli !== 'auto' && prior.cli !== 'harbor' ? [{ cli: prior.cli }] : undefined;
+      const ran = !!prior && prior.cli !== 'auto' && prior.cli !== 'harbor';
+      const priorD = prior ? Math.max(prior.difficulty ?? COMPLEXITY_DIFFICULTY[prior.complexity ?? 'medium'], est.difficulty) : est.difficulty;
+      const difficulty = rejected ? raiseDifficulty(priorD, this.strongestLevel(t.needs)) : prior ? priorD : est.difficulty;
+      const complexity: Complexity = complexityOf(difficulty);
+      const escalateFrom = rejected && ran ? { cli: prior!.cli, model: prior!.model, effort: prior!.effort } : undefined;
+      const keepModel = prior && !rejected && ran ? { cli: prior.cli, model: prior.model, effort: prior.effort } : undefined;
+      const avoid = prior && !rejected && (prior.state === 'failed' || prior.state === 'stopped') && ran ? [{ cli: prior.cli }] : undefined;
       // Avoided per CLI, not per model: a soft penalty on one model (sonnet) would push the retry to the pricier sibling (opus) of the same CLI,
       // which is exactly the escalation this branch exists to prevent.
-      if (rejected && !raiseEffort) this.post(conversationId, 'system', `Retrying "${t.title}" with a stronger model (${t.complexity} → ${complexity}) because "${prior!.title}" was rejected (reviewer changes or a failed check).`);
-      else if (raiseEffort) this.post(conversationId, 'system', `Retrying "${t.title}" at high effort: it already runs on the strongest tier and "${prior!.title}" was rejected (reviewer changes or a failed check).`);
-      else if (prior) this.post(conversationId, 'system', `Retrying "${t.title}" at the same tier and effort: "${prior.title}" ${prior.state === 'failed' ? 'failed' : 'did not finish'}, which is not a reason to spend more${avoid ? `; ${avoid[0]!.cli} is avoided when another CLI fits equally well` : ''}.`);
+      if (rejected) this.post(conversationId, 'system', `Retrying "${t.title}" with the capability floor one step higher (difficulty ${priorD} → ${difficulty}) because "${prior!.title}" was rejected (reviewer changes or a failed check): more effort on ${escalateFrom ? escalateFrom.model : 'the same model'} first, a stronger model only if that is cheaper.`);
+      else if (prior) this.post(conversationId, 'system', `Retrying "${t.title}" at the same difficulty, model and effort: "${prior.title}" ${prior.state === 'failed' ? 'failed' : 'did not finish'}, which is not a reason to spend more${avoid ? `; ${avoid[0]!.cli} is avoided when another CLI fits equally well` : ''}.`);
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
-        effort: effortFor(t.role, complexity, raiseEffort), retry: raiseEffort ? true : undefined, ...(avoid ? { avoid } : {}), task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
+        effort: keepModel?.effort ?? effortFor(t.role, complexity), retry: rejected ? true : undefined, ...(avoid ? { avoid } : {}), task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
         needs: t.needs, readOnly: t.access === 'read', pinnedCli: t.cli,
-        helpFor: t.helpFor ?? requester, revision: 1, complexity,
+        helpFor: t.helpFor ?? requester, revision: 1, complexity, difficulty, size: est.size, difficultySignals: prior ? [...est.signals, rejected ? `retry of rejected work: floor raised from ${priorD}` : `retry: kept ${priorD}`] : est.signals,
+        ...(escalateFrom ? { escalateFrom } : {}), ...(keepModel ? { keepModel } : {}),
         parentConversationId: conversationId, attempts: 0, created: Date.now(), updated: Date.now(),
         // A clear edit goes straight to one implementer; its instructions are the spec.
         spec: t.role === 'implementer' && !specFromId ? t.instructions : undefined,
-        ...(ctx.dirty && t.access === 'edit' && !t.integrate ? { dirtyAtStart: ctx.dirty } : {})
+        ...(ctx.dirty && t.access === 'edit' && !t.integrate ? { dirtyAtStart: ctx.dirty } : {}),
+        ...(!t.integrate ? { estimatedMinutes: Math.round(this.estimateFor(project, t, !!specFromId, difficulty).minutes * 10) / 10 } : {})
       };
       const bad = unresolved.get(t.ref);
+      const loose = unbound.get(t.ref);
       if (bad) {
         Object.assign(rec, { state: 'failed' as const, error: `Unresolvable reference(s): ${bad.map((r) => `"${clip(r, 60)}"`).join(', ')}. Use a ref from this same turn or an id= shown in the helper list. Nothing was run.`, dependsOn: [], specFromId: undefined });
+        failed.push(rec);
+      } else if (loose) {
+        Object.assign(rec, { state: 'failed' as const, error: loose });
         failed.push(rec);
       } else if (t.integrate) {
         Object.assign(rec, { cli: 'harbor', model: 'git', effort: 'low', needs: undefined, pinnedCli: undefined, retry: undefined });
@@ -1386,11 +1644,94 @@ export class Orchestrator {
 
   private canEdit(a: AgentRecord): boolean { return EDIT_ROLES.includes(a.role) && !a.readOnly; }
 
+  /** Helper runs in flight in every project that draw on quota (Harbor's own integrations and rollbacks do not). */
+  private runningHelpers(): number {
+    return this.d.store.allAgentRecords().filter((a) => a.role !== 'main' && this.running.has(a.id) && !a.integration && !a.rollback).length;
+  }
+
+  /**
+   * How many helpers may run at once from the quota budget (helperLimit.ts): the pools of the auto-routable models of the CLIs Harbor
+   * can use now. Without a known reset time an all-exhausted budget does not hold work: routing then says why it cannot run.
+   */
+  private budgetLimit(): HelperLimit {
+    const { store, ledger } = this.d;
+    const catalog = this.d.catalog ?? DEFAULT_CATALOG;
+    try {
+      const clis = this.d.getClis().filter((c) => c.installed && c.authState !== 'signedOut' && this.d.enabled(c.id) && !!this.d.adapterFor(c.id)).map((c) => c.id);
+      const now = (this.d.now ?? Date.now)();
+      const calibration = store.getCalibration();
+      const running = store.allAgentRecords().filter((a) => a.role !== 'main' && this.running.has(a.id)).map((a) => entryFor(catalog, a.cli, a.model)).filter((e): e is CatalogEntry => !!e);
+      return helperLimitFromLedger({ catalog, clis, ledger, now, running, committed: this.committedNow(now, calibration), ...(calibration ? { calibration } : {}) });
+    } catch (e) {
+      this.log({ kind: 'triage', projectId: '__harbor__', text: `helper budget could not be computed: ${String((e as Error).message ?? e)}` });
+      return { limit: MAX_HELPERS_CAP, why: 'budget unavailable' };
+    }
+  }
+
+  /**
+   * Quota the runs in flight (leads and helpers, every project) are still expected to burn: routing and the helper limit count it as
+   * used, because a provider reading cannot show it yet (routePrice.committedFor).
+   */
+  private committedNow(now: number, calibration: Calibration | undefined, except?: symbol) {
+    const runs = [...this.inFlight].filter(([k]) => k !== except).map(([, r]) => r);
+    const catalog = this.d.catalog ?? DEFAULT_CATALOG;
+    const recent = finishedRuns(this.d.store.listUsage().filter((u) => u.time > now - RECENT_RUNS_MS), (c, m) => entryFor(catalog, c, m));
+    return committedFor(runs, now, calibration, newestReadingAt(this.d.ledger), recent);
+  }
+
+  /** Every pool is out until `until`: the helper stays queued, the conversation is told once, and the pump runs again at the reset. */
+  private holdForQuota(a: AgentRecord, until: number, reason = 'every quota pool Harbor can use is exhausted'): void {
+    const at = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const why = `Waiting: ${reason} until about ${at}; it starts then`;
+    if (a.error !== why) this.setState(a, 'queued', { error: why });
+    if (!this.quotaHeld.has(a.parentConversationId)) {
+      this.quotaHeld.set(a.parentConversationId, until);
+      this.post(a.parentConversationId, 'system', `${reason[0]!.toUpperCase()}${reason.slice(1)} until about ${at}. Queued helpers wait and start by themselves then; nothing is lost.`, { agentId: a.id });
+      this.log({ kind: 'triage', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `helpers held: every pool exhausted until ${new Date(until).toISOString()}` });
+    }
+    if (this.quotaArmedFor === until) return;
+    this.quotaArmedFor = until;
+    const now = (this.d.now ?? Date.now)();
+    (this.d.setTimer ?? defaultTimer)(() => {
+      this.quotaArmedFor = undefined; // fired: a later hold for the same instant must arm again
+      for (const p of this.d.store.listProjects()) this.pump(p.id);
+    }, Math.max(1_000, until - now + 1_000));
+  }
+
+  /** A helper held for quota starts: the lead hears it at its next turn (no extra turn is spent on it). */
+  private quotaResumed(a: AgentRecord): void {
+    if (!this.quotaHeld.delete(a.parentConversationId)) return;
+    this.post(a.parentConversationId, 'system', 'Quota is available again: helpers held for it are starting.', { agentId: a.id });
+    this.addNote(a.parentConversationId, 'Helpers that waited for a quota reset are running again.');
+  }
+
+  /**
+   * New work depends on a helper Harbor stopped at its time limit: its work is on its branch, so it is resumed (once per helper, and not
+   * when the user stopped the conversation) and the dependent keeps waiting. False when that does not apply.
+   */
+  private resumeForDependent(dep: AgentRecord, waiting: AgentRecord): boolean {
+    if (dep.state !== 'stopped' || dep.stopKind !== 'cap' || dep.depResumed || !dep.branch || this.running.has(dep.id) || this.stoppedSessions.has(dep.parentConversationId)) return false;
+    dep.depResumed = true;
+    this.reported.delete(reportKey(dep));
+    this.d.store.clearReportDelivery(dep.id);
+    this.post(dep.parentConversationId, 'system', `"${waiting.title}" builds on "${dep.title}", which Harbor stopped at its time limit: Harbor resumes "${dep.title}" from ${dep.branch} so its work can finish first.`, { agentId: dep.id });
+    this.setState(waiting, 'queued', { error: `Waiting for "${dep.title}", which Harbor resumed to finish its work` });
+    this.followUp(dep, DEPENDENCY_RESUME_PROMPT);
+    return true;
+  }
+
   pump(projectId: Id): void {
     const { store } = this.d;
     const max = effectiveSettings(store.getSettings(), projectId).concurrencyLimit ?? this.d.maxActivePerProject ?? DEFAULT_CONCURRENCY;
-    // Higher priority first, then oldest first.
-    const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main').sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.created - b.created);
+    // The quota budget's limit is shared by every project (one account); computed once per pump, and only when something can start.
+    let budget: HelperLimit | undefined;
+    // Higher priority first, then work whose conversation's deadline is closer to its estimate (urgency), then oldest first. Phase 5
+    // simulator: without the urgency order a deadline's backlog waited in line behind other conversations' work.
+    const urg = new Map<Id, number>();
+    const now = (this.d.now ?? Date.now)();
+    const urgencyOf = (c: Id) => { let u = urg.get(c); if (u === undefined) { u = this.urgencyFor(c, now, store.getCalibration()); urg.set(c, u); } return u; };
+    const all = store.listAgentRecords(projectId).filter((a) => a.role !== 'main')
+      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || urgencyOf(b.parentConversationId) - urgencyOf(a.parentConversationId) || a.created - b.created);
     const byId = new Map(all.map((a) => [a.id, a]));
     for (const a of all) {
       if (a.state !== 'queued') continue;
@@ -1400,9 +1741,13 @@ export class Orchestrator {
       // An integrator waits for reviewers only so its gate sees final verdicts: a failed or stopped review is settled, and the
       // gate (latest verdict on the current head) decides. Work stopped by a restart is not settled: it waits to be resumed.
       const settled = (x: AgentRecord) => !!a.integration && x.role === 'reviewer' && TERMINAL.includes(x.state) && !this.restartStopped(x);
-      const bad = deps.find((x) => (x.state === 'failed' || x.state === 'stopped') && !settled(x) && !this.restartStopped(x));
+      // A dependency already running again (resumed, not yet marked working) is pending, not bad.
+      const bad = deps.find((x) => (x.state === 'failed' || x.state === 'stopped') && !settled(x) && !this.restartStopped(x) && !this.running.has(x.id));
       if (bad) {
-        this.setState(a, 'failed', { error: `Blocked: dependency "${bad.title}" ${bad.state}. Nothing was run.` });
+        // A dependency Harbor stopped at its time limit has its work on a branch: resume it once instead of failing what builds on it.
+        if (this.resumeForDependent(bad, a)) continue;
+        const how = bad.branch ? `continue it with HARBOR_REPLY to id=${bad.id} (it resumes on ${bad.branch}) and delegate this again, or ` : '';
+        this.setState(a, 'failed', { error: `Blocked: dependency "${bad.title}" ${bad.state}. Nothing was run. Options: ${how}re-plan without it.` });
         this.finished(a);
         continue;
       }
@@ -1422,7 +1767,18 @@ export class Orchestrator {
         continue;
       }
       if (this.activeCount(projectId) >= max) continue;
+      const heldTill = this.heldUntil.get(a.id);
+      if (heldTill !== undefined) { if (heldTill > (this.d.now ?? Date.now)()) continue; this.heldUntil.delete(a.id); }
+      if (!a.integration && !a.rollback) {
+        budget ??= this.budgetLimit();
+        if (budget.limit === 0 && budget.until !== undefined) { this.holdForQuota(a, budget.until); continue; }
+        if (this.runningHelpers() >= Math.max(1, budget.limit)) continue;
+      }
+      // A follow-up that routing held for quota continues the helper's own session; it is not its assignment run again.
+      const heldFollow = this.heldFollowUps.get(a.id);
+      if (heldFollow !== undefined) { this.heldFollowUps.delete(a.id); this.quotaResumed(a); this.followUp(a, heldFollow); continue; }
       if (!this.claim(a)) continue;
+      this.quotaResumed(a);
       this.begin(a.id);
       void this.runAgent(a).catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`));
     }
@@ -1505,7 +1861,7 @@ export class Orchestrator {
     const project = this.project(a.projectId);
     const { store, git } = this.d;
     const conv = this.convFor(a);
-    this.setState(a, 'working', { error: undefined });
+    this.setState(a, 'working', { error: undefined, stopKind: undefined });
     this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
 
     // Workspace: edit helpers get an isolated worktree; read-only helpers read the project (or the change under review).
@@ -1561,7 +1917,35 @@ export class Orchestrator {
     const cmds = this.checkCommands(project);
     const prompt = subagentPrompt(a, { projectName: project.name, upstream, worktreeNote, baseCommit: reviewedBase, verifyHint: cmds.length ? cmds.join('; ') : undefined });
     const res = await this.execute(a, prompt, { cwd, resume: false });
+    // Held for quota (Phase 5): nothing ran, so it is not a failure. It waits in the queue and starts again at the reset.
+    if (this.holdRun(a, res)) return;
     await this.afterRun(a, res);
+  }
+
+  /**
+   * Routing held this run for quota (nothing ran): re-queue the helper instead of failing it. `followText` is a follow-up's message,
+   * kept so the pump delivers it to the helper's own session when released (an assignment run needs none).
+   */
+  private holdRun(a: AgentRecord, res: RoutedRun, followText?: string): boolean {
+    if (!res.held || res.started || this.controllers.get(a.id)?.signal.aborted) return false;
+    this.locks.release(a.id);
+    this.running.delete(a.id);
+    this.controllers.delete(a.id);
+    const until = res.held.until ?? (this.d.now ?? Date.now)() + QUOTA_RECHECK_MS;
+    // The pump skips it until then, so it is not restarted (and announced again) on every pump in between.
+    this.holdForQuota(a, until, 'too little quota is left above the reserve for this helper'); // sets 'queued' (clears nothing below)
+    if (a.state !== 'queued') this.setState(a, 'queued');
+    this.heldUntil.set(a.id, until);
+    if (followText !== undefined) {
+      const pending = this.followups.get(a.id)?.splice(0) ?? [];
+      this.heldFollowUps.set(a.id, [followText, ...pending].join('\n\n'));
+    }
+    return true;
+  }
+
+  /** What the best auto-routable model can reach at high effort for these needs: an escalated retry never asks for more. */
+  private strongestLevel(needs?: Need[]): number {
+    return strongestLevel(this.d.catalog ?? DEFAULT_CATALOG, needs);
   }
 
   /** One CLI run for a helper (initial or follow-up), streaming into its conversation. */
@@ -1577,6 +1961,8 @@ export class Orchestrator {
     const allowed = permission === 'edit' ? commandPrefixes(this.checkCommands(this.project(a.projectId))) : [];
     return this.runRouted(a, {
       prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
+      ...(a.difficulty !== undefined ? { difficulty: a.difficulty } : {}), ...(a.size ? { size: a.size } : {}), ...(a.difficultySignals ? { difficultySignals: a.difficultySignals } : {}),
+      ...(a.escalateFrom ? { escalateFrom: a.escalateFrom } : {}), ...(a.keepModel ? { keepModel: a.keepModel } : {}),
       avoid: a.avoid, fanOut: a.role === 'planner' || a.role === 'implementer' || a.role === 'reviewer',
       requireCli: a.pinnedCli,
       permission, cwd: o.cwd, signal: ctl.signal,
@@ -1662,22 +2048,56 @@ export class Orchestrator {
       report = `NO VERDICT: this reviewer's output did not end with a valid HARBOR_RESULT line carrying a verdict (approve or changes), so it counts as neither an approval nor a rejection.\n\n${report}`;
     }
 
+    // Routing said the model only just clears hard work: one automatic review once it is done (see autoReview).
+    if (res.decision?.needsReview && this.canEdit(a) && a.role === 'implementer') Object.assign(a, { needsReview: true, reviewReason: res.decision.reviewReason });
     this.running.delete(a.id);
     this.controllers.delete(a.id);
+    // Harbor's time limit, not the user: resumed once from the saved session (its work is committed above) before the lead hears of it.
+    const capStopped = !!res.capped && !ctl?.signal.aborted;
+    const loopStopped = !!res.loop && !ctl?.signal.aborted;
+    if (loopStopped && this.loopStop(a, res.loop!, report)) return;
+    if (capStopped && capResumeAllowed(a) && !this.stoppedSessions.has(a.parentConversationId) && !this.shuttingDown) {
+      a.capResumes = (a.capResumes ?? 0) + 1;
+      a.report = report;
+      store.upsertAgent(a);
+      const note = `${res.error ?? 'Harbor stopped this run at its time limit'}. Its work so far is committed${a.branch ? ` on ${a.branch}` : ''}; Harbor resumes it once from its saved session to finish and report.`;
+      this.post(this.convFor(a), 'system', note, { agentId: a.id });
+      if (this.convFor(a) !== a.parentConversationId) this.post(a.parentConversationId, 'system', `"${a.title}": ${note}`, { agentId: a.id });
+      this.log({ kind: 'triage', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${res.error ?? 'capped'}; resumed automatically` });
+      const pending = this.followups.get(a.id)?.splice(0) ?? [];
+      this.followUp(a, [CAP_RESUME_PROMPT, ...pending].join('\n\n'));
+      return;
+    }
     const blocked = res.ok && proto.help.some((h) => h.blocked);
     const asking = res.ok && !stopped && proto.ask[0];
+    const askRoute = asking ? routeAsk(asking, { leadAsks: a.leadAsks ?? 0, leadAvailable: !this.stoppedSessions.has(a.parentConversationId) }) : undefined;
     const summary = own?.summary || firstLine(report);
-    if (stopped) this.setState(a, 'stopped', { report, error: res.capped ? `Harbor stopped this run: it ran longer than the ${Math.round((this.d.stall?.helperCapMs ?? HELPER_CAP_MS) / 60_000)} minute limit. Resume it to continue from its saved session.` : 'Stopped by the user.', summary: undefined });
+    if (stopped) {
+      const where = `Its work so far is committed${a.branch ? ` on ${a.branch}` : ''}${a.headCommit ? ` at ${a.headCommit.slice(0, 10)}` : ''}.`;
+      const capError = `${res.error ?? 'Harbor stopped this run at its time limit'}${a.capResumes ? ' (after one automatic resume)' : ''}. ${where} The lead decides: continue it (HARBOR_REPLY), split what is left, or do it itself.`;
+      const loopError = res.loop ? `Harbor stopped this run again because it was going in circles: ${describeLoop(res.loop)} (after one automatic resume with a different instruction). ${where} The lead decides: re-scope it, split it, or take it over.` : '';
+      this.setState(a, 'stopped', { report, error: loopStopped ? loopError : capStopped ? capError : 'Stopped by the user.', stopKind: loopStopped ? 'loop' : capStopped ? 'cap' : 'user', summary: undefined });
+    }
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed', summary: undefined });
-    else if (asking) this.setState(a, 'waiting', { report, summary, error: 'Waiting for your answer.' });
+    else if (asking) this.setState(a, 'waiting', { report, summary, error: askRoute?.to === 'lead' ? "Waiting for the lead's answer." : 'Waiting for your answer.' });
     else if (blocked) this.setState(a, 'waiting', { report, summary, error: 'Blocked: waiting for another helper requested through the lead.' });
     else this.setState(a, 'done', { report, summary, error: undefined });
 
-    if (asking) {
+    if (asking && askRoute) {
       const conv = this.convFor(a);
       this.post(conv, 'assistant', asking.question, { agentId: a.id });
-      this.post(a.parentConversationId, 'system', `"${a.title}" is waiting for your answer: ${clip(asking.question, 160)}`, { agentId: a.id });
-      this.askUser(a.id, conv, asking);
+      // File claims, scope and which branch to build on are the lead's to decide; only the user's own questions go to the user.
+      if (askRoute.to === 'lead' && this.autoTurn(a.parentConversationId)) {
+        a.leadAsks = (a.leadAsks ?? 0) + 1;
+        store.upsertAgent(a);
+        this.d.store.addCoordination({ projectId: a.projectId, kind: 'help', from: a.id, text: `question: ${asking.question}` });
+        this.post(a.parentConversationId, 'system', `"${a.title}" asked the lead: ${clip(asking.question, 160)}`, { agentId: a.id });
+        this.enqueueMain(a.projectId, { kind: 'help', from: a, reason: 'question', proposedRole: 'none', instructions: asking.question, blocked: true, question: { options: asking.options } }, a.parentConversationId);
+        this.armAskDefault(a, 'repeat');
+      } else {
+        if (a.error !== 'Waiting for your answer.') this.setState(a, 'waiting', { error: 'Waiting for your answer.' });
+        this.askUserForHelper(a, asking, askRoute.to === 'user' ? askRoute.kind : 'repeat');
+      }
     }
     for (const h of proto.help) this.helpRequested(a, h);
 
@@ -1686,6 +2106,27 @@ export class Orchestrator {
     if (queued.length && !stopped) { this.followUp(a, queued.join('\n\n')); return; }
     if (a.state !== 'waiting') this.finished(a);
     else this.pump(a.projectId);
+  }
+
+  /**
+   * A loop stop (loopGuard.ts): journal it, tell the conversation, and resume the helper ONCE with what looped and the instruction to
+   * change approach. True when it was resumed; false leaves the caller to mark it stopped (stopKind 'loop'), which wakes the lead.
+   */
+  private loopStop(a: AgentRecord, e: LoopEvidence, report: string): boolean {
+    const what = describeLoop(e);
+    const resume = loopResumeAllowed(a) && !this.stoppedSessions.has(a.parentConversationId) && !this.shuttingDown;
+    this.log({ kind: 'loop', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `${a.role} "${a.title}": ${what} (${e.kind}); ${resume ? 'resumed once' : 'left stopped, lead woken'}` });
+    if (!resume) return false;
+    a.loopResumes = (a.loopResumes ?? 0) + 1;
+    a.report = report;
+    this.d.store.upsertAgent(a);
+    const note = `Stopped "${a.title}": ${what}; resuming it once with a different instruction.`;
+    this.post(this.convFor(a), 'system', note, { agentId: a.id });
+    if (this.convFor(a) !== a.parentConversationId) this.post(a.parentConversationId, 'system', note, { agentId: a.id });
+    const where = a.branch || a.headCommit ? `Your work so far is committed${a.branch ? ` on branch ${a.branch}` : ''}${a.headCommit ? ` at ${a.headCommit.slice(0, 10)}` : ''}.` : '';
+    const pending = this.followups.get(a.id)?.splice(0) ?? [];
+    this.followUp(a, [loopResumePrompt(e, where), ...pending].join('\n\n'));
+    return true;
   }
 
   /** Changes under `.harbor/` alter what Harbor runs and trusts (the checks); they are never merged without being pointed out. */
@@ -1792,9 +2233,37 @@ export class Orchestrator {
       if (req && req.state === 'waiting') this.followUp(req, `Your requested helper "${a.title}" finished. Its report:\n${clip(a.report ?? '', 5000)}\n\nContinue your assignment.`);
     }
     if (a.state === 'failed' && this.d.store.getConversation(parent)?.mode === 'goal') this.d.store.setGoalPaused(parent, true);
+    // Before the report wake is scheduled: a queued review keeps the lead asleep until it has the verdict too.
+    this.autoReview(a);
 
     this.pump(a.projectId);
     if (!a.byUser) this.scheduleReport(a);
+  }
+
+  /**
+   * Routing said this implementer's model only just clears (or does not clear) the floor of hard work (RouteDecision.needsReview):
+   * Harbor schedules ONE read-only reviewer after it, unless the lead already has one on it. At most once per implementer.
+   */
+  private autoReview(a: AgentRecord): void {
+    if (a.state !== 'done' || a.role !== 'implementer' || !a.needsReview || a.autoReviewed || !a.branch || !a.headCommit || a.headCommit === a.baseCommit) return;
+    if (this.reviewersOf(a.projectId, a).length) return;
+    const { store } = this.d;
+    a.autoReviewed = true;
+    store.upsertAgent(a);
+    const why = a.reviewReason ?? 'its model only just clears the difficulty of this work';
+    const task = `Review the change of "${a.title}" on ${a.branch} against the specification it was built against and its acceptance criteria. Harbor scheduled this review because ${why}.`;
+    const est = difficultyOf({ role: 'reviewer', text: task, files: a.files, readOnly: true });
+    const complexity = complexityOf(est.difficulty);
+    const rec: AgentRecord = {
+      id: newId(), projectId: a.projectId, parentId: store.mainAgent(a.projectId)?.id, role: 'reviewer', title: `Review "${clip(a.title, 50)}"`, state: 'queued',
+      cli: 'auto', model: 'auto', effort: effortFor('reviewer', complexity), task, files: a.files, dependsOn: [a.id], readOnly: true, needs: ['review', 'code'],
+      revision: 1, complexity, difficulty: est.difficulty, size: est.size, difficultySignals: [...est.signals, 'automatic review: routing flagged the implementer'],
+      parentConversationId: a.parentConversationId, attempts: 0, created: Date.now(), updated: Date.now(), autoReviewOf: a.id
+    };
+    store.upsertAgent(rec);
+    store.addConversation({ id: newId(), projectId: a.projectId, title: `reviewer: ${rec.title}`, updated: Date.now(), agentId: rec.id });
+    this.publish(rec);
+    this.post(a.parentConversationId, 'system', `Harbor scheduled one review of "${a.title}": ${why}.`, { agentId: rec.id });
   }
 
   /** A planner's own wake is skipped while queued dependents already carry its report as their spec: it rides along with the final wake. */
@@ -1809,7 +2278,8 @@ export class Orchestrator {
    */
   private scheduleReport(a: AgentRecord): void {
     const conv = a.parentConversationId;
-    const own = a.state === 'failed' || (a.role === 'planner' && !this.plannerFeedsDependents(a));
+    // Judgement needed now: a failure, Harbor's own stop (the user's stops never wake it), a helper that says it is blocked, or a planner nothing waits on.
+    const own = a.state === 'failed' || (a.state === 'stopped' && (a.stopKind === 'cap' || a.stopKind === 'loop')) || a.result?.outcome === 'blocked' || (a.role === 'planner' && !this.plannerFeedsDependents(a));
     const pending = this.reportWakes.get(conv);
     if (pending) { pending.wake ||= own; pending.last = a; return; }
     const ms = this.d.reportDebounce?.ms ?? REPORT_DEBOUNCE_MS;
@@ -1835,8 +2305,9 @@ export class Orchestrator {
     // Never sent anywhere. Uncertain results (a lead may have read them) only ride along: they never start a turn themselves.
     const fresh = open.filter((x) => !deliveryOf(x));
     if (!fresh.length) return;
-    // A stop-all should not trigger a flurry of lead turns: a batch of only stopped helpers is skipped on purpose.
-    if (fresh.every((x) => x.state === 'stopped')) { fresh.forEach((x) => this.reported.add(reportKey(x))); store.markReports(fresh, 'skipped'); return; }
+    // A stop-all should not trigger a flurry of lead turns: a batch of only USER-stopped helpers is skipped on purpose. A helper Harbor
+    // stopped at its time limit is not a stop-all: skipping it left a real run's lead idle for 28 minutes until the user typed again.
+    if (fresh.every((x) => x.state === 'stopped' && x.stopKind !== 'cap' && x.stopKind !== 'loop')) { fresh.forEach((x) => this.reported.add(reportKey(x))); store.markReports(fresh, 'skipped'); return; }
     if (!this.autoTurn(a.parentConversationId)) return;
     // Uncertain results join when the turn starts (`heldReports`), within the same bound as any other turn.
     fresh.forEach((x) => this.reported.add(reportKey(x)));
@@ -1855,7 +2326,7 @@ export class Orchestrator {
     return pickHeld(this.registerFor(projectId, conversationId).filter((x) => {
       if (x.byUser || !TERMINAL.includes(x.state) || this.reported.has(reportKey(x))) return false;
       const d = deliveryOf(x);
-      return d ? UNCERTAIN.includes(d.status) : x.state !== 'stopped';
+      return d ? UNCERTAIN.includes(d.status) : x.state !== 'stopped' || x.stopKind === 'cap' || x.stopKind === 'loop';
     }));
   }
 
@@ -2000,7 +2471,7 @@ export class Orchestrator {
       this.locks.release(a.id);
       if (state === 'failed') this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `integrator "${a.title}": ${error}` });
       this.post(conv, 'assistant', report, { agentId: a.id });
-      this.setState(a, state, { report, summary, error });
+      this.setState(a, state, { report, summary, error, stopKind: state === 'stopped' ? 'user' : undefined });
       this.finished(a);
     };
     const refuse = (why: string) => end('failed', `Integration refused. Nothing was merged.\n${why}`, `Refused: ${why}`);
@@ -2215,7 +2686,7 @@ export class Orchestrator {
       this.locks.release(a.id);
       if (state === 'failed') this.log({ kind: 'helper-failed', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `rollback "${a.title}": ${error}` });
       this.post(conv, 'assistant', report, { agentId: a.id });
-      this.setState(a, state, { report, summary, error });
+      this.setState(a, state, { report, summary, error, stopKind: state === 'stopped' ? 'user' : undefined });
       this.finished(a);
     };
     const refuse = (why: string) => end('failed', `Rollback refused. Nothing was reverted.\n${why}`, `Refused: ${why}`);
@@ -2345,6 +2816,7 @@ export class Orchestrator {
   /** Continue a helper's own session with a new message. */
   private followUp(a: AgentRecord, text: string): void {
     if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(text); this.followups.set(a.id, q); return; }
+    this.askTokens.delete(a.id); // whatever it waited for is answered now: no safe default later
     this.begin(a.id);
     // An integrator has no CLI session: any message (or resume) runs the integration again, which is idempotent.
     if (a.integration) { void this.runIntegration(a).catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`)); return; }
@@ -2370,8 +2842,9 @@ export class Orchestrator {
         const r = this.locks.acquire(a.projectId, a.id, a.files?.length ? a.files : [WHOLE_PROJECT]);
         if (!r.ok) { this.running.delete(a.id); this.controllers.delete(a.id); this.post(this.convFor(a), 'system', 'Another agent owns the files this agent needs; try again when it finishes.', { agentId: a.id }); return; }
       }
-      this.setState(a, 'working', { error: undefined });
+      this.setState(a, 'working', { error: undefined, stopKind: undefined });
       const res = await this.execute(a, text, { cwd, resume: true });
+      if (this.holdRun(a, res, text)) return;
       await this.afterRun(a, res);
     })().catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`));
   }
@@ -2385,6 +2858,42 @@ export class Orchestrator {
     this.questions.set(requestId, { agentId, conversationId });
     this.sessionState(conversationId, 'waiting', ask.question);
     this.emit({ type: 'question', requestId, conversationId, agentId, prompt: ask.question, options: ask.options.length ? ask.options : undefined, allowText: ask.allowText });
+  }
+
+  /**
+   * A helper's question that only the user can answer (askRouting.ts): shown to them, with a safe default ("no") applied after
+   * `questionTimeoutMs` so the helper never waits forever. The question event also raises Harbor's desktop notification.
+   */
+  private askUserForHelper(a: AgentRecord, ask: AskRequest, kind: UserAskKind): void {
+    const conv = this.convFor(a);
+    const ms = this.d.questionTimeoutMs ?? USER_QUESTION_TIMEOUT_MS;
+    const minutes = Math.max(1, Math.round(ms / 60_000));
+    this.post(a.parentConversationId, 'system', `"${a.title}" is waiting for your answer: ${clip(ask.question, 160)} (without an answer within ${minutes} minutes Harbor answers with the safe default: no).`, { agentId: a.id });
+    this.log({ kind: 'question', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `"${a.title}" asked the user (${kind}): ${clip(ask.question, 200)}` });
+    this.askUser(a.id, conv, ask);
+    this.armAskDefault(a, kind);
+  }
+
+  /**
+   * The safe-default timer of a waiting helper's question. Also armed when the question went to the lead: if the lead's help turn is
+   * dropped (the user steered, the session stopped) or fails without answering, the helper still never waits forever.
+   * A lead answer reaches followUp, which clears the token.
+   */
+  private armAskDefault(a: AgentRecord, kind: UserAskKind): void {
+    const ms = this.d.questionTimeoutMs ?? USER_QUESTION_TIMEOUT_MS;
+    const minutes = Math.max(1, Math.round(ms / 60_000));
+    const token = (this.askTokens.get(a.id) ?? 0) + 1;
+    this.askTokens.set(a.id, token);
+    (this.d.setTimer ?? defaultTimer)(() => {
+      if (this.askTokens.get(a.id) !== token || this.shuttingDown) return;
+      this.askTokens.delete(a.id);
+      const cur = this.d.store.getAgent(a.id);
+      if (!cur || cur.state !== 'waiting' || this.running.has(cur.id)) return;
+      for (const [id, q] of this.questions) if (q.agentId === cur.id) this.questions.delete(id);
+      this.log({ kind: 'question', projectId: cur.projectId, conversationId: cur.parentConversationId, agentId: cur.id, text: `"${cur.title}": no answer within ${minutes} minutes; safe default applied (${kind})` });
+      this.post(cur.parentConversationId, 'system', `No answer within ${minutes} minutes to "${cur.title}": Harbor answered with the safe default (no; stay within the assignment).`, { agentId: cur.id });
+      this.followUp(cur, safeDefault(kind, minutes));
+    }, ms);
   }
 
   async answerQuestion(requestId: Id, answer: string): Promise<void> {
@@ -2499,6 +3008,34 @@ export class Orchestrator {
 
   // ------------------------------------------------------------ routed execution with fallback
 
+  /**
+   * Deadline urgency of a conversation's work (0 without a deadline): the deadline against the estimated minutes of its unfinished
+   * helpers, summed (deadline.ts explains why a sum). Read on every routing decision, so setting a deadline applies to the next one.
+   */
+  private urgencyFor(conversationId: Id, now: number, calibration: Calibration | undefined): number {
+    const { store } = this.d;
+    const conv = store.getConversation(conversationId);
+    // A helper's own conversation belongs to the conversation that delegated it: the deadline is that one's.
+    const owner = conv?.agentId ? store.getAgent(conv.agentId) : undefined;
+    const parent = owner && owner.role !== 'main' ? store.getConversation(owner.parentConversationId) : conv;
+    if (parent?.deadline === undefined) return 0;
+    const work = store.allAgentRecords().filter((a) => a.role !== 'main' && a.parentConversationId === parent.id && !TERMINAL.includes(a.state)).map((a) => ({ role: a.role, size: a.size }));
+    return conversationUrgency({ deadline: parent.deadline, now, work: work.length ? work : [{ role: 'main' as const }], catalog: this.d.catalog ?? DEFAULT_CATALOG, calibration }).urgency;
+  }
+
+  /** Folds one finished run into the persisted calibration (partial and failed runs only as lower bounds; see calibration.ts). */
+  private learnFrom(event: UsageEvent, role: AgentRole, d: RouteDecision, before: ReportedLimit[], start: number): void {
+    try {
+      const catalog = this.d.catalog ?? DEFAULT_CATALOG, now = event.time, calibration = this.d.store.getCalibration();
+      // Other runs on the same CLI meanwhile burned part of the same delta: finished ones by their counts, running ones estimated.
+      const finished = finishedRuns(this.d.store.listUsage().filter((u) => u.id !== event.id && u.cli === event.cli && u.time > start), (c, m) => entryFor(catalog, c, m));
+      const running = [...this.inFlight.values()].map((r) => ({ entry: r.entry, start: r.startedAt, end: now, kTok: inFlightKTokSoFar(r, now, calibration) }));
+      const overlap = overlapKTok({ cli: event.cli, start, end: now, others: [...finished, ...running] });
+      const sample = calibrationSample({ event, role, size: d.size, effort: d.effort, before, start, overlap });
+      this.d.store.setCalibration(calibrate([sample], this.d.store.getCalibration(), this.d.catalog ?? DEFAULT_CATALOG));
+    } catch (e) { this.log({ kind: 'triage', projectId: event.projectId, text: `calibration update failed: ${String((e as Error).message ?? e)}` }); }
+  }
+
   private async runRouted(agent: AgentRecord, o: RoutedOptions): Promise<RoutedRun> {
     // Edit runs (the lead and edit helpers outside plan/auto mode) ask the user before a tool outside the CLI's allowlist.
     // Read-only and full runs get no handler, so nothing changes for them.
@@ -2542,7 +3079,9 @@ export class Orchestrator {
     let partialNote = '';
     const wd = this.d.stall ?? {};
     const stallMs = wd.stallMs ?? STALL_MS;
-    const capMs = agent.role === 'main' ? (wd.leadCapMs ?? LEAD_CAP_MS) : (wd.helperCapMs ?? HELPER_CAP_MS);
+    // Helpers: a soft limit an active run may pass and a hard one (softCap.ts). The lead keeps one flat limit: the user is watching it.
+    const capL = agent.role === 'main' ? undefined : capLimits(wd);
+    const leadCapMs = wd.leadCapMs ?? LEAD_CAP_MS;
     const wdTimer = wd.setTimer ?? defaultTimer;
     const wdNow = wd.now ?? Date.now;
 
@@ -2551,20 +3090,26 @@ export class Orchestrator {
       // Read every attempt: a settings change applies to the next routing decision, not only to new agents.
       const eff = effectiveSettings(store.getSettings(), agent.projectId);
       // A resumed session keeps the model and effort of its last run (changing either rewrites the prompt cache).
-      const keep = o.resume && link?.model ? { cli: link.cli, model: link.model, effort: link.effort as Effort | undefined } : undefined;
+      // An infrastructure retry keeps the failed run's model and effort the same way while it stays on that CLI.
+      const keep = o.resume && link?.model ? { cli: link.cli, model: link.model, effort: link.effort as Effort | undefined } : o.keepModel;
       const clock = this.d.now ?? Date.now;
+      const calibration = store.getCalibration();
       const input: RouterInput = {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
-        verified: this.d.verified, catalog: this.d.catalog, now: clock,
-        history: buildHistory(store.listUsage(), clock()),
+        verified: this.d.verified, catalog: this.d.catalog, now: clock, ...(calibration ? { calibration } : {}),
+        history: buildHistory(store.listUsage(), clock()), committed: this.committedNow(clock(), calibration),
         policy: {
           allowedModels: eff.allowedModels, effortPolicy: eff.effortPolicy, lowAllowance: eff.lowAllowancePolicy, reserve: eff.subscriptionReserve,
           preference: o.role === 'main' ? undefined : eff.rolePreferences[o.role]
         }
       };
+      const urgency = this.urgencyFor(o.conversationId, clock(), calibration);
       const requestFor = (requireCli?: CliId): RouteRequest => ({
         role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, required: o.required, effort: o.effort, fixedEffort: o.fixedEffort, retry: o.retry,
+        ...(o.difficulty !== undefined ? { difficulty: o.difficulty } : {}), ...(o.difficultySignals ? { difficultySignals: o.difficultySignals } : {}),
+        ...(o.size ? { size: o.size } : {}), ...(o.interactive ? { interactive: true } : {}), ...(urgency > 0 ? { urgency } : {}),
+        ...(o.escalateFrom ? { escalateFrom: o.escalateFrom } : {}),
         avoid: o.avoid, keep, fanOut: o.fanOut, prefer: o.preferCli, continuity: o.resume ? link?.cli : undefined, left: o.resume ? this.sessionCli.get(key)?.left : undefined, exclude, requireCli
       });
       const routeWith = (requireCli?: CliId) => route(requestFor(requireCli), input);
@@ -2581,6 +3126,15 @@ export class Orchestrator {
       if (!decision) {
         // Say why, and when it clears: every skip with its reset time, instead of a bare "no CLI".
         const why = explainNoRoute(requestFor(), input);
+        // A helper that nothing can take only for now (a model is held back by something that clears by itself: reserve, room for the
+        // run, a cooldown) waits in the queue for the earliest such reset. Permanent skips (not installed, not auto-routed) are not why.
+        if (attempt === 0 && o.role !== 'main') {
+          const skips = evaluate(requestFor(), input).skipped.filter((s) => s.transient);
+          if (skips.length) {
+            const untils = skips.flatMap((s) => (s.until !== undefined ? [s.until] : []));
+            return { ok: false, text: '', error: why, started: false, nonce: o.nonce, held: untils.length ? { until: Math.min(...untils) } : {} };
+          }
+        }
         const clis = this.d.getClis();
         const generic = !clis.length || clis.every((c) => !c.installed) ? ' Open Settings to install or sign in to a supported CLI.' : '';
         return { ok: false, text: '', error: attempt === 0 ? `No eligible CLI is available. ${why}${generic}` : `${lastError} (no remaining CLI to fall back to). ${why}`, started, nonce: o.nonce };
@@ -2610,19 +3164,32 @@ export class Orchestrator {
       if (o.nonce) prompt = `${prompt}\n\n${nonceInstruction(o.nonce)}`;
 
       // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
-      let text = '', final = '', ok = false, error: string | undefined, rateLimited = false, usage: { inputTokens?: number; outputTokens?: number; costUsd?: number } = {};
+      let text = '', final = '', ok = false, error: string | undefined, rateLimited = false;
+      const usage = new RunUsage();
       let limits: Extract<Chunk, { kind: 'limits' }>['limits'] | undefined;
+      // The first reading the CLI prints during the run: a fresh "before" for calibration when the last one Harbor saw is old.
+      let firstLimits: Extract<Chunk, { kind: 'limits' }>['limits'] | undefined;
       let streamId: Id | undefined;
       let parsed = 0, exitedClean = false; // parsed = chunks of real output (text, tool calls, usage); a bare session id is not output
       const details = detailsOf(decision);
       if (o.complexityNote) details.reason = `${details.reason} · ${o.complexityNote}`;
       const t0 = Date.now();
+      // The provider's readings just before the run: with those it prints during the run they give a quota-per-token sample.
+      const readingsBefore = ledger.readings(decision.cli);
+      const startedAt = ledger.time();
+      // What the CLI reported as this session's running totals after its previous run (Codex tokens, Claude cost): subtracted below.
+      const prevTotals = resumeId ? store.getSession(key, decision.cli)?.totals : undefined;
+      const flightKey = Symbol(agent.id);
+      const flightEntry = entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model);
+      if (flightEntry) this.inFlight.set(flightKey, { entry: flightEntry, role: o.role, size: decision.size, effort: decision.effort as Effort, startedAt: clock() });
 
       // The adapter runs on its own signal so the hard time limit can stop it without pretending the user did.
       const runCtl = new AbortController();
       const onOuterAbort = (): void => runCtl.abort();
       if (o.signal.aborted) runCtl.abort(); else o.signal.addEventListener('abort', onOuterAbort, { once: true });
-      let lastChunk = wdNow(), stuck = false, capped = false;
+      let lastChunk = wdNow(), stuck = false;
+      const cap: { kind?: CapKind } = {};
+      const capStop = (kind: CapKind): void => { if (!cap.kind) { cap.kind = kind; runCtl.abort(); } };
       let cancelStall = (): void => {};
       const armStall = (ms: number): void => {
         cancelStall();
@@ -2631,16 +3198,33 @@ export class Orchestrator {
           if (idle >= stallMs) { stuck = true; this.markStuck(agent, o, Math.max(1, Math.round(idle / 60_000))); } else armStall(stallMs - idle);
         }, ms);
       };
-      const cancelCap = wdTimer(() => { capped = true; runCtl.abort(); }, capMs);
+      let cancelSoft = (): void => {};
+      const armSoft = (ms: number): void => {
+        cancelSoft();
+        cancelSoft = wdTimer(() => {
+          const v = softCheck({ idleMs: wdNow() - lastChunk, activeWindowMs: capL!.activeWindowMs });
+          if (v.stop) capStop('idle'); else armSoft(v.recheckInMs);
+        }, ms);
+      };
+      if (capL && capL.softMs < capL.hardMs) armSoft(capL.softMs);
+      // Loop guard: a helper going in circles is stopped (resumable); the lead only gets a notice, the user decides.
+      const lg = wd.loopGuard ?? {};
+      const loopWatch = lg.enabled === false ? undefined : new LoopWatch({
+        canEdit: editRun, probeCwd: editRun && agent.role !== 'main' && agent.worktree ? o.cwd : undefined, probe: lg.probe ?? gitProgressProbe(this.d.git),
+        limits: lg.limits, probeIntervalMs: lg.probeIntervalMs, setTimer: wdTimer, now: wdNow
+      });
+      const loop: { evidence?: LoopEvidence; noticed?: boolean } = {};
+      const cancelCap = wdTimer(() => capStop('hard'), capL ? capL.hardMs : leadCapMs);
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.
           if (c.kind !== 'done' || c.ok) started = true;
-          if (c.kind === 'text' || c.kind === 'tool' || c.kind === 'usage') parsed++;
+          // Mid-run usage rides along with messages already counted; only a final report counts as output of its own.
+          if (c.kind === 'text' || c.kind === 'tool' || (c.kind === 'usage' && !c.partial)) parsed++;
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now(), model: decision.model, effort: decision.effort });
           else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
@@ -2655,21 +3239,31 @@ export class Orchestrator {
               }
             }
           } else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
-          else if (c.kind === 'usage') usage = { ...usage, ...c };
-          else if (c.kind === 'limits') limits = c.limits;
+          else if (c.kind === 'usage') usage.add(c);
+          else if (c.kind === 'limits') { firstLimits ??= c.limits; limits = c.limits; ledger.observe(decision.cli, c.limits); }
           else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; exitedClean = c.exitCode === 0; if (c.text) final = c.text; }
+          const v = loopWatch && !loop.evidence && !loop.noticed ? loopWatch.observe(c) : undefined;
+          if (v?.loop && !runCtl.signal.aborted) {
+            if (agent.role === 'main') { loop.noticed = true; this.loopNotice(agent, o, v.evidence); }
+            else { loop.evidence = v.evidence; runCtl.abort(); }
+          }
         }
       } catch (e) { ok = false; error = String((e as Error).message ?? e); }
       finally {
         cancelStall();
+        cancelSoft();
         cancelCap();
+        loopWatch?.stop();
+        this.inFlight.delete(flightKey);
         o.signal.removeEventListener('abort', onOuterAbort);
       }
 
       const stopped = o.signal.aborted;
+      const looped = !!loop.evidence && !stopped && !cap.kind;
+      const capped = !!cap.kind && !stopped;
       // Exit code 0 after real output but without the CLI's closing event: it finished, the stream just did not say so.
       let noCompletion = false;
-      if (!ok && !stopped && !capped && exitedClean && parsed > 0 && !rateLimited) {
+      if (!ok && !stopped && !capped && !looped && exitedClean && parsed > 0 && !rateLimited) {
         ok = true; noCompletion = true; error = undefined;
         this.post(o.conversationId, 'system', `${agent.title}: ${decision.cli} ended without a completion event (it exited normally after its output). Harbor counted the run as finished; check that the work is complete.`, { agentId: agent.id });
       }
@@ -2679,7 +3273,14 @@ export class Orchestrator {
       // A CLI that could not be started used no quota; counting it would only push the real runs towards a limit.
       const spawnFailure = !ok && parsed === 0 && SPAWN_FAILURE_RE.test(error ?? '');
       if (!spawnFailure) {
-        ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited: limited, ...(limited && !isModelSpecific(error) ? { cliWide: true } : {}), limits, ...usage });
+        // A CLI that prints no limits (Codex) still had its windows read meanwhile (its logs): keep those on the event as its history.
+        if (!limits) { const during = readingsDuring(ledger.readings(decision.cli), startedAt); if (during.length) limits = during; }
+        // A stopped, capped or failed run still costs quota: it records what streamed so far, marked partial (an estimate).
+        const own = perRunUsage(decision.cli, usage.result(ok), prevTotals);
+        const event = ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited: limited, ...(limited && !isModelSpecific(error) ? { cliWide: true } : {}), limits, ...own.tokens });
+        const sess = store.getSession(key, decision.cli);
+        if (sess && own.totals) store.setSession({ ...sess, totals: own.totals });
+        this.learnFrom(event, o.role, decision, [...readingsBefore, ...(firstLimits ?? [])], startedAt);
         this.emit({ type: 'usage', windows: ledger.windows(this.d.getClis().map((c) => c.id)) });
       }
       if (limited) void this.d.freeReset?.maybePropose(decision.cli).catch(() => {});
@@ -2687,8 +3288,13 @@ export class Orchestrator {
       if (ok) return { ok: true, text: final || text, allText: text, started: true, ...base, ...(noCompletion ? { noCompletion: true } : {}) };
       // The prompt was already handed to the adapter: a stop, even a silent one, may have come after the CLI read it.
       if (stopped) return { ok: false, text, allText: text, stopped: true, error: 'stopped', started: true, ...base };
+      // Harbor's loop guard: stopped, resumable with a different instruction, never retried elsewhere (it would loop there too).
+      if (looped) return { ok: false, text, allText: text, stopped: true, loop: loop.evidence, error: `Harbor stopped this run: ${describeLoop(loop.evidence!)}`, started: true, ...base };
       // Harbor's own hard limit: stopped, resumable, and not retried elsewhere (another CLI would only run just as long).
-      if (capped) return { ok: false, text, allText: text, stopped: true, capped: true, error: `Harbor stopped this run at its ${Math.round(capMs / 60_000)} minute limit`, started: true, ...base };
+      if (capped) {
+        const error = capL ? `Harbor stopped this run: ${capReason(cap.kind!, capL)}` : `Harbor stopped this run at its ${Math.round(leadCapMs / 60_000)} minute limit`;
+        return { ok: false, text, allText: text, stopped: true, capped: true, capKind: cap.kind, error, started: true, ...base };
+      }
       lastError = `${decision.cli} failed${limited ? ' (rate limit)' : overloaded ? ' (overloaded)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
       const retryKind: 'oauth' | 'network' | 'overload' | undefined = limited ? undefined : overloaded ? 'overload' : transientKind(error);
       if (retryKind) {
@@ -2737,6 +3343,13 @@ export class Orchestrator {
     if (agent.role === 'main') this.sessionState(o.conversationId, 'working', `Possibly stuck: no output for ${minutes} minutes.`);
     else this.setState(agent, agent.state, { summary: 'possibly stuck' });
     this.log({ kind: 'triage', projectId: agent.projectId, conversationId: o.conversationId, agentId: agent.id, text: `${agent.role} "${agent.title}": no output for ${minutes} minutes (possibly stuck)` });
+  }
+
+  /** The lead looks like it is going in circles: say so once and offer Stop. A lead is never stopped automatically. */
+  private loopNotice(agent: AgentRecord, o: RoutedOptions, e: LoopEvidence): void {
+    const what = describeLoop(e);
+    this.post(o.conversationId, 'system', `The lead may be going in circles: ${what}. Use Stop to end it, or leave it running.`, { agentId: agent.id });
+    this.log({ kind: 'loop', projectId: agent.projectId, conversationId: o.conversationId, agentId: agent.id, text: `lead: ${what} (notice only)` });
   }
 
   private clearStuck(agent: AgentRecord, o: RoutedOptions): void {
@@ -2809,7 +3422,7 @@ function reportSnapshot(a: AgentRecord): AgentRecord {
 }
 
 export function toAgent(a: AgentRecord): Agent {
-  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), rollback: a.rollback && structuredClone(a.rollback), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error) };
+  return { id: a.id, projectId: a.projectId, parentId: a.parentId, role: a.role, title: a.title, state: a.state, cli: a.cli, model: a.model, effort: a.effort, worktree: a.worktree, priority: a.priority, paused: a.paused || undefined, testedCommit: a.testedCommit, outdated: a.testedCommit ? a.outdated : undefined, result: a.result, checks: a.checks?.map(({ cmd, ok, exitCode, timedOut, durationMs }) => ({ cmd, ok, exitCode, timedOut, durationMs })), integration: a.integration && structuredClone(a.integration), rollback: a.rollback && structuredClone(a.rollback), conversationId: a.parentConversationId || undefined, summary: a.state === 'done' ? a.summary : (a.summary ?? a.error), ...(a.estimatedMinutes !== undefined ? { estimatedMinutes: a.estimatedMinutes } : {}) };
 }
 
 /** What the user sees about a tool call: the command, path or URL it acts on, clipped. */
@@ -2843,7 +3456,7 @@ export function commandPrefixes(cmds: string[]): string[] {
   return cmds.map((c) => c.trim()).filter((c) => c && !/[;&|<>`$()\r\n]/.test(c));
 }
 
-const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION)\s*:/;
+const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY)\s*:/;
 
 /**
  * Protocol lines Harbor did not act on: lines that were malformed, and (when a tag was required) lines written without it,

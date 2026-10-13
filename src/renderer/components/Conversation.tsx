@@ -174,6 +174,17 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
     try { const read = await Promise.all(accepted.map(readImage)); if (mounted.current) setImages(prev => [...prev, ...read].slice(0, 6)); }
     catch { if (mounted.current) setAttachmentError('An image could not be read. Try another file.'); }
   }
+  /** Mid-turn: skip the queue, cut the lead's turn short and act on this message now. */
+  function steer() {
+    const draft = latest.current;
+    if (!draft.trim() || c.archived || state.messagesLoading) return;
+    setSendError(''); edit('', true);
+    void state.send(draft, undefined, { steer: true }).then(ok => {
+      if (ok) return;
+      ws.current.setDraft(id, newer => newer || draft);
+      if (mounted.current) setSendError('Your message was kept. Retry when the connection is ready.');
+    });
+  }
   function send() {
     const draft = latest.current;
     if ((!draft.trim() && !images.length) || c.archived || state.messagesLoading) return;
@@ -215,9 +226,9 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
         <input ref={imagePicker} hidden multiple type="file" accept={IMAGE_TYPES.join(',')} aria-label="Choose images" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; void addImages(files); }}/>
         <button className={s.iconButton} disabled={c.archived} aria-label="Attach images" title="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button>
         <button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button>
-      </div><div className={s.composeActions}>{busy ? <button onClick={() => void state.stopConversation(c.id)}>Stop session</button> : null}<button className={s.primary} disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} onClick={send}>{busy ? 'Queue follow-up' : 'Send ↑'}</button></div></div>
+      </div><div className={s.composeActions}>{busy ? <button onClick={() => void state.stopConversation(c.id)}>Stop session</button> : null}{busy && agent?.role === 'main' ? <button disabled={!text.trim() || state.messagesLoading || c.archived} title="Interrupt the lead's current step and act on this message now" onClick={steer}>Send now</button> : null}<button className={s.primary} disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} onClick={send}>{busy ? 'Queue follow-up' : 'Send ↑'}</button></div></div>
       {templatesOpen ? <div className={s.templatePicker}>{workspace.preferences.templates.length ? workspace.preferences.templates.map(t => <button key={t.id} onClick={() => { const before = latest.current; edit(`${before}${before ? '\n\n' : ''}${t.text}`, true); setTemplatesOpen(false); textarea.current?.focus(); }}>{t.title}</button>) : <p className={s.muted}>Save reusable prompts in Settings → Workspace.</p>}</div> : null}
       {sendError ? <div className={s.sendRecovery} role="status">{sendError}<button disabled={busy || !text.trim()} onClick={send}>Retry message</button><button onClick={() => void state.refreshClis()}>Check connections</button></div> : null}
       {attachmentError ? <p className={s.error} role="alert">{attachmentError}</p> : null}
-    </div><p className={s.composeHint}>{workspace.saveError ? 'Draft saving is unavailable. Keep a copy of your message.' : busy ? 'Enter to queue · Draft saved on this device' : 'Enter to send · Shift + Enter for a new line · Draft saved'}</p></div>;
+    </div><p className={s.composeHint}>{workspace.saveError ? 'Draft saving is unavailable. Keep a copy of your message.' : busy ? 'Enter to queue · “Send now” interrupts the current step · Draft saved on this device' : 'Enter to send · Shift + Enter for a new line · Draft saved'}</p></div>;
 }

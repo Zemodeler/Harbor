@@ -10,6 +10,9 @@ import { createHarborService } from '../src/main/service';
 import { DEFAULT_SETTINGS, Store, effectiveSettings, normalizeSettingsPatch } from '../src/main/store';
 import type { AgentRecord } from '../src/main/types';
 import { UsageLedger } from '../src/main/usage';
+import { DEFAULT_CATALOG, type CatalogEntry } from '../src/main/clis/capabilities';
+import { ONE_CODEX_MODEL } from './fixtures/catalogs';
+import { calmReported } from './fixtures/calmReadings';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-settings-')); dirs.push(d); return d; };
@@ -23,8 +26,9 @@ function ledgerWith(runs: Record<string, number> = {}, budget = 10) {
   for (const [c, n] of Object.entries(runs)) for (let i = 0; i < n; i++) ledger.record({ cli: c, model: 'm', projectId: 'p', agentId: 'a', durationMs: 1, ok: true });
   return ledger;
 }
-const input = (ledger: UsageLedger, policy?: RoutingPolicy, clis = [cli('claude'), cli('codex')]) =>
-  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, policy });
+// Phase 3: ONE_CODEX_MODEL (Codex priced like Sonnet) unless a test says otherwise, so these stay about settings, not price priors.
+const input = (ledger: UsageLedger, policy?: RoutingPolicy, clis = [cli('claude'), cli('codex')], catalog: CatalogEntry[] = ONE_CODEX_MODEL) =>
+  ({ clis, ledger, enabled: () => true, hasAdapter: () => true, load: () => 0, policy, catalog });
 /** What the orchestrator passes for a role, built from settings the same way. */
 const policyFor = (s: Settings, role: RouteRequest['role'], projectId?: string): RoutingPolicy => {
   const e = effectiveSettings(s, projectId);
@@ -124,7 +128,7 @@ describe('router with settings', () => {
   it('allowed models narrow the catalog; a CLI with no allowed model is skipped', () => {
     const ledger = ledgerWith();
     const strong = route({ role: 'planner', complexity: 'high' }, input(ledger, { allowedModels: { claude: ['sonnet', 'haiku'] } }, [cli('claude')]))!;
-    expect(strong.model).toBe('sonnet');
+    expect(strong.model).toBe('claude-sonnet-5-5');
     const d = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { allowedModels: { claude: ['no-such-model'] } }))!;
     expect(d.cli).toBe('codex');
     expect(d.reason).toMatch(/claude skipped: no allowed model/);
@@ -137,7 +141,7 @@ describe('router with settings', () => {
     const d = route({ role: 'implementer', complexity: 'medium', needs: ['code'] }, input(ledger, { preference: { cli: 'codex' } }))!;
     expect(d.cli).toBe('codex');
     expect(d.reason).toMatch(/preferred for implementer/);
-    expect(route({ role: 'implementer', complexity: 'low' }, input(ledger, { preference: { cli: 'claude', model: 'opus' } }))!.model).toBe('opus');
+    expect(route({ role: 'implementer', complexity: 'low' }, input(ledger, { preference: { cli: 'claude', model: 'opus' } }))!.model).toBe('claude-opus-5-5');
     expect(route({ role: 'implementer', complexity: 'medium' }, input(ledger, { preference: { cli: 'codex' } }, [cli('claude'), cli('codex', { authState: 'signedOut', signedIn: false })]))!.cli).toBe('claude');
   });
 
@@ -147,21 +151,28 @@ describe('router with settings', () => {
     expect(applyEffortPolicy('medium', 'quality')).toBe('high');
     expect(applyEffortPolicy('medium', 'adaptive')).toBe('medium');
     const ledger = ledgerWith();
-    const c = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { effortPolicy: 'conserve' }))!;
-    expect(c.effort).toBe('low');
+    // Phase 3: conserve steps the priced effort down only where the work still clears. The hardest work runs on Opus at medium (low
+    // just clears and would need a review), so conserve takes it to low; medium work on Sonnet cannot go lower (was: always one step).
+    const c = route({ role: 'implementer', complexity: 'high', difficulty: 10 }, input(ledger, { effortPolicy: 'conserve' }, [cli('claude')]))!;
+    expect(c).toMatchObject({ model: 'claude-opus-5-5', effort: 'low' });
     expect(c.reason).toMatch(/effort medium → low: conserve policy/);
+    const m = route({ role: 'implementer', complexity: 'medium' }, input(ledger, { effortPolicy: 'conserve' }, [cli('claude')]))!;
+    expect(m.effort).toBe('medium');
+    expect(m.reason).toMatch(/conserve policy: effort stays medium \(lower would not clear difficulty 5\)/);
     expect(route({ role: 'implementer', complexity: 'low' }, input(ledger, { effortPolicy: 'quality' }))!.effort).toBe('medium');
     expect(route({ role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true }, input(ledger, { effortPolicy: 'quality' }))!.effort).toBe('low');
   });
 
+  // Phase 3: on the built-in catalog (the fixture's Codex model cannot plan hard work), with 'reduceEffort' spelled out: the default is
+  // now price routing, which is not the stay-put policy. Opus already runs high planning at low effort, so nothing is lowered.
   it("low-allowance 'switch' prefers a healthy CLI that 'reduceEffort' would not", () => {
     const ledger = ledgerWith({ claude: 8 }); // claude at 80%: low
     const req: RouteRequest = { role: 'planner', complexity: 'high', continuity: 'claude' };
-    const reduce = route(req, input(ledger))!;
-    expect(reduce).toMatchObject({ cli: 'claude', effort: 'medium' });
-    expect(reduce.reason).toMatch(/effort lowered: allowance low/);
-    expect(route(req, input(ledger, { lowAllowance: 'switch' }))!.cli).toBe('codex');
-    const alone = route(req, input(ledger, { lowAllowance: 'switch' }, [cli('claude')]))!;
+    const reduce = route(req, input(ledger, { lowAllowance: 'reduceEffort' }, undefined, DEFAULT_CATALOG))!;
+    expect(reduce).toMatchObject({ cli: 'claude', model: 'claude-opus-5-5', effort: 'low' });
+    expect(reduce.reason).toMatch(/continues existing session/);
+    expect(route(req, input(ledger, { lowAllowance: 'switch' }, undefined, DEFAULT_CATALOG))!.cli).toBe('codex');
+    const alone = route(req, input(ledger, { lowAllowance: 'switch' }, [cli('claude')], DEFAULT_CATALOG))!;
     expect(alone.cli).toBe('claude');
     expect(alone.reason).toMatch(/no healthier option/);
   });
@@ -186,7 +197,7 @@ describe('concurrency limit', () => {
       if (/TASK-/.test(prompt)) { started++; await gate; }
       return [{ kind: 'text', text: 'ok' }];
     });
-    const svc = createHarborService({ discover: async () => [cli('claude')], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), ...svcOpts });
+    const svc = createHarborService({ discover: async () => [cli('claude')], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), ledger: { reported: calmReported }, ...svcOpts });
     const project = (await svc.addProject(tmp()))!;
     const [conv] = await svc.listConversations(project.id);
     const addMany = (n: number) => {
@@ -197,15 +208,16 @@ describe('concurrency limit', () => {
       svc.orchestrator.pump(project.id);
     };
     const running = async () => (await svc.listAgents(project.id)).filter((a) => a.role !== 'main' && a.state === 'working').length;
-    const settle = () => new Promise((r) => setTimeout(r, 50));
+    const settle = () => new Promise((r) => setTimeout(r, 300)); // the budget check reads the ledger on every pump: slower under a loaded full run
     return { svc, project, addMany, running, settle, started: () => started, release };
   }
 
-  it('unset keeps the built-in default of 4', async () => {
+  // Phase 4: the quota budget caps helpers running at once at MAX_HELPERS_CAP (3) whatever the setting says (was: the setting alone).
+  it('unset keeps the built-in default of 4, under the budget cap of 3', async () => {
     const h = await harness();
     h.addMany(6);
     await h.settle();
-    expect(h.started()).toBe(4);
+    expect(h.started()).toBe(3);
     h.release(); await h.svc.whenIdle();
     expect(h.started()).toBe(6);
   });
@@ -218,7 +230,7 @@ describe('concurrency limit', () => {
     expect(h.started()).toBe(1);
     await h.svc.setSettings({ projectOverrides: { [h.project.id]: {} } });
     await h.settle();
-    expect(h.started()).toBe(4); // global 5 now applies
+    expect(h.started()).toBe(3); // global 5 now applies, capped by the budget (MAX_HELPERS_CAP)
     h.release(); await h.svc.whenIdle();
   });
 

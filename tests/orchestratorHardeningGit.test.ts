@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { Git } from '../src/main/git';
 import type { ProcessKiller } from '../src/main/proc';
 import { delegate, git, gitRepo, harness, isHelper, isLead, result, say, script, tmp, until } from './hardeningHarness';
+import { calmReported } from './fixtures/calmReadings';
 
 // Wave 2: locks, worktrees and git handling, retention, shutdown, checks trust.
 
@@ -18,7 +19,7 @@ describe('file locks', () => {
     const h = await harness({ claude: script({
       lead: (p) => (p.includes('User:') ? delegate('go', impl('a'), impl('b')) : say('ok')),
       helper: async () => { started++; await g.p; return say(done()); }
-    }) });
+    }) }, { service: { ledger: { reported: calmReported } } });
     await h.svc.send(h.conv.id, 'implement the thing in src/a.ts');
     await until(() => started === 2); // both run at once although neither named files
     expect(h.svc.orchestrator.lockTable.list(h.project.id)).toEqual([]);
@@ -77,10 +78,12 @@ describe('edit helpers and git', () => {
     expect(a.report).toMatch(/committed its uncommitted work/);
   });
 
+  // Phase 4: only a helper whose files do NOT overlap the uncommitted edits starts (with the note); one that overlaps them (here a
+  // whole-project claim) is held and the lead decides (dirty-base tests in phase4Delegation.test.ts). Was: every helper started.
   it('warns when the project folder is dirty, in the chat and in the helper\'s assignment', async () => {
     const repo = gitRepo();
     writeFileSync(join(repo, 'README.md'), 'edited but not committed');
-    const h = await harness({ claude: script({ lead: (p) => (p.includes('User:') ? delegate('go', impl('a')) : say('ok')), helper: () => say(done()) }) }, { git: repo });
+    const h = await harness({ claude: script({ lead: (p) => (p.includes('User:') ? delegate('go', impl('a', { files: ['src/a.ts'] })) : say('ok')), helper: () => say(done()) }) }, { git: repo });
     await h.svc.send(h.conv.id, 'implement the thing in src/a.ts');
     await h.svc.whenIdle();
     expect((await h.texts()).some((t) => t.startsWith('The project folder has uncommitted changes'))).toBe(true);

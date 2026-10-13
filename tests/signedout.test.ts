@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ONE_CODEX_MODEL } from './fixtures/catalogs';
 import { parseClaudeLine } from '../src/main/adapters/claude';
 import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
@@ -37,7 +38,9 @@ async function harness(scripts: Record<string, FakeScript>) {
     discover: async () => discovered,
     adapterFor: (id) => adapters[id],
     worktreesRoot: join(tmp('harbor-signedout-'), 'wt'),
-    maxActivePerProject: 3
+    maxActivePerProject: 3,
+    // One Codex model (catalog v1 shape): with a cheap Codex model the concierge would stay on codex by continuity after the refresh.
+    catalog: ONE_CODEX_MODEL
   });
   svc.onEvent((e) => events.push(e));
   const project = (await svc.addProject(tmp('harbor-proj-')))!;

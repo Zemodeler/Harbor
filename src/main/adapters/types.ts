@@ -36,6 +36,11 @@ export interface RunOptions {
    * system prompt replaces the CLI's own instead of being appended to it. Claude only; other adapters ignore it.
    */
   lean?: boolean;
+  /**
+   * The CLI-native effort for this run's model (clis/effort.ts). Codex uses it for `model_reasoning_effort`; Claude keeps `effort`.
+   * Absent: `effort` is used as is.
+   */
+  nativeEffort?: string;
 }
 
 /** A CLI asking the host whether it may run one tool call. */
@@ -55,7 +60,15 @@ export type Chunk =
   | { kind: 'session'; id: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; text: string }
-  | { kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number; /** Claude only: prompt-cache reads and writes, which `inputTokens` excludes. */ cacheReadTokens?: number; cacheWriteTokens?: number }
+  | {
+      kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number;
+      /** Claude only: prompt-cache reads and writes, which `inputTokens` excludes. */ cacheReadTokens?: number; cacheWriteTokens?: number;
+      /**
+       * One model message's usage seen mid-run, not the run's final report. Kept so a run that is stopped before its final report
+       * still records what it used (see runUsage.ts). `messageId` dedupes repeats of the same message.
+       */
+      partial?: boolean; messageId?: string;
+    }
   | { kind: 'limits'; limits: Array<{ period: 'session' | 'weekly'; usedPct: number; resetsAt: number; asOf: number; scope?: string }> }
   /** `exitCode` is set only when the CLI ended without a terminal event of its own: 0 with output means it simply finished. */
   | { kind: 'done'; ok: boolean; text?: string; error?: string; rateLimited?: boolean; exitCode?: number | null };

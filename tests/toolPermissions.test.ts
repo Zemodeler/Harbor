@@ -9,6 +9,7 @@ import type { Chunk, RunOptions, ToolPermissionDecision, ToolPermissionRequest }
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { createHarborService } from '../src/main/service';
 import { matchesToolRule, neverAlwaysAllow, Store, toolRuleFor } from '../src/main/store';
+import { calmReported } from './fixtures/calmReadings';
 
 const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-perm-')); dirs.push(d); return d; };
@@ -58,7 +59,7 @@ async function setup(o: { dataDir?: string; helperScript?: FakeScript; delegate?
   const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
   const setTimer = (fn: () => void, ms: number) => { const t = { fn, ms, cancelled: false }; timers.push(t); return () => { t.cancelled = true; }; };
   const cli: ResolvedCli = { id: 'claude', name: 'claude', installed: true, signedIn: true, authState: 'signedIn', models: ['default'], path: '/fake/claude' };
-  const svc = createHarborService({ dataDir: o.dataDir, discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3, setTimer });
+  const svc = createHarborService({ dataDir: o.dataDir, discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 3, ledger: { reported: calmReported }, setTimer });
   const project = (await svc.addProject(repo))!;
   const [conv] = await svc.listConversations(project.id);
   const events: ToolEvent[] = [];

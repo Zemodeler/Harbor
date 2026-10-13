@@ -10,6 +10,7 @@ import { Git } from '../src/main/git';
 import { runProcess, type Runner } from '../src/main/proc';
 import { createHarborService } from '../src/main/service';
 import type { AgentRecord } from '../src/main/types';
+import { calmReported } from './fixtures/calmReadings';
 
 /** Regression tests for the git/orchestrator review findings (H1, M1-M4, L5, L10). Real git, fake CLI. */
 
@@ -67,7 +68,7 @@ async function setup(plans: Task[][], o: Opts = {}) {
   };
   const adapter = new FakeAdapter('claude', script);
   const cli: ResolvedCli = { id: 'claude', name: 'claude', installed: true, signedIn: true, authState: 'signedIn', models: ['default'], path: '/fake/claude' };
-  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, autoApproveChecks: true, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 2, git: new Git(runner, true) });
+  const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, autoApproveChecks: true, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 2, ledger: { reported: calmReported }, git: new Git(runner, true) });
   const project = (await svc.addProject(repo))!;
   const [conv] = await svc.listConversations(project.id);
   const find = (title: string) => svc.store.listAgentRecords(project.id).find((a) => a.title === title)!;
