@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
+import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, ProjectNote, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Effort } from './adapters/types';
 import type { TaskSize } from './calibration';
@@ -193,4 +193,6 @@ export interface State {
   toolRules?: Record<Id, ToolRule[]>;
   /** Hash of the `.harbor/checks.json` commands the user approved per project; changed commands need a new approval. */
   checksApproved?: Record<Id, string>;
+  /** Project knowledge notes (knowledge.ts), keyed by project id. Optional so older files still load. */
+  notes?: Record<Id, ProjectNote[]>;
 }

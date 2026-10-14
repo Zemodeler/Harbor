@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -24,7 +24,9 @@ import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'listProjectNotes' | 'removeProjectNote'> & {
+  listProjectNotes(projectId: Id): Promise<ProjectNote[]>;
+  removeProjectNote(projectId: Id, noteId: Id): Promise<ProjectNote[]>;
   setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
   openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
@@ -532,6 +534,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       needProject(projectId);
       store.removeToolRule(projectId, ruleId);
       return store.listToolRules(projectId);
+    },
+    async listProjectNotes(projectId) { return store.listProjectNotes(needProject(projectId).id); },
+    async removeProjectNote(projectId, noteId) {
+      needProject(projectId);
+      store.removeProjectNote(projectId, noteId);
+      return store.listProjectNotes(projectId);
     },
     onEvent: (cb) => bus.on(cb)
   };
