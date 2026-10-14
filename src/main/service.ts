@@ -22,6 +22,7 @@ import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
+import type { RepoMapCache } from './repoMap';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'listProjectNotes' | 'removeProjectNote'> & {
@@ -93,6 +94,8 @@ export interface ServiceOptions {
   codexModels?: () => CodexModel[] | undefined;
   /** Shown by exportDiagnostics (index.ts passes app.getVersion(); this module never imports electron). */
   appVersion?: string;
+  /** Replace the repo map cache of helper prompts (tests). */
+  repoMaps?: RepoMapCache;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -226,7 +229,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
   const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
   const orchestrator = new Orchestrator({
-    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal,
+    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, ...(opts.repoMaps ? { repoMaps: opts.repoMaps } : {}),
     getClis: () => clis,
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
