@@ -305,7 +305,8 @@ export class ClaudeAdapter implements CliAdapter {
   constructor(private exe: string) {}
 
   async *run(prompt: string, o: RunOptions): AsyncGenerator<Chunk> {
-    if (o.images?.length) prompt = `${prompt}\n\nThe user attached image file(s) to this message. Read each one with the Read tool to see it:\n${o.images.map((p) => `- ${p}`).join('\n')}`;
+    // Claude Code has no image flag (2.1.295 --help): it sees an image by reading the file, whose folder is added with --add-dir.
+    if (o.images?.length) prompt = `${prompt}\n\nImage file(s) come with this message (the user's attachments, or a screenshot Harbor captured for you). Read each one with the Read tool to see it:\n${o.images.map((p) => `- ${p}`).join('\n')}`;
     let done = false;
     let spFile: string | undefined;
     if (o.systemPrompt) {

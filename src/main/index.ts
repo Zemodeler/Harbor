@@ -1,6 +1,9 @@
 import { join } from 'node:path';
 import { statSync } from 'node:fs';
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, shell, Tray } from 'electron';
+import { readFile } from 'node:fs/promises';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, screen, shell, Tray } from 'electron';
+import { HARBOR_FILE_SCHEME, harborFileRequestAllowed, resolveHarborFile } from './images';
+import type { Capturer } from './screenshots';
 import { registerIpc, type IpcHost } from './ipc';
 import { readCodexLimits } from './codexLimits';
 import { readCodexModels } from './clis/codexModels';
@@ -54,6 +57,32 @@ const appDoc = appDocument(rendererFile, devRendererUrl);
 
 // Every WebContents (including any a compromised page might try to create) gets the window policy before it loads.
 app.on('web-contents-created', (_event, contents) => hardenContents(contents, appDoc, url => { void shell.openExternal(url); }));
+
+// harbor-file://attachments/<conversationId>/<file> shows images Harbor stored (attachments, screenshots) under the CSP's img-src.
+// Must be registered before the app is ready. Standard + secure only: no fetch, no CORS, no service workers, no CSP bypass.
+protocol.registerSchemesAsPrivileged([{ scheme: HARBOR_FILE_SCHEME, privileges: { standard: true, secure: true } }]);
+
+/**
+ * Window and screen capture for HARBOR_SCREENSHOT, kept thin: everything else (asking, preview, rate limit, saving) is in
+ * screenshots.ts and tested with a fake. NOT EXERCISED in a real session when written: desktopCapturer in the main process on
+ * Windows 11 (Electron 44), capture of windows that are covered or on another monitor, and whether a minimised window gives an
+ * empty image (it is then reported as "could not be captured"). The full-size capture asks for a thumbnail as large as the
+ * largest display in physical pixels; Electron scales a source to fit inside that size, keeping its aspect ratio.
+ */
+const desktopCapturerAdapter: Capturer = {
+  async list(size) {
+    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: size, fetchWindowIcons: false });
+    return sources.map(s => ({ id: s.id, name: s.name, kind: s.id.startsWith('screen:') ? 'screen' as const : 'window' as const,
+      ...(size.width > 0 && !s.thumbnail.isEmpty() ? { thumbnail: s.thumbnail.toDataURL() } : {}) }));
+  },
+  async capture(sourceId) {
+    const kind = sourceId.startsWith('screen:') ? 'screen' : 'window';
+    const max = screen.getAllDisplays().reduce((m, d) => ({ width: Math.max(m.width, Math.round(d.size.width * d.scaleFactor)), height: Math.max(m.height, Math.round(d.size.height * d.scaleFactor)) }), { width: 1280, height: 720 });
+    const sources = await desktopCapturer.getSources({ types: [kind], thumbnailSize: max, fetchWindowIcons: false });
+    const s = sources.find(x => x.id === sourceId);
+    return s && !s.thumbnail.isEmpty() ? s.thumbnail.toPNG() : undefined;
+  }
+};
 
 function createWindow(hideOnClose: () => boolean): void {
   win = new BrowserWindow({
@@ -116,7 +145,21 @@ if (startupAction === 'start') app.whenReady().then(() => {
     // Skills already in the CLIs' own folders are listed read-only (only SKILL.md files and file names are read there).
     skillHomes: { claude: join(app.getPath('home'), '.claude'), codex: process.env['CODEX_HOME'] || join(app.getPath('home'), '.codex') },
     // GitHub skill import only, and only after the user's explicit click (skills/github.ts).
-    fetch: (url, init) => fetch(url, init)
+    fetch: (url, init) => fetch(url, init),
+    // Screenshots: only ever after the user's yes in the card (screenshots.ts); a window allowed for a conversation is captured
+    // only while Harbor's window is visible, never in the background.
+    capturer: desktopCapturerAdapter,
+    foreground: () => !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()
+  });
+  // Only files Harbor wrote under <data>\attachments are served, and only to Harbor's own document (images.ts has the guards).
+  protocol.handle(HARBOR_FILE_SCHEME, async (request) => {
+    const initiator = (request as Request & { initiatorOrigin?: string }).initiatorOrigin;
+    if (request.method !== 'GET' || !harborFileRequestAllowed(initiator, appDoc)) return new Response(null, { status: 403 });
+    const file = resolveHarborFile(dataDir, request.url);
+    if (!file) return new Response(null, { status: 404 });
+    try {
+      return new Response(await readFile(file.path), { headers: { 'content-type': file.mime, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+    } catch { return new Response(null, { status: 404 }); }
   });
   let tray: Tray | undefined;
   const openWindow = (): void => {
@@ -177,7 +220,8 @@ if (startupAction === 'start') app.whenReady().then(() => {
         notification.show();
       }
     }
-    if (e.type !== 'question') return;
+    // A screenshot request is answered in a card with a preview: it must be seen, never approved from the background.
+    if (e.type !== 'question' && !(e.type === 'permission' && e.kind === 'screenshot')) return;
     if (win.isMinimized()) win.restore();
     if (!win.isFocused()) { win.show(); win.flashFrame(true); win.once('focus', () => win?.flashFrame(false)); }
   });

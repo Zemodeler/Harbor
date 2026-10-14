@@ -1,4 +1,4 @@
-import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, Settings, ToolRule } from '../../shared/api';
+import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, ScreenshotSource, Settings, ToolRule } from '../../shared/api';
 import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
 import { createMockSkills } from './mockSkills';
@@ -35,6 +35,14 @@ function demoProblems(d: CustomCliDescriptor, otherIds: string[]): string[] {
 function demoConfirm(d: CustomCliDescriptor, o: { confirmExe?: string } | undefined) {
   if (!o?.confirmExe || o.confirmExe.trim().toLowerCase() !== d.exe.toLowerCase()) throw new Error(`Confirm that Harbor may run ${d.exe} first.`);
 }
+
+const DEMO_SOURCES: ScreenshotSource[] = [
+  { id: 'window:101:0', name: 'Storefront – localhost:5173', kind: 'window', suggested: true },
+  { id: 'window:102:0', name: 'Terminal', kind: 'window' },
+  { id: 'screen:0:0', name: 'Entire Screen', kind: 'screen' }
+];
+/** A drawn placeholder, so the demo never reads the real screen. */
+const demoThumbnail = (name: string, width: number) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${Math.round(width * 0.625)}" viewBox="0 0 320 200"><rect width="320" height="200" fill="#e8edf3"/><rect width="320" height="22" fill="#9aa8b8"/><text x="12" y="110" font-family="sans-serif" font-size="16" fill="#334">${name.replace(/[<&>"]/g, '')}</text></svg>`)}`;
 
 /** toolTimeoutMs = when an unanswered tool request is denied (Harbor: 5 minutes); conflictWithdrawMs = when a sample conflict becomes moot and is withdrawn. */
 export function createMockApi(options: { empty?: boolean; delay?: number; toolTimeoutMs?: number; conflictWithdrawMs?: number } = {}): HarborApi {
@@ -88,6 +96,17 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
         allow => system(conversationId, `You ${allow ? 'allowed parallel editing' : 'chose to serialize'} for "${helper.title}".`, helper.id),
         { ms: options.conflictWithdrawMs ?? 45000, ended: () => system(conversationId, `"${helper.title}" got its files; the conflict question was withdrawn.`, helper.id) });
     }
+  };
+  /** "take a screenshot" in a message: a screenshot request with sample windows (drawn here; nothing on screen is ever read). */
+  const shotPreviewed = new Map<string, Set<string>>();
+  const askSampleScreenshot = (conversationId: string, agentId: string) => {
+    const requestId = id(), timeout = options.toolTimeoutMs ?? 300000;
+    const prompt = 'The lead agent asks for a screenshot of the window "Storefront": check the new account page layout';
+    system(conversationId, `${prompt} Demo only; nothing is captured.`);
+    ask({ type: 'permission', requestId, kind: 'screenshot', prompt, agentId, conversationId, expiresAt: Date.now() + timeout,
+      screenshot: { target: 'window', title: 'Storefront', why: 'check the new account page layout', agentRole: 'main', agentTitle: 'Main agent', projectName: 'Storefront' } },
+    allow => system(conversationId, allow ? 'Sample screenshot approved. Demo only: nothing was captured.' : 'You declined the screenshot request from the lead. Nothing was captured.'),
+    { ms: timeout, ended: () => system(conversationId, 'No answer to the screenshot request: declined, nothing was captured.') });
   };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
@@ -235,6 +254,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       data.messages.push(user); emit({ type: 'message', message: user });
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
       if (/ask for permission/i.test(text)) { askSamplePermissions(conversationId, c.projectId); return; }
+      if (/take a screenshot/i.test(text)) { askSampleScreenshot(conversationId, c.agentId); return; }
       if (/ask me a question/i.test(text)) {
         const requestId = id(); questions.set(requestId, conversationId);
         c.activity = { state: 'waiting', updated: Date.now(), detail: 'Waiting for your design preference.' };
@@ -352,8 +372,27 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     async getSettings() { await pause(); return copy(settings); },
     async setSettings(s) { settings = applySettingsPatch(settings, copy(s)); return copy(settings); },
     async exportDiagnostics() { return ['Harbor diagnostics (demo)', `Generated: ${new Date().toISOString()}`, 'App version: demo', `CLIs: ${data.clis.map(c => `${c.id} ${c.installed ? (c.signedIn ? 'signed in' : 'signed out') : 'not installed'}`).join(', ')}`, `Projects: ${data.projects.length}, conversations: ${data.conversations.length}, agents: ${data.agents.length}`, 'No message text, prompts or credentials are included.'].join('\n'); },
+    // Screenshots (CHANGELOG 0.1.33): sample sources drawn as SVG; like Harbor, a yes needs a source this request's preview showed.
+    async previewScreenshot(requestId, opts) {
+      const request = pendingPermissions.get(requestId);
+      if (!request || request.kind !== 'screenshot') throw new Error('This screenshot request is no longer pending.');
+      const all = DEMO_SOURCES.filter(src => !opts?.sourceId || src.id === opts.sourceId);
+      if (opts?.sourceId && !all.length) throw new Error('That window or screen is no longer available. Choose another one.');
+      const seen = shotPreviewed.get(requestId) ?? new Set<string>(); all.forEach(src => seen.add(src.id)); shotPreviewed.set(requestId, seen);
+      return copy(all.map(src => ({ ...src, thumbnail: demoThumbnail(src.name, opts?.sourceId ? 960 : 320) })));
+    },
+    async answerScreenshot(requestId, answer) {
+      const request = pendingPermissions.get(requestId);
+      if (!request || request.kind !== 'screenshot') throw new Error('This screenshot request is no longer pending.');
+      const src = DEMO_SOURCES.find(x => x.id === answer.sourceId);
+      if (answer.allow && (!src || !shotPreviewed.get(requestId)?.has(src.id))) throw new Error('Choose what to capture from the preview first: Harbor captures only a window or screen you have seen in this card.');
+      if (answer.allow && answer.forConversation && src?.kind !== 'window') throw new Error('"Allow for this conversation" is available for a window only, never for a whole screen.');
+      shotPreviewed.delete(requestId);
+      settle(requestId)?.resolve(answer.allow, false);
+    },
     async answerPermission(requestId, allow, opts) {
       const request = pendingPermissions.get(requestId);
+      if (request?.kind === 'screenshot' && allow) throw new Error('Choose the window or screen to capture in the screenshot card (answerScreenshot).');
       const p = settle(requestId);
       if (!p || !request) throw new Error('This permission request is no longer pending.');
       // "always" only counts for a tool request that offered it, as in Harbor.

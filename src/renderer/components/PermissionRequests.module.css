@@ -30,6 +30,30 @@
 .linkButton { border: 0; min-height: 0; padding: 0; background: none; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; font-size: inherit; }
 .linkButton:hover:not(:disabled) { background: none; }
 .error { margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: var(--error); }
+/* Screenshot requests: a wider card with a live preview of what would be captured. */
+.card[data-kind=screenshot] { grid-column: 1 / -1; }
+.shot { display: grid; gap: 8px; }
+.shotFacts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 12.5px; line-height: 1.5; }
+.shotFacts div { display: contents; }
+.shotFacts dt { color: var(--muted); }
+.shotFacts dd { margin: 0; overflow-wrap: anywhere; }
+.shotWarning { margin: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--warning, var(--error)); font-size: 12.5px; line-height: 1.5; }
+.shotSources { border: 0; margin: 0; padding: 0; min-width: 0; }
+.shotSources legend { font-size: 12.5px; font-weight: 600; padding: 0; margin-bottom: 6px; }
+.shotLive { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
+.shotGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-height: 260px; overflow: auto; }
+.shotSource { display: grid; gap: 4px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; font-size: 12px; min-width: 0; }
+.shotSource[data-chosen] { border-color: var(--accent); outline: 1px solid var(--accent); }
+.shotSource input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.shotSource:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.shotSource img, .shotBlank { width: 100%; aspect-ratio: 16 / 10; object-fit: contain; background: var(--surface); border-radius: 4px; display: block; }
+.shotName { overflow-wrap: anywhere; line-height: 1.35; }
+.shotName small { color: var(--accent); }
+.shotPreview { margin: 0; display: grid; gap: 4px; }
+.shotPreview img { max-width: 100%; max-height: 320px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.shotPreview figcaption { font-size: 12px; color: var(--muted); }
+.shotOption { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.45; }
+.shotOption input { margin-top: 3px; }
 @media (max-width: 760px) {
   .panel { padding: 10px 16px 12px; max-height: 52vh; }
   .actions { justify-content: stretch; }

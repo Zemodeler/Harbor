@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Conversation } from '../../shared/api';
 import type { HarborState, Permission } from '../hooks/useHarbor';
+import { ScreenshotRequest } from './ScreenshotRequest';
 import s from './PermissionRequests.module.css';
 
-const KIND = { tool: 'Tool permission', conflict: 'File conflict', freeReset: 'Optional free reset' } as const;
-const titleFor = (p: Permission) => p.kind === 'tool' ? `Allow ${p.tool || 'this tool call'}?` : p.kind === 'conflict' ? 'Allow parallel editing?' : 'Approve optional free reset?';
+const KIND = { tool: 'Tool permission', conflict: 'File conflict', freeReset: 'Optional free reset', screenshot: 'Screenshot' } as const;
+const titleFor = (p: Permission) => p.kind === 'tool' ? `Allow ${p.tool || 'this tool call'}?` : p.kind === 'conflict' ? 'Allow parallel editing?' : p.kind === 'screenshot' ? 'Allow a screenshot?' : 'Approve optional free reset?';
 
 function remaining(ms: number) {
   if (ms < 60_000) return 'less than a minute left';
@@ -85,6 +86,8 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
             {target ? target.id === state.conversation?.id ? <span>In this conversation</span> : <span>In <button className={s.linkButton} onClick={() => openConversation(target)}>{target.title}</button></span>
               : p.conversationId ? <span>In a conversation outside this project</span> : null}
           </p> : null}
+          {/* A screenshot is approved by picking what to capture in a live preview, never by a plain "allow". */}
+          {p.kind === 'screenshot' ? <ScreenshotRequest p={p} api={state.api} busy={busy} answer={(choice, shot) => { if (!answering[p.requestId]) void state.answerPermission(p.requestId, choice, shot); }}/> : <>
           {p.kind === 'tool' && !p.alwaysAllow ? <p className={s.hint}>This call can only be allowed once; Harbor will ask again next time.</p> : null}
           {p.kind === 'conflict' ? <p className={s.hint}>Allowing lets both agents work in separate worktrees; their results will need integration. Deny makes this agent wait.</p> : null}
           {confirming === p.requestId ? <div className={s.confirm}>
@@ -96,6 +99,7 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
             {p.kind === 'freeReset' ? <button className={s.primary} data-reset aria-disabled={!!busy} onClick={() => { if (!busy) setConfirming(p.requestId); }}>Use free reset…</button>
               : <button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Allowing…' : p.kind === 'conflict' ? 'Allow in parallel' : 'Allow once'}</button>}
           </div>}
+          </>}
           {errors[p.requestId] ? <p className={s.error} role="alert">{errors[p.requestId]}</p> : null}
         </article>;
       })}

@@ -44,6 +44,7 @@ const app = Object.assign(new EventEmitter(), {
 
 vi.mock('electron', () => ({
   app, BrowserWindow: FakeWindow, Tray: FakeTray, dialog: { showMessageBoxSync: vi.fn(() => 0) }, shell: {}, Notification: {}, powerMonitor: { on: vi.fn() },
+  protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() }, desktopCapturer: { getSources: vi.fn(async () => []) }, screen: { getAllDisplays: () => [] },
   Menu: { buildFromTemplate: (menu: FakeTray['menu']) => menu },
   nativeImage: { createFromPath: () => ({ isEmpty: () => state.emptyIcon }), createEmpty: () => 'empty-icon' }
 }));
