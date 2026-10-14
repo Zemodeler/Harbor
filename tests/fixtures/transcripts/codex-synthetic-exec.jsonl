@@ -1,0 +1,9 @@
+{"harborTranscript":1,"cli":"codex","source":"synthetic","scenario":"exec run: a command, a message, usage with cached input","notes":"Hand-written. Event shapes follow parseCodexLine and the codex.ts header (codex exec --json verified against codex-cli 0.160.0). Not real CLI output.","expect":{"done":{"ok":true,"textIncludes":"The tests pass."},"kinds":["session","tool","text","usage","done"],"session":"019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b","text":["The tests pass."],"usage":{"inputTokens":315,"cacheReadTokens":24448,"outputTokens":122}}}
+{"o":"{\"type\":\"thread.started\",\"thread_id\":\"019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b\"}"}
+{"o":"{\"type\":\"turn.started\"}"}
+{"o":"{\"type\":\"item.started\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"npm test\",\"aggregated_output\":\"\",\"status\":\"in_progress\"}}"}
+{"o":"{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"reasoning\",\"text\":\"**Running tests**\"}}"}
+{"o":"{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"command_execution\",\"command\":\"npm test\",\"aggregated_output\":\"12 passed\",\"exit_code\":0,\"status\":\"completed\"}}"}
+{"o":"{\"type\":\"item.completed\",\"item\":{\"id\":\"item_2\",\"type\":\"agent_message\",\"text\":\"The tests pass.\"}}"}
+{"o":"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":24763,\"cached_input_tokens\":24448,\"output_tokens\":122}}"}
+{"exit":0}

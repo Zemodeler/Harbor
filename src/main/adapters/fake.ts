@@ -30,13 +30,13 @@ export class FakeAdapter implements CliAdapter {
     const idx = this.calls.push({ prompt, opts }) - 1;
     const chunks = (await this.script(prompt, opts, idx)).map((c) => this.tag(prompt, c));
     yield { kind: 'session', id: opts.resumeId ?? `${this.id}-session-${idx}` };
-    let done = false;
     for (const c of chunks) {
       if (opts.signal?.aborted) { yield { kind: 'done', ok: false, error: 'stopped' }; return; }
-      if (c.kind === 'done') done = true;
       yield c;
+      // Like every adapter: exactly one done, and nothing after it (a script that lists more is cut here).
+      if (c.kind === 'done') return;
       await Promise.resolve();
     }
-    if (!done) yield { kind: 'done', ok: true, text: chunks.filter((c) => c.kind === 'text').map((c) => (c as any).text).join('\n') };
+    yield { kind: 'done', ok: true, text: chunks.filter((c) => c.kind === 'text').map((c) => (c as any).text).join('\n') };
   }
 }
