@@ -22,8 +22,11 @@ import type { McpServerDraft } from '../../shared/api';
  * or URL holding `'`, `"`, `%` or a line break cannot be passed and that server is skipped for Codex with a note. Secrets (env and
  * header values) never go in argv, where any process of the same Windows user can read them: they travel in the Codex process's
  * environment. stdio `env` uses `env_vars=[NAME]` (Codex forwards the named variable to the server); headers use
- * `env_http_headers={Header='VAR'}` with a Harbor-owned variable name. NOT VERIFIED (codex was not installed when this changed):
- * that codex-cli accepts `env_vars` and `env_http_headers` in `-c mcp_servers.<name>` overrides; they are documented Codex config keys.
+ * `env_http_headers={Header='VAR'}` with a Harbor-owned variable name. VERIFIED LIVE (codex-cli 0.162.0-alpha.17.2, 2026-10-14, a stdio
+ * server added only through `-c`): `env_vars` is accepted and the server saw the secret in its environment, not in argv; a tool call
+ * then failed with "MCP tool call requires approval, but approval policy is never" until `default_tools_approval_mode='approve'` was
+ * also set for that server, after which it ran. Harbor sets it only for `allowUnattended` servers. NOT verified: `env_http_headers`
+ * (HTTP servers), and runs with permission other than read-only.
  * A URL must not carry a token in its query string: it stays in argv.
  *
  * Custom CLIs: the same file as Claude, through the descriptor's `run.mcp.args` (`{mcpConfigFile}`).
@@ -81,6 +84,9 @@ export function codexMcpPlan(servers: readonly McpServerDraft[]): { args: string
       for (const [h, v] of Object.entries(s.headers ?? {})) { const name = `HARBOR_MCP_${n++}`; own[name] = v; hv[h] = name; }
       if (Object.keys(hv).length) a.push('-c', `${key}.env_http_headers=${table(hv)}`);
     }
+    // `codex exec` cannot ask anyone, so without this every tool call of the server fails with "requires approval, but approval policy is
+    // never". Only for servers the owner allowed to run without asking (planMcpRun hands Codex no others).
+    if (s.allowUnattended) a.push('-c', `${key}.default_tools_approval_mode='approve'`);
     // The same variable name with another value in two servers cannot share one environment.
     if (Object.entries(own).some(([k, v]) => k in env && env[k] !== v)) { skipped.push(s.name); continue; }
     Object.assign(env, own);

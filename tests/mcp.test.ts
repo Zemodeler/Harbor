@@ -123,6 +123,9 @@ describe('materializers produce the verified shapes', () => {
       '-c', "mcp_servers.remote.url='https://mcp.example.com/mcp'",
       '-c', "mcp_servers.remote.env_http_headers={Authorization='HARBOR_MCP_0'}"
     ]);
+    // Codex cannot ask, so only a server the owner allowed to run unattended gets its tool calls approved (live-verified key).
+    expect(codexMcpArgs([docs])).not.toContain("mcp_servers.docs.default_tools_approval_mode='approve'");
+    expect(codexMcpArgs([{ ...docs, allowUnattended: true }])).toContain("mcp_servers.docs.default_tools_approval_mode='approve'");
     // Secrets travel in the environment, never in argv.
     const plan = codexMcpPlan([docs, remote]);
     expect(plan.env).toEqual({ DOCS_TOKEN: SECRET, HARBOR_MCP_0: HEADER_SECRET });
@@ -162,7 +165,7 @@ describe('materializers produce the verified shapes', () => {
 
   it('Codex args carry the overrides before the stdin marker', () => {
     const a = codexArgs({ ...base, mcp: { servers: [trusted] } });
-    expect(a.slice(-3)).toEqual(['-c', "mcp_servers.trusted.command='C:\\Tools\\trusted.exe'", '-']);
+    expect(a.slice(-5)).toEqual(['-c', "mcp_servers.trusted.command='C:\\Tools\\trusted.exe'", '-c', "mcp_servers.trusted.default_tools_approval_mode='approve'", '-']);
     expect(codexArgs(base).join(' ')).not.toContain('mcp_servers');
   });
 
