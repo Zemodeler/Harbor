@@ -92,7 +92,14 @@ export function resolveDocumentPath(raw: unknown, cwd: string, roots: DocumentRo
     const m = /^(.*?):\d+(?::\d+)?$/.exec(p);
     if (m && m[1] && !/^[a-z]$/i.test(m[1])) abs = resolve(cwd, m[1]);
   }
-  const ok = roots.filter((r) => r.path && (r.file ? normPath(resolve(r.path)) === normPath(abs) : within(r.path, abs)));
+  const ok = roots.filter((r) => {
+    if (!r.path) return false;
+    if (r.file ? normPath(resolve(r.path)) === normPath(abs) : within(r.path, abs)) return true;
+    // The same place under another spelling (a junction, an 8.3 short name such as RUNNER~1): Harbor itself emits canonical paths for
+    // documents a lead opens, so they must reopen under a project whose own path is not canonical. The canonical checks below still decide.
+    const rr = real(resolve(r.path)), rt = real(abs);
+    return !!rr && !!rt && (r.file ? normPath(rr) === normPath(rt) : within(rr, rt));
+  });
   if (!ok.length) return refuse('outside', 'Harbor only opens files inside the project, its helpers\' worktrees and Harbor\'s own folders. Use "Open file…" to choose another file.');
   let st;
   try { st = lstatSync(abs); } catch { return refuse('notFound', 'That file does not exist (it may have been moved or deleted).'); }
