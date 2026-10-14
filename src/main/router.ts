@@ -6,6 +6,7 @@ import type { Calibration, TaskSize } from './calibration';
 import { DEFAULT_CATALOG, TIERS, autoRoutable, modelMatches, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
 import { COMPLEXITY_DIFFICULTY } from './difficulty';
 import { routeReason } from './routeReason';
+import { routeSummary } from './routeSummary';
 import {
   EFFORTS, EFFORT_RANK, bestEffort, bindingNeed, fitsBudget, marginOf, poolInputsFromLedger, pricePoints, reviewNeeded, statesOf, type Committed, type RoutePrice, type RouteTask
 } from './routePrice';
@@ -116,6 +117,8 @@ export interface RouteDecision {
   model: string;
   effort: Effort;
   reason: string;
+  /** The same choice in plain sentences for a person (Message.details.summary). */
+  summary?: string;
   /** The difficulty the floor was computed from, and the size the cost was estimated for. */
   difficulty: number;
   size: TaskSize;
@@ -609,8 +612,9 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
     : `${best.entry.model} at ${effort} effort only just clears difficulty ${ev.difficulty} (margin ${Math.round(margin * 100) / 100} level): review the result`;
   const degraded = !clearsFinal && req.prefer !== best.cli.id ? { wantedTier: wantedTier(ev, inp), gotTier: best.entry.tier } : undefined;
   const reason = routeReason({ req, inp, ev, best, second, effort, tied, effortNotes, degraded, reviewReason });
+  const summary = routeSummary({ req, ev, best, second, effort, tied, degraded, reviewReason });
   return {
-    cli: best.cli.id, model: best.entry.model, effort, reason, difficulty: ev.difficulty, size: ev.size,
+    cli: best.cli.id, model: best.entry.model, effort, reason, summary, difficulty: ev.difficulty, size: ev.size,
     price: best.opt, ...(second ? { runnerUp: second.opt } : {}),
     scored: cands.slice(0, 3).map((c) => ({ cli: c.cli.id, model: c.entry.model, score: tenth(c.score), terms: c.terms, effort: c.opt.effort, price: Math.round(c.opt.routeTotal * 1000) / 1000 })),
     margin: second ? tenth(tenth(best.score) - tenth(second.score)) : undefined,
