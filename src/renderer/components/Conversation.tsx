@@ -11,6 +11,7 @@ import { ComplexityBadge } from './SessionStatus';
 import { ModePicker } from './ModePicker';
 import { HelperDetails } from './HelperDetails';
 import { acceptImages, IMAGE_TYPES, readImage, type PendingImage } from '../attachments';
+import { ImportedNotice } from './Transfer';
 import s from '../Harbor.module.css';
 
 /** Long conversations render only the latest groups; "Show earlier" widens the window. */
@@ -110,7 +111,7 @@ export function Conversation({ state, openProject, workspace, review, dock, show
         {status === 'done' || crew.length ? <button className={s.reviewAction} onClick={review}>Review current changes</button> : null}
       </div>
     </div>
-    <Composer key={c.id} state={state} workspace={workspace} c={c} agent={agent} projectName={project.name} status={status} busy={busy} dock={dock} rememberImages={rememberImages}/>
+    {c.imported ? <div className={s.composerArea}><ImportedNotice key={c.id} state={state} conversation={c}/></div> : <Composer key={c.id} state={state} workspace={workspace} c={c} agent={agent} projectName={project.name} status={status} busy={busy} dock={dock} rememberImages={rememberImages}/>}
   </>;
 }
 

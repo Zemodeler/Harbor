@@ -3,6 +3,7 @@ import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
 import { createMockSkills } from './mockSkills';
 import { createMockDocuments } from './mockDocuments';
+import { createMockTransfer } from './mockTransfer';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
 const demoCommits: GitCommit[] = [
@@ -166,6 +167,8 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     ...createMockSkills(pause),
     // Document viewer (CHANGELOG 0.1.34): sample files only; nothing is read from disk.
     ...createMockDocuments(() => data.projects, pause),
+    // Import and export (CHANGELOG 0.1.35): sample bundles and chats only; nothing is read from or written to disk.
+    ...createMockTransfer(() => data, () => settings, emit, pause),
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;
@@ -238,6 +241,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     async listMessages(conversationId) { requireConversation(conversationId); await pause(); return copy(data.messages.filter(m => m.conversationId === conversationId)); },
     async setConversationMode(conversationId, mode, goal) {
       const c = requireConversation(conversationId);
+      if (c.imported) throw new Error('This is imported history and is read-only. Use "Continue with…" to keep working on it.');
       if (mode === 'goal' && !goal?.trim()) throw new Error('Describe the goal first.');
       c.mode = mode;
       if (mode === 'goal') c.goal = goal!.trim(); else delete c.goal;
@@ -246,6 +250,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     async send(conversationId, text, attachments) {
       const c = requireConversation(conversationId);
       if (c.archived) throw new Error('Restore this conversation before sending a message.');
+      if (c.imported) throw new Error('This is imported history and is read-only. Use "Continue with…" to keep working on it.');
       if (attachments && attachments.length > 6) throw new Error('You can attach up to 6 images per message.');
       if (attachments?.some(a => !['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(a.mime) || a.dataBase64.length * 0.75 > 10 * 1024 * 1024)) throw new Error('Images must be PNG, JPEG, GIF or WebP and under 10 MB.');
       if (!text.trim() && !attachments?.length) throw new Error('Write a message first.');
