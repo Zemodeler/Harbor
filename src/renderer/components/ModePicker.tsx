@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Conversation, ConversationMode } from '../../shared/api';
 import s from '../Harbor.module.css';
 import fx from './Features.module.css';
@@ -16,6 +16,9 @@ export function ModePicker({ conversation, disabled, setMode }: { conversation: 
   const [goal, setGoal] = useState(conversation.goal ?? '');
   const [pending, setPending] = useState(false);
   const [confirmAuto, setConfirmAuto] = useState(false);
+  const group = useRef<HTMLDivElement>(null);
+  // Cancelling the confirmation returns focus to the Auto option, never to <body>.
+  const cancelAuto = () => { setConfirmAuto(false); group.current?.querySelector<HTMLElement>('[data-mode=auto]')?.focus(); };
   useEffect(() => { setConfirmAuto(false); setGoalOpen(false); setGoal(conversation.goal ?? ''); }, [conversation.id, conversation.goal]);
   async function choose(next: ConversationMode) {
     if (next === 'goal') { setConfirmAuto(false); setGoalOpen(true); return; }
@@ -35,12 +38,12 @@ export function ModePicker({ conversation, disabled, setMode }: { conversation: 
     try { await setMode('goal', goal.trim()); setGoalOpen(false); } finally { setPending(false); }
   }
   const active = goalOpen ? 'goal' : mode;
-  const autoConfirm = confirmAuto ? <div className={fx.fxConfirm} role="group" aria-label="Confirm Auto mode" onKeyDown={e => { if (e.key === 'Escape') setConfirmAuto(false); }}>
-    <p><strong>Turn on Auto mode?</strong> Permission prompts are off for the lead and for edit helpers, so they can run tools and change files without asking you. Reviewers stay read-only.</p>
-    <div className={fx.fxRow}><button autoFocus className={fx.fxPrimary} disabled={pending} onClick={() => void enableAuto()}>Enable Auto mode</button><button disabled={pending} onClick={() => setConfirmAuto(false)}>Cancel</button></div>
+  const autoConfirm = confirmAuto ? <div className={fx.fxConfirm} role="group" aria-label="Confirm Auto mode" aria-describedby="auto-mode-warning" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancelAuto(); } }}>
+    <p id="auto-mode-warning"><strong>Turn on Auto mode?</strong> Permission prompts are off for the lead and for edit helpers, so they can run tools and change files without asking you. Reviewers stay read-only.</p>
+    <div className={fx.fxRow}><button autoFocus className={fx.fxPrimary} disabled={pending} onClick={() => void enableAuto()}>Enable Auto mode</button><button disabled={pending} onClick={cancelAuto}>Cancel</button></div>
   </div> : null;
   return <div className={s.modePicker}>
-    <div role="radiogroup" aria-label="Conversation mode" className={s.modeGroup}>
+    <div ref={group} role="radiogroup" aria-label="Conversation mode" className={s.modeGroup}>
       {modes.map(m => <button key={m.id} type="button" role="radio" aria-checked={active === m.id} data-mode={m.id} className={s.modeOption} title={m.hint} disabled={disabled || pending} onClick={() => void choose(m.id)}>{m.label}</button>)}
     </div>
     {autoConfirm}

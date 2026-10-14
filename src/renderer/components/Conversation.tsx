@@ -7,7 +7,7 @@ import type { WorkspaceState } from '../hooks/useWorkspace';
 import { sessionStatus } from '../session';
 import { groupMessages, ToolActivity } from './ToolActivity';
 import { AttachIcon, CloseIcon, ImageIcon, TemplateIcon } from './Icons';
-import { ComplexityBadge } from './SessionStatus';
+import { RoutingDetails } from './RoutingDetails';
 import { ModePicker } from './ModePicker';
 import { HelperDetails } from './HelperDetails';
 import { acceptImages, IMAGE_TYPES, readImage, type PendingImage } from '../attachments';
@@ -39,7 +39,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
       const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];
       return <li key={i} className={src ? s.hqImageItem : undefined}>{src ? <img src={src} alt={a.origin === 'screenshot' ? `Screenshot: ${a.name}` : ''} loading="lazy"/> : null}<span>{a.name}</span></li>;
     })}</ul> : null}
-    {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{complexity ? <> · <ComplexityBadge complexity={complexity}/></> : null}</p>{m.details.summary ? <><p>{m.details.summary}</p><details className={s.technical}><summary>Technical details</summary><p>{m.details.reason}</p></details></> : <p>{m.details.reason}</p>}</details> : null}
+    {m.details ? <details className={s.execution}><summary>Execution details · why this model</summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
   </article>;
 });
 

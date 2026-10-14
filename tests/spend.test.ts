@@ -203,3 +203,14 @@ describe('spend ceilings in the orchestrator', () => {
     expect(texts.some((t) => t.startsWith('Not answered: Spend ceiling reached'))).toBe(true);
   });
 });
+
+describe('Agent.stopKind (contract 0.1.42)', () => {
+  it('toAgent exposes who stopped a stopped agent, and nothing otherwise', async () => {
+    const { toAgent } = await import('../src/main/orchestrator');
+    const base = { id: 'a1', projectId: 'p1', role: 'implementer', title: 't', state: 'stopped', cli: 'claude', model: 'm', effort: 'medium', revision: 1 } as unknown as Parameters<typeof toAgent>[0];
+    expect(toAgent({ ...base, stopKind: 'spend' }).stopKind).toBe('spend');
+    expect(toAgent({ ...base, stopKind: 'loop' }).stopKind).toBe('loop');
+    expect('stopKind' in toAgent({ ...base })).toBe(false);
+    expect('stopKind' in toAgent({ ...base, state: 'working', stopKind: 'cap' } as typeof base)).toBe(false);
+  });
+});
