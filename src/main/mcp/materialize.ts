@@ -18,9 +18,13 @@ import type { McpServerDraft } from '../../shared/api';
  * binary's `RawMcpServerConfig`, and `codex mcp add` offers stdio (`-- <command>`, `--env`) and streamable HTTP (`--url`) only, so
  * sse servers are not given to Codex. NOT verified: a live run with servers added only through `-c` (no config.toml entry), and how
  * `codex exec` treats an MCP tool call that would need an approval (it has no channel to ask Harbor; see planMcpRun).
- * Values are TOML literal strings ('...'): no escapes and no double quotes, which proc.ts refuses for .cmd shims, so a value holding
- * `'`, `"`, `%` or a line break cannot be passed and that server is skipped for Codex with a note. Env values travel in argv: other
- * processes of the same Windows user can read a command line; Harbor never logs argv.
+ * Values are TOML literal strings ('...'): no escapes and no double quotes, which proc.ts refuses for .cmd shims, so a command, argument
+ * or URL holding `'`, `"`, `%` or a line break cannot be passed and that server is skipped for Codex with a note. Secrets (env and
+ * header values) never go in argv, where any process of the same Windows user can read them: they travel in the Codex process's
+ * environment. stdio `env` uses `env_vars=[NAME]` (Codex forwards the named variable to the server); headers use
+ * `env_http_headers={Header='VAR'}` with a Harbor-owned variable name. NOT VERIFIED (codex was not installed when this changed):
+ * that codex-cli accepts `env_vars` and `env_http_headers` in `-c mcp_servers.<name>` overrides; they are documented Codex config keys.
+ * A URL must not carry a token in its query string: it stays in argv.
  *
  * Custom CLIs: the same file as Claude, through the descriptor's `run.mcp.args` (`{mcpConfigFile}`).
  */
@@ -41,34 +45,52 @@ export function mcpConfigJson(servers: readonly McpServerDraft[]): { mcpServers:
 }
 
 const CODEX_UNSAFE = /['"%\0\r\n]/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const HEADER_NAME = /^[A-Za-z0-9-]+$/;
 const lit = (v: string) => `'${v}'`;
 const table = (o: Record<string, string>) => `{${Object.entries(o).map(([k, v]) => `${k}=${lit(v)}`).join(',')}}`;
 
 /** Why this server cannot be handed to Codex, or undefined. Never names a value. */
 export function codexProblem(s: McpServerDraft): string | undefined {
   if (s.transport === 'sse') return 'Codex supports stdio and streamable HTTP servers, not SSE';
-  const values = [s.command ?? '', ...(s.args ?? []), s.url ?? '', ...Object.values(s.env ?? {}), ...Object.values(s.headers ?? {})];
-  if (values.some((v) => CODEX_UNSAFE.test(v))) return 'a value contains a quote, % or a line break, which Harbor cannot pass to Codex';
+  const argv = [s.command ?? '', ...(s.args ?? []), s.url ?? ''];
+  if (argv.some((v) => CODEX_UNSAFE.test(v))) return 'a value contains a quote, % or a line break, which Harbor cannot pass to Codex';
+  if (Object.keys(s.env ?? {}).some((k) => !ENV_NAME.test(k))) return 'an environment variable name is not valid';
+  if (Object.keys(s.headers ?? {}).some((k) => !HEADER_NAME.test(k))) return 'a header name is not valid';
+  if ([...Object.values(s.env ?? {}), ...Object.values(s.headers ?? {})].some((v) => /[\0\r\n]/.test(v))) return 'a secret value contains a line break';
   return undefined;
 }
 
-/** `-c` overrides for Codex; servers with a codexProblem are left out (planMcpRun already reported them). */
-export function codexMcpArgs(servers: readonly McpServerDraft[]): string[] {
-  const a: string[] = [];
+/** `-c` overrides for Codex plus the environment that carries the secrets; servers with a codexProblem or an env clash are left out. */
+export function codexMcpPlan(servers: readonly McpServerDraft[]): { args: string[]; env: Record<string, string>; skipped: string[] } {
+  const args: string[] = [], env: Record<string, string> = {}, skipped: string[] = [];
+  let n = 0;
   for (const s of servers) {
     if (codexProblem(s)) continue;
     const key = `mcp_servers.${s.name}`;
+    const own: Record<string, string> = {};
+    const a: string[] = [];
     if (s.transport === 'stdio') {
       a.push('-c', `${key}.command=${lit(s.command!)}`);
       if (s.args?.length) a.push('-c', `${key}.args=[${s.args.map(lit).join(',')}]`);
-      if (s.env && Object.keys(s.env).length) a.push('-c', `${key}.env=${table(s.env)}`);
+      const names = Object.keys(s.env ?? {});
+      if (names.length) { for (const k of names) own[k] = s.env![k]!; a.push('-c', `${key}.env_vars=[${names.map(lit).join(',')}]`); }
     } else {
       a.push('-c', `${key}.url=${lit(s.url!)}`);
-      if (s.headers && Object.keys(s.headers).length) a.push('-c', `${key}.http_headers=${table(s.headers)}`);
+      const hv: Record<string, string> = {};
+      for (const [h, v] of Object.entries(s.headers ?? {})) { const name = `HARBOR_MCP_${n++}`; own[name] = v; hv[h] = name; }
+      if (Object.keys(hv).length) a.push('-c', `${key}.env_http_headers=${table(hv)}`);
     }
+    // The same variable name with another value in two servers cannot share one environment.
+    if (Object.entries(own).some(([k, v]) => k in env && env[k] !== v)) { skipped.push(s.name); continue; }
+    Object.assign(env, own);
+    args.push(...a);
   }
-  return a;
+  return { args, env, skipped };
 }
+
+/** The `-c` overrides alone (secrets are in `codexMcpPlan(...).env`, never here). */
+export const codexMcpArgs = (servers: readonly McpServerDraft[]): string[] => codexMcpPlan(servers).args;
 
 /** Claude allow rules for servers whose tools may run without asking. */
 export const unattendedRules = (run: McpRun | undefined): string[] => (run?.servers ?? []).filter((s) => s.allowUnattended).map((s) => `mcp__${s.name}`);
