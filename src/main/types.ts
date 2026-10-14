@@ -195,4 +195,10 @@ export interface State {
   checksApproved?: Record<Id, string>;
   /** Skill choices (global default and per project, by skill id) and what was imported into the library (by folder). */
   skills?: { global?: Record<string, boolean>; projects?: Record<Id, Record<string, boolean>>; imports?: Record<string, { source: string; hash: string; importedAt: number }> };
+  /**
+   * Imported history (plan section 6): decisions a bundle conversation carried (by imported conversation id; quoted data, never fed to
+   * a lead as its own decisions) and continuations (by the new conversation's id: Harbor's handoff text for its first lead turn and
+   * the CLI the user picked).
+   */
+  imports?: { decisions?: Record<Id, Array<{ text: string; time?: number }>>; continuations?: Record<Id, { text: string; cli: CliId; from: Id }> };
 }

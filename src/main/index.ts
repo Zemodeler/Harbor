@@ -155,7 +155,22 @@ if (startupAction === 'start') app.whenReady().then(() => {
       const r = win ? await dialog.showOpenDialog(win, { properties: ['openFile'], title: 'Open a file in Harbor\'s viewer' }) : await dialog.showOpenDialog({ properties: ['openFile'], title: 'Open a file in Harbor\'s viewer' });
       return r.canceled ? undefined : r.filePaths[0];
     },
-    revealPath: (path) => shell.showItemInFolder(path)
+    revealPath: (path) => shell.showItemInFolder(path),
+    // Chat import (plan 6.2): these folders are listed only when the user opens the import dialog, and a transcript is read only
+    // when the user picked it there.
+    chatHomes: { claude: join(app.getPath('home'), '.claude'), codex: process.env['CODEX_HOME'] || join(app.getPath('home'), '.codex'), home: app.getPath('home') },
+    pickBundleSave: async (defaultName) => {
+      const o = { title: 'Save the Harbor bundle', defaultPath: join(app.getPath('documents'), defaultName), filters: [{ name: 'Harbor bundle', extensions: ['zip'] }] };
+      const r = win ? await dialog.showSaveDialog(win, o) : await dialog.showSaveDialog(o);
+      return r.canceled ? undefined : r.filePath;
+    },
+    pickImportFile: async (kind) => {
+      const o = kind === 'bundle'
+        ? { properties: ['openFile' as const], title: 'Choose a Harbor bundle', filters: [{ name: 'Harbor bundle', extensions: ['zip'] }] }
+        : { properties: ['openFile' as const], title: 'Choose an account export (conversations.json or the export .zip)', filters: [{ name: 'Export', extensions: ['json', 'zip'] }] };
+      const r = win ? await dialog.showOpenDialog(win, o) : await dialog.showOpenDialog(o);
+      return r.canceled ? undefined : r.filePaths[0];
+    }
   });
   // Only files Harbor wrote under <data>\attachments are served, and only to Harbor's own document (images.ts has the guards).
   protocol.handle(HARBOR_FILE_SCHEME, async (request) => {
