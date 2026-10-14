@@ -214,14 +214,14 @@ describe('document viewer in the app', () => {
     render(<App/>);
     await screen.findByRole('heading', { name: 'Build the account page', level: 1 });
     await userEvent.keyboard('{Control>}k{/Control}');
-    await userEvent.click(await screen.findByRole('button', { name: 'Open file…' }));
+    await userEvent.click(await screen.findByRole('option', { name: /Open file…/ }));
     expect(pick).toHaveBeenCalledWith('store');
     const viewer = await screen.findByRole('region', { name: 'Document viewer' });
     expect(await within(viewer).findByRole('table')).toBeInTheDocument();
     await userEvent.click(within(viewer).getByRole('button', { name: 'Hide the document viewer' }));
     await userEvent.keyboard('{Control>}k{/Control}');
-    await userEvent.type(screen.getByRole('textbox', { name: 'Find a project' }), 'docs/plan.md');
-    await userEvent.click(screen.getByRole('button', { name: 'Open “docs/plan.md” in the viewer' }));
+    await userEvent.type(screen.getByRole('combobox', { name: 'Search commands, projects and conversations' }), 'docs/plan.md');
+    await userEvent.click(screen.getByRole('option', { name: /Open “\s*docs\/plan\.md\s*” in the viewer/ }));
     expect(await within(await screen.findByRole('region', { name: 'Document viewer' })).findByRole('heading', { name: 'Plan' })).toBeInTheDocument();
   });
 });

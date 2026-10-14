@@ -1,4 +1,5 @@
-export type AppearanceMode = 'system' | 'light' | 'dark';
+/** 'contrast' = high contrast; it follows the system's light or dark preference. */
+export type AppearanceMode = 'system' | 'light' | 'dark' | 'contrast';
 export type PaletteId = 'harbor' | 'ocean' | 'olive' | 'amber' | 'rose' | 'command' | 'porcelain' | 'graphite' | 'violet' | 'ice';
 export type LayoutMode = 'command' | 'focus' | 'mission';
 export type ColorScheme = 'light' | 'dark';
@@ -46,17 +47,47 @@ export const palettes = [
 ] as const;
 
 export const appearanceKey = 'harbor.appearance.v1';
-export const defaultAppearance: Appearance = { palette: 'command', mode: 'dark', layout: 'command' };
+// A first start follows the system (light/dark and a high-contrast request) until the user picks a mode.
+export const defaultAppearance: Appearance = { palette: 'command', mode: 'system', layout: 'command' };
+export const appearanceModes = ['system', 'light', 'dark', 'contrast'] as const;
 export function parseAppearance(value: string | null): Appearance {
   try {
     const parsed: unknown = value ? JSON.parse(value) : null;
     if (parsed && typeof parsed === 'object' && 'palette' in parsed && 'mode' in parsed &&
-      palettes.some(p => p.id === parsed.palette) && ['system', 'light', 'dark'].includes(String(parsed.mode))) {
+      palettes.some(p => p.id === parsed.palette) && (appearanceModes as readonly string[]).includes(String(parsed.mode))) {
       const layout = 'layout' in parsed && layouts.some(l => l.id === parsed.layout) ? parsed.layout as LayoutMode : 'command';
       return { palette: parsed.palette as PaletteId, mode: parsed.mode as AppearanceMode, layout };
     }
+    // An unknown palette (e.g. from a newer version) keeps the rest of the choice.
+    if (parsed && typeof parsed === 'object' && 'mode' in parsed && (appearanceModes as readonly string[]).includes(String(parsed.mode))) {
+      const layout = 'layout' in parsed && layouts.some(l => l.id === parsed.layout) ? parsed.layout as LayoutMode : defaultAppearance.layout;
+      return { ...defaultAppearance, mode: parsed.mode as AppearanceMode, layout };
+    }
   } catch { /* A damaged preference must not prevent the workspace from opening. */ }
   return defaultAppearance;
+}
+export interface ResolvedTheme { scheme: ColorScheme; contrast: boolean }
+/** What the window shows for a chosen mode and the system's current light/dark and contrast preferences. */
+export function resolveTheme(mode: AppearanceMode, system: { dark: boolean; moreContrast: boolean }): ResolvedTheme {
+  if (mode === 'light' || mode === 'dark') return { scheme: mode, contrast: false };
+  const scheme: ColorScheme = system.dark ? 'dark' : 'light';
+  return { scheme, contrast: mode === 'contrast' || system.moreContrast };
+}
+// High contrast replaces the palette: pure black/white surfaces, solid borders, one strong accent (WCAG AAA for text).
+const contrastSets: Record<ColorScheme, string[]> = {
+  light: ['#ffffff', '#ffffff', '#f2f2f2', '#000000', '#1a1a1a', '#000000', '#0000b8', '#e3e9ff', '#ffffff', '#000000', '#ffffff', '#ffffff', '#000000'],
+  dark: ['#000000', '#000000', '#0d0d0d', '#ffffff', '#ebebeb', '#ffffff', '#ffd400', '#1f1f1f', '#000000', '#000000', '#ffffff', '#ffd400', '#000000']
+};
+export function contrastTokens(scheme: ColorScheme, prefix = '--') {
+  const tokens: Record<string, string> = {};
+  tokenNames.forEach((name, i) => { tokens[prefix + name] = contrastSets[scheme][i]; });
+  tokens[prefix + 'error'] = scheme === 'dark' ? '#ff9d94' : '#9b0000';
+  tokens[prefix + 'warning'] = scheme === 'dark' ? '#ffe066' : '#5c3900';
+  tokens[prefix + 'success'] = scheme === 'dark' ? '#8cffbd' : '#00532a';
+  return tokens;
+}
+export function themeTokens(id: PaletteId, theme: ResolvedTheme, prefix = '--') {
+  return theme.contrast ? contrastTokens(theme.scheme, prefix) : paletteTokens(id, theme.scheme, prefix);
 }
 export function paletteTokens(id: PaletteId, scheme: ColorScheme, prefix = '--') {
   const palette = palettes.find(p => p.id === id) || palettes[0];
