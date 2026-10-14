@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, SpendStatus } from '../shared/api';
+import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -34,6 +34,7 @@ import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
+import type { RepoMapCache } from './repoMap';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStoredPath } from './images';
 import { ScreenshotBroker, type Capturer } from './screenshots';
@@ -45,7 +46,9 @@ import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
 type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting';
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus'> & Required<Pick<HarborApi, Extras>> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote'> & Required<Pick<HarborApi, Extras>> & {
+  listProjectNotes(projectId: Id): Promise<ProjectNote[]>;
+  removeProjectNote(projectId: Id, noteId: Id): Promise<ProjectNote[]>;
   getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
   previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
   exportBundle(token: string, opts?: { keepSecrets?: boolean; redactSecrets?: boolean }): Promise<BundleExportResult | null>;
@@ -161,6 +164,8 @@ export interface ServiceOptions {
   /** How often runs in flight are measured against the spend ceilings, and its timer (tests); defaults in spend.ts. */
   spendCheckMs?: number;
   spendTimer?: (fn: () => void, ms: number) => () => void;
+  /** Replace the repo map cache of helper prompts (tests). */
+  repoMaps?: RepoMapCache;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -385,7 +390,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     foreground: opts.foreground, setTimer: opts.setTimer, timeoutMs: opts.screenshotTimeoutMs
   });
   const orchestrator = new Orchestrator({
-    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots,
+    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots, ...(opts.repoMaps ? { repoMaps: opts.repoMaps } : {}),
     attachImage: (conversationId, image) => copyShownImage(attachmentDir(dataRoot, conversationId), image),
     getClis: () => clis,
     adapterFor,
@@ -996,6 +1001,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       needProject(projectId);
       store.removeToolRule(projectId, ruleId);
       return store.listToolRules(projectId);
+    },
+    async listProjectNotes(projectId) { return store.listProjectNotes(needProject(projectId).id); },
+    async removeProjectNote(projectId, noteId) {
+      needProject(projectId);
+      store.removeProjectNote(projectId, noteId);
+      return store.listProjectNotes(projectId);
     },
     onEvent: (cb) => bus.on(cb)
   };

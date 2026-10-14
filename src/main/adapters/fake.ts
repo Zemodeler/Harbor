@@ -4,7 +4,7 @@ export interface FakeCall { prompt: string; opts: RunOptions }
 export type FakeScript = (prompt: string, opts: RunOptions, callIndex: number) => Chunk[] | Promise<Chunk[]>;
 
 const NONCE_IN_PROMPT = /HARBOR_DELEGATE\[([A-Za-z0-9_-]{1,64})\]/;
-const BARE_PROTOCOL = /^(\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)):/gm;
+const BARE_PROTOCOL = /^(\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|NOTE|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)):/gm;
 
 /**
  * Deterministic adapter for tests. `script` returns the chunks for each call;

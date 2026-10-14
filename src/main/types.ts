@@ -1,4 +1,4 @@
-import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, Settings, ToolRule } from '../shared/api';
+import type { Agent, AgentResult, AgentState, CliId, Conversation, GitFileChange, Message, Project, ProjectNote, Settings, ToolRule } from '../shared/api';
 import type { Need } from './clis/capabilities';
 import type { Effort } from './adapters/types';
 import type { TaskSize } from './calibration';
@@ -222,4 +222,6 @@ export interface State {
   spendCarried?: SpendRun[];
   /** Secret-scan overrides the user allowed, by project: fingerprints of exact findings on an exact commit (secretScan.findingsFingerprint). */
   secretOverrides?: Record<Id, string[]>;
+  /** Project knowledge notes (knowledge.ts), keyed by project id. Optional so older files still load. */
+  notes?: Record<Id, ProjectNote[]>;
 }

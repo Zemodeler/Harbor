@@ -36,6 +36,8 @@ import { SPLIT_ADVICE, describeDrivers, estimateTaskMinutes, fmtMinutes, gateSiz
 import { STATUS_ARGS, dirtyOverlap, parseStatusV2, underPrefix } from './dirtyBase';
 import { helperLimitFromLedger, type HelperLimit } from './helperLimit';
 import { MAX_HELPERS_CAP } from './budget';
+import { NOTES_BUDGET, notesText, selectNotes } from './knowledge';
+import { RepoMapCache } from './repoMap';
 import { calibrationSample, finishedRuns, overlapKTok, readingsDuring } from './runCalibration';
 import { effortFor, evaluate, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
 import { DEFAULT_CONCURRENCY, DEFAULT_HELPERS_PER_TURN, DEFAULT_PLANNERS_PER_TURN, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
@@ -125,6 +127,8 @@ export interface OrchestratorDeps {
   /** How often runs in flight are measured against the spend ceilings (default spend.SPEND_CHECK_MS) and its timer (tests). */
   spendCheckMs?: number;
   spendTimer?: (fn: () => void, ms: number) => () => void;
+  /** Repo maps for helper prompts (repoMap.ts); default: one cache over `git`. */
+  repoMaps?: RepoMapCache;
 }
 
 /** A run with no output for this long is flagged as possibly stuck (it is never killed for that alone). */
@@ -439,9 +443,13 @@ export class Orchestrator {
   /** Settles when the orphan sweep started by recover() is done. */
   private sweep: Promise<OrphanSweep> = Promise.resolve({ killed: [], skipped: [] });
   readonly journal: Journal;
+  /** Project notes each conversation's lead session has already been shown (or wrote), so a resumed session is not sent them again. */
+  private notesShown = new Map<Id, Set<Id>>();
+  private repoMaps: RepoMapCache;
 
   constructor(private d: OrchestratorDeps) {
     this.locks = new LockTable(() => d.store.locks, (l) => d.store.setLocks(l));
+    this.repoMaps = d.repoMaps ?? new RepoMapCache({ git: (cwd, args) => d.git.exec(cwd, args) });
     this.journal = d.journal ?? new Journal();
     // Every CLI process this run starts is persisted, so a crash cannot leave one that the next run cannot identify.
     setSpawnObserver({ spawned: (p) => d.store.trackProcess(p), exited: (pid, started) => d.store.untrackProcess(pid, started) });
@@ -1230,12 +1238,21 @@ export class Orchestrator {
     const headBefore = await this.d.git.head(project.path).catch(() => undefined);
     await this.probeRepo(project).catch(() => false);
     const checkCmds = this.checkCommands(project);
+    // Project notes this session has not seen yet (all relevant ones on its first turn); a resumed session already holds the rest.
+    const allNotes = this.d.store.listProjectNotes(project.id);
+    const seenNotes = this.notesShown.get(conversationId) ?? new Set<Id>();
+    const query = trigger.kind === 'user' ? trigger.text : goal ?? '';
+    const fresh = selectNotes(allNotes.filter((n) => !seenNotes.has(n.id)), query, NOTES_BUDGET.lead);
+    const knowledge = notesText(fresh.picked, fresh.omitted);
     // Only built when the lead's native session cannot be resumed (new conversation, lost session, or another CLI took over).
     const context = async (): Promise<string> => {
       const handoff = await this.handoffFor(project, conversationId).catch(() => '');
       // A conversation that continues an imported chat: Harbor's summary of it, framed as quoted history (handoff.ts).
       const imported = this.d.store.continuation(conversationId)?.text ?? '';
-      return [imported, handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n');
+      // A session that lost its native history also lost the notes it was shown before: they come back here.
+      const inPrompt = new Set(fresh.picked.map((n) => n.id));
+      const again = selectNotes(allNotes.filter((n) => seenNotes.has(n.id) && !inPrompt.has(n.id)), query, NOTES_BUDGET.lead);
+      return [imported, handoff, notesText(again.picked, again.omitted), history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n');
     };
     // Whatever started this turn (a user message, a goal step, a report, a help request, a peer), it also carries the
     // reports Harbor still holds for this conversation, settled with the turn like a reports trigger's own.
@@ -1248,7 +1265,7 @@ export class Orchestrator {
     let out: RoutedRun;
     try {
       out = await this.runRouted(main, {
-        prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held, checksConfigured: checkCmds.length > 0 }), system: LEAD_SYSTEM, skills: true,
+        prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held, knowledge, checksConfigured: checkCmds.length > 0 }), system: LEAD_SYSTEM, skills: true,
         contextIfNoResume: context,
         // The lead's difficulty comes from the concierge's rating, already raised by the request's own signals (combineComplexity).
         role: 'main', complexity: plan.complexity, difficulty: plan.difficulty ?? COMPLEXITY_DIFFICULTY[plan.complexity], interactive: true,
@@ -1267,6 +1284,8 @@ export class Orchestrator {
     } finally {
       if (!turn.settled) this.settleReports(turn, turn.started ? 'interrupted' : 'notStarted', conversationId);
     }
+    // Notes count as shown only once a CLI actually took the prompt.
+    if ((out.ok || out.started) && fresh.picked.length) this.notesShown.set(conversationId, new Set([...seenNotes, ...fresh.picked.map((n) => n.id)]));
     await this.detectLeadMerge(project, main, conversationId, headBefore);
     if (!out.ok && out.stopped && this.steered.has(conversationId)) {
       this.post(conversationId, 'system', 'Interrupted to follow your new message.', { agentId: main.id });
@@ -1300,6 +1319,11 @@ export class Orchestrator {
     delegations = this.dedupeDelegations(delegations, conversationId);
     delegations = this.fanOutBrake(delegations, conversationId, trigger.kind === 'user' ? trigger.text : undefined);
     for (const text of proto.decision) this.d.store.addCoordination({ projectId: project.id, kind: 'decision', from: main.id, text, conversationId });
+    for (const n of proto.note) {
+      const note = this.d.store.addProjectNote(project.id, { text: n.text, topic: n.topic, conversationId });
+      // The writer already knows it; other sessions get it on their next turn.
+      if (note) this.notesShown.set(conversationId, new Set([...(this.notesShown.get(conversationId) ?? []), note.id]));
+    }
     const screened = await this.screenDelegations(project, delegations, conversationId);
     delegations = screened.kept;
     const pin = delegations.some((t) => t.integrate) ? await this.pinTarget(project) : undefined;
@@ -2029,7 +2053,10 @@ export class Orchestrator {
     }
 
     const cmds = this.checkCommands(project);
-    const prompt = subagentPrompt(a, { projectName: project.name, upstream, worktreeNote, baseCommit: reviewedBase, verifyHint: cmds.length ? cmds.join('; ') : undefined });
+    const picked = selectNotes(store.listProjectNotes(project.id), `${a.title} ${a.task} ${(a.files ?? []).join(' ')}`, NOTES_BUDGET.helper);
+    // A reviewer judges one diff against its spec; the map would only add tokens. Everyone else starts with it instead of exploring.
+    const repoMap = a.role === 'reviewer' ? '' : await this.repoMaps.get(project.path).catch(() => '');
+    const prompt = subagentPrompt(a, { projectName: project.name, upstream, worktreeNote, baseCommit: reviewedBase, verifyHint: cmds.length ? cmds.join('; ') : undefined, knowledge: notesText(picked.picked, picked.omitted), repoMap });
     const res = await this.execute(a, prompt, { cwd, resume: false });
     // Held for quota (Phase 5): nothing ran, so it is not a failure. It waits in the queue and starts again at the reset.
     if (this.holdRun(a, res)) return;
@@ -3948,7 +3975,7 @@ export function commandPrefixes(cmds: string[]): string[] {
   return cmds.map((c) => c.trim()).filter((c) => c && !/[;&|<>`$()\r\n]/.test(c));
 }
 
-const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)\s*:/;
+const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|NOTE|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)\s*:/;
 
 /**
  * Protocol lines Harbor did not act on: lines that were malformed, and (when a tag was required) lines written without it,

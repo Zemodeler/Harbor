@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, ResultRating, RolePreference, Settings, SpendCeilings, ToolRule } from '../shared/api';
+import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectNote, ProjectSettings, ResultRating, RolePreference, Settings, SpendCeilings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
 import { cliPathProblem } from './clis/discovery';
 import { withRating } from './ratings';
+import { mergeNote, type NoteDraft } from './knowledge';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
@@ -281,6 +282,7 @@ export class Store {
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
     if (this.state.checksApproved?.[id]) { const { [id]: _gone, ...rest } = this.state.checksApproved; this.state.checksApproved = rest; }
     if (this.state.skills?.projects?.[id]) { const { [id]: _gone, ...rest } = this.state.skills.projects; this.state.skills = { ...this.state.skills, projects: rest }; }
+    if (this.state.notes?.[id]) { const { [id]: _gone, ...rest } = this.state.notes; this.state.notes = rest; }
     this.dirty();
   }
 
@@ -598,6 +600,22 @@ export class Store {
     const rules = this.state.toolRules?.[projectId];
     if (!rules?.some((r) => r.id === ruleId)) return;
     this.state.toolRules = { ...this.state.toolRules, [projectId]: rules.filter((r) => r.id !== ruleId) };
+    this.dirty();
+  }
+
+  // ---- project knowledge notes (knowledge.ts: dedupe, size caps)
+  listProjectNotes(projectId: Id): ProjectNote[] { return [...(this.state.notes?.[projectId] ?? [])]; }
+  /** Adds a note, or refreshes the one it repeats; returns the stored note (undefined for empty text). */
+  addProjectNote(projectId: Id, draft: NoteDraft & { conversationId?: Id }): ProjectNote | undefined {
+    const { notes, note } = mergeNote(this.state.notes?.[projectId] ?? [], draft, this.now(), newId);
+    if (!note) return undefined;
+    this.state.notes = { ...(this.state.notes ?? {}), [projectId]: notes };
+    this.dirty(); return note;
+  }
+  removeProjectNote(projectId: Id, noteId: Id): void {
+    const notes = this.state.notes?.[projectId];
+    if (!notes?.some((n) => n.id === noteId)) return;
+    this.state.notes = { ...this.state.notes, [projectId]: notes.filter((n) => n.id !== noteId) };
     this.dirty();
   }
 
