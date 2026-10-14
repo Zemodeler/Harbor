@@ -220,6 +220,11 @@ export function loadCatalogWithWarnings(path?: string): LoadedCatalog {
   try { j = JSON.parse(readFileSync(path, 'utf8')); } catch (e) {
     return { catalog: DEFAULT_CATALOG, warnings: [`capabilities.json is not valid JSON (${e instanceof Error ? e.message : String(e)}); using the built-in catalog`] };
   }
+  return parseCatalog(j);
+}
+
+/** Validates capabilities.json content already parsed from JSON (the file, or a what-if catalog from replayRouting). Same rules as the file. */
+export function parseCatalog(j: unknown): LoadedCatalog {
   if (!Array.isArray(j)) return { catalog: DEFAULT_CATALOG, warnings: ['capabilities.json must be a list of entries; using the built-in catalog'] };
   const warnings: string[] = [];
   const seen = new Set<string>();

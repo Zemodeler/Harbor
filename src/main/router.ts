@@ -1,4 +1,4 @@
-import type { AgentRole, CliId, EffortPolicy, LowAllowancePolicy, RolePreference } from '../shared/api';
+import type { AgentRole, CliId, EffortPolicy, LowAllowancePolicy, RolePreference, RoutingRequestRecord } from '../shared/api';
 import type { ResolvedCli } from './clis/discovery';
 import type { Effort } from './adapters/types';
 import { modelAvailability, poolsOfEntry, type PoolInput, type PoolStates } from './budget';
@@ -139,6 +139,22 @@ export interface RouteDecision {
   needsReview?: boolean;
   reviewReason?: string;
   skipped?: RouteSkip[];
+  /** What was asked, without any state: stored with the decision so a what-if replay can ask again (routingReplay.ts). */
+  request?: RoutingRequestRecord;
+}
+
+/**
+ * The stateless part of a request, as recorded on the message. Session holds (keep, escalateFrom, avoid, exclude, left) are not kept:
+ * they depend on what ran before, which a replay cannot reproduce.
+ */
+export function requestRecord(req: RouteRequest, ev: Pick<Evaluation, 'difficulty' | 'size' | 'urgency' | 'interactive'>): RoutingRequestRecord {
+  return {
+    role: req.role, difficulty: ev.difficulty, size: ev.size,
+    ...(req.needs?.length ? { needs: [...new Set(req.needs)] } : {}), ...(req.required?.length ? { required: [...new Set(req.required)] } : {}),
+    ...(req.tier ? { tier: req.tier } : {}), ...(req.fixedEffort && req.effort ? { effort: req.effort, fixedEffort: true } : {}),
+    ...(ev.interactive ? { interactive: true } : {}), ...(ev.urgency > 0 ? { urgency: ev.urgency } : {}), ...(req.retry ? { retry: true } : {}),
+    ...(req.prefer ? { prefer: req.prefer } : {}), ...(req.continuity ? { continuity: req.continuity } : {})
+  };
 }
 
 export interface RouterInput {
@@ -624,6 +640,6 @@ export function route(req: RouteRequest, inp: RouterInput): RouteDecision | unde
     price: best.opt, ...(second ? { runnerUp: second.opt } : {}),
     scored: cands.slice(0, 3).map((c) => ({ cli: c.cli.id, model: c.entry.model, score: tenth(c.score), terms: c.terms, effort: c.opt.effort, price: Math.round(c.opt.routeTotal * 1000) / 1000 })),
     margin: second ? tenth(tenth(best.score) - tenth(second.score)) : undefined,
-    tied, degraded, ...(needsReview ? { needsReview: true, reviewReason } : {}), skipped: ev.skipped
+    tied, degraded, ...(needsReview ? { needsReview: true, reviewReason } : {}), skipped: ev.skipped, request: requestRecord(req, ev)
   };
 }

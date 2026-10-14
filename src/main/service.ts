@@ -7,7 +7,7 @@ import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
 import { cliPathProblem, defaultDiscoveryDeps, discoverClis, findExecutable, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
-import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
+import { loadCatalogWithWarnings, parseCatalog, type CatalogEntry } from './clis/capabilities';
 import { mergeCodexModels, type CodexModel } from './clis/codexModels';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
@@ -24,6 +24,10 @@ import { skillsSection } from './prompts';
 import { SkillManager, type SkillHomes } from './skills/library';
 import type { SkillAccess } from './skills/delivery';
 import type { FetchLike } from './skills/github';
+import { effectiveSettings, mergeSettings, USAGE_KEEP_MS } from './store';
+import { aggregateRatings, isRatingValue, MAX_RATING_NOTE, ratingTarget } from './ratings';
+import { recordedDecisions, replayDecisions, type ReplayScenario } from './routingReplay';
+import { buildTaskReport } from './taskReport';
 import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
@@ -40,7 +44,8 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus'> & {
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting';
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus'> & Required<Pick<HarborApi, Extras>> & {
   getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
   previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
   exportBundle(token: string, opts?: { keepSecrets?: boolean; redactSecrets?: boolean }): Promise<BundleExportResult | null>;
@@ -220,6 +225,7 @@ function namedCodexModels(store: Store): string[] {
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
+  const clock = opts.now ?? Date.now;
   // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog. What it dropped is
   // reported (log, journal, diagnostics) instead of silently routing on a catalog the owner did not intend.
   const loadedCatalog = loadCatalogWithWarnings(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined);
@@ -860,6 +866,68 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
         notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings, ...loadedCustom.warnings, ...mcp.warnings,
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
+    },
+    async getTaskReport(conversationId) {
+      const c = store.getConversation(conversationId);
+      if (!c) throw new Error('This conversation is no longer available.');
+      const agents = store.listAgentRecords(c.projectId);
+      const helperConvs = agents.filter((a) => a.role !== 'main' && a.parentConversationId === c.id).flatMap((a) => { const hc = store.findConversationByAgent(a.id); return hc && hc.id !== c.id ? [hc.id] : []; });
+      const messages = [c.id, ...helperConvs].flatMap((id) => store.listMessages(id));
+      return buildTaskReport({ conversation: c, agents, usage: store.listUsage(), messages, catalog, calibration: store.getCalibration(), now: clock(), keepMs: USAGE_KEEP_MS });
+    },
+    async rateResult(targetId, rating, note) {
+      if (typeof targetId !== 'string' || !targetId) throw new Error('Name the agent or message to rate.');
+      if (!isRatingValue(rating)) throw new Error('A rating is up, down or redo-stronger.');
+      if (note !== undefined && note !== null && typeof note !== 'string') throw new Error('The note must be text.');
+      const agent = store.getAgent(targetId);
+      const target = ratingTarget({ targetId, agent, message: agent ? undefined : store.getMessage(targetId), agentOf: (id) => store.getAgent(id), conversationOf: (id) => store.findConversationByAgent(id)?.id });
+      const text = typeof note === 'string' ? note.trim().slice(0, MAX_RATING_NOTE) : '';
+      return store.addRating({ id: newId(), time: clock(), rating, ...(text ? { note: text } : {}), ...target });
+    },
+    async listRatings(o) {
+      if (o?.projectId !== undefined) needProject(o.projectId);
+      return [...store.listRatings(o?.projectId)].reverse();
+    },
+    async getRatingSummary(o) {
+      if (o?.projectId !== undefined) needProject(o.projectId);
+      const by = o?.by ?? 'model';
+      if (by !== 'cli' && by !== 'model' && by !== 'need') throw new Error('Summarize ratings by cli, model or need.');
+      return aggregateRatings(store.listRatings(o?.projectId), by);
+    },
+    async replayRouting(o = {}) {
+      if (o.projectId !== undefined) needProject(o.projectId);
+      const limit = Math.min(2000, Math.max(1, Math.round(typeof o.limit === 'number' && Number.isFinite(o.limit) ? o.limit : 200)));
+      let convIds: Id[];
+      if (o.conversationId !== undefined) {
+        const c = store.getConversation(o.conversationId);
+        if (!c) throw new Error('This conversation is no longer available.');
+        if (o.projectId !== undefined && c.projectId !== o.projectId) throw new Error('That conversation belongs to another project.');
+        convIds = [c.id, ...store.listAgentRecords(c.projectId).filter((a) => a.role !== 'main' && a.parentConversationId === c.id).flatMap((a) => store.findConversationByAgent(a.id)?.id ?? [])];
+      } else {
+        convIds = (o.projectId !== undefined ? [needProject(o.projectId)] : store.listProjects()).flatMap((p) => store.listConversations(p.id).map((c) => c.id));
+      }
+      const messages = [...new Set(convIds)].flatMap((id) => store.listMessages(id));
+      const decisions = recordedDecisions(messages, (id) => store.getAgent(id)).slice(-limit);
+      const notes: string[] = [];
+      let altCatalog: CatalogEntry[] = catalog;
+      if (o.catalog !== undefined) {
+        if (!Array.isArray(o.catalog)) throw new Error('The what-if catalog must be a list of capabilities.json entries.');
+        const parsed = parseCatalog(o.catalog);
+        if (parsed.warnings.some((w) => /no usable entry|must be a list/.test(w))) throw new Error('The what-if catalog has no usable entry.');
+        altCatalog = parsed.catalog;
+        notes.push(...parsed.warnings.map((w) => w.replace(/^capabilities\.json/, 'what-if catalog')));
+      }
+      const cur = store.getSettings();
+      const altSettings = o.settings !== undefined ? mergeSettings(cur, o.settings) : cur;
+      const scenario = (cat: readonly CatalogEntry[], s: typeof cur): ReplayScenario => ({
+        catalog: cat, enabled: (c) => s.cliOverrides[c]?.enabled !== false, ...(store.getCalibration() ? { calibration: store.getCalibration() } : {}),
+        policyFor: (d) => {
+          const eff = effectiveSettings(s, d.projectId);
+          return { allowedModels: eff.allowedModels, effortPolicy: eff.effortPolicy, lowAllowance: eff.lowAllowancePolicy, reserve: eff.subscriptionReserve, preference: d.role === 'main' ? undefined : eff.rolePreferences[d.role] };
+        }
+      });
+      const out = replayDecisions(decisions, { base: scenario(catalog, cur), alt: scenario(altCatalog, altSettings), now: clock() });
+      return { ...out, notes: [...out.notes, ...notes] };
     },
     async previewScreenshot(requestId, o) {
       const sourceId = o && typeof o === 'object' ? o.sourceId : undefined;

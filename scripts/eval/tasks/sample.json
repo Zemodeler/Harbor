@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "name": "sample",
+  "tasks": [
+    {
+      "id": "add-sum",
+      "prompt": "math.js exports nothing yet. Add and export a function sum(a, b) that returns a + b (CommonJS: module.exports = { sum }). Do not change check.js.",
+      "fixture": {
+        "files": {
+          "math.js": "// math helpers\n",
+          "check.js": "const { sum } = require('./math.js');\nif (typeof sum !== 'function' || sum(2, 3) !== 5) { console.error('sum(2, 3) should be 5'); process.exit(1); }\nconsole.log('ok');\n"
+        }
+      },
+      "acceptance": { "command": "node", "args": ["check.js"] },
+      "fake": {
+        "solution": { "math.js": "// math helpers\nfunction sum(a, b) { return a + b; }\nmodule.exports = { sum };\n" },
+        "harbor": { "tokens": { "input": 12000, "output": 1500 } },
+        "baseline": { "tokens": { "input": 30000, "output": 3000 } }
+      }
+    },
+    {
+      "id": "fix-greeting",
+      "prompt": "greet.js prints 'Helo, world'. Fix the typo so it prints exactly 'Hello, world'.",
+      "fixture": {
+        "files": {
+          "greet.js": "console.log('Helo, world');\n",
+          "check.js": "const out = require('node:child_process').execFileSync(process.execPath, ['greet.js'], { encoding: 'utf8' }).trim();\nif (out !== 'Hello, world') { console.error(`got ${out}`); process.exit(1); }\nconsole.log('ok');\n"
+        }
+      },
+      "acceptance": { "command": "node", "args": ["check.js"] },
+      "fake": {
+        "solution": { "greet.js": "console.log('Hello, world');\n" },
+        "harbor": { "plan": "solo", "tokens": { "input": 8000, "output": 500 } },
+        "baseline": { "tokens": { "input": 8000, "output": 500 } }
+      }
+    },
+    {
+      "id": "scripted-miss",
+      "prompt": "Create VERSION containing exactly 1.2.3 (no trailing newline).",
+      "fixture": {
+        "files": {
+          "check.js": "const fs = require('node:fs');\nif (!fs.existsSync('VERSION') || fs.readFileSync('VERSION', 'utf8') !== '1.2.3') { console.error('VERSION must be 1.2.3'); process.exit(1); }\nconsole.log('ok');\n"
+        }
+      },
+      "acceptance": { "command": "node", "args": ["check.js"] },
+      "fake": {
+        "solution": { "VERSION": "1.2.3" },
+        "harbor": { "solution": null, "verdict": "changes" }
+      }
+    }
+  ]
+}
