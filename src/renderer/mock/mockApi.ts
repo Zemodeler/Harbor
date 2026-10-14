@@ -1,6 +1,7 @@
 import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, Settings, ToolRule } from '../../shared/api';
 import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
+import { createMockSkills } from './mockSkills';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
 const demoCommits: GitCommit[] = [
@@ -141,6 +142,8 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       return copy(customClis);
     },
     async removeCustomCli(cliId) { customClis = customClis.filter(c => c.id !== cliId); data.clis = data.clis.filter(c => c.id !== cliId || !c.custom); return copy(customClis); },
+    // Skills (CHANGELOG 0.1.32): sample data only; nothing is read from disk or downloaded.
+    ...createMockSkills(pause),
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;
