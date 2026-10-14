@@ -12,7 +12,7 @@ import { featuresOf, validateDescriptor } from '../src/main/clis/custom';
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { validateInvoke } from '../src/main/ipcValidate';
 import { discoverCliMcpServers } from '../src/main/mcp/discover';
-import { codexMcpArgs, codexProblem, mcpConfigJson, planMcpRun, unattendedRules, writeMcpConfig } from '../src/main/mcp/materialize';
+import { codexMcpArgs, codexMcpPlan, codexProblem, mcpConfigJson, planMcpRun, unattendedRules, writeMcpConfig } from '../src/main/mcp/materialize';
 import { probeMcpServer, type McpFetch } from '../src/main/mcp/probe';
 import { MCP_SERVERS_FILE, McpRegistry, maskSecrets, validateMcpServer } from '../src/main/mcp/registry';
 import { createHarborService } from '../src/main/service';
@@ -119,12 +119,20 @@ describe('materializers produce the verified shapes', () => {
     expect(codexMcpArgs([docs, remote, legacy])).toEqual([
       '-c', "mcp_servers.docs.command='npx'",
       '-c', "mcp_servers.docs.args=['-y','@acme/docs-mcp','--root','C:\\Data Files']",
-      '-c', `mcp_servers.docs.env={DOCS_TOKEN='${SECRET}'}`,
+      '-c', "mcp_servers.docs.env_vars=['DOCS_TOKEN']",
       '-c', "mcp_servers.remote.url='https://mcp.example.com/mcp'",
-      '-c', `mcp_servers.remote.http_headers={Authorization='${HEADER_SECRET}'}`
+      '-c', "mcp_servers.remote.env_http_headers={Authorization='HARBOR_MCP_0'}"
     ]);
+    // Secrets travel in the environment, never in argv.
+    const plan = codexMcpPlan([docs, remote]);
+    expect(plan.env).toEqual({ DOCS_TOKEN: SECRET, HARBOR_MCP_0: HEADER_SECRET });
+    expect(plan.args.join(' ')).not.toContain(SECRET);
+    expect(plan.args.join(' ')).not.toContain(HEADER_SECRET);
+    // The same variable with two different values cannot share one environment: the later server is left out.
+    expect(codexMcpPlan([docs, { ...docs, name: 'docs2', env: { DOCS_TOKEN: 'other' } }]).skipped).toEqual(['docs2']);
     expect(codexProblem(legacy)).toMatch(/not SSE/);
-    expect(codexProblem({ ...docs, env: { A: "it's" } })).toMatch(/quote/);
+    expect(codexProblem({ ...docs, args: ["it's"] })).toMatch(/quote/);
+    expect(codexProblem({ ...docs, env: { 'A B': 'x' } })).toMatch(/name/);
     expect(codexProblem({ ...remote, url: 'https://a.example.com/x%20y' })).toMatch(/%/);
     expect(codexMcpArgs([{ ...docs, args: ['say "hi"'] }])).toEqual([]);
     // No value can carry a double quote or % into argv (proc.ts refuses them for .cmd shims).

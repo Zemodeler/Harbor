@@ -2,7 +2,7 @@ import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines } from './stream';
 import { isEmittableEffort } from '../clis/effort';
-import { codexMcpArgs } from '../mcp/materialize';
+import { codexMcpArgs, codexMcpPlan } from '../mcp/materialize';
 
 /**
  * Codex headless adapter (`codex exec --json`, JSONL events on stdout).
@@ -83,7 +83,9 @@ export class CodexAdapter implements CliAdapter {
     // already holds them in its history, and repeating several KB on every turn is billed again as input each time.
     const full = o.systemPrompt && !o.resumeId ? `${o.systemPrompt}\n\n---\n\n${prompt}` : prompt;
     let done = false, last = '', lastError: string | undefined;
-    const gen = streamLines(this.exe, codexArgs(o), { cwd: o.cwd, input: full, signal: o.signal });
+    // MCP secrets ride in the environment, not in argv (see mcp/materialize.ts).
+    const mcpEnv = o.mcp?.servers.length ? codexMcpPlan(o.mcp.servers).env : undefined;
+    const gen = streamLines(this.exe, codexArgs(o), { cwd: o.cwd, input: full, signal: o.signal, ...(mcpEnv ? { env: { ...process.env, ...mcpEnv } } : {}) });
     let res = await gen.next();
     while (!res.done) {
       if (res.value.stream === 'stdout') {
