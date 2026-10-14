@@ -79,8 +79,8 @@ describe('a) surplus about to expire beats continuity', () => {
     expect(d.cli).toBe('claude');
     // Phase 5: the expiring quota pays for the least risky option at the lowest effort, Opus at low (was Sonnet at medium, the floor).
     expect(d).toMatchObject({ model: 'claude-opus-5-5', effort: 'low' });
-    expect(d.reason).toMatch(/that would expire unused/);
-    expect(d.reason).toMatch(/claude:all weekly: .*10h to reset.* -> spend/);
+    expect(d.reason).toMatch(/would expire unused/);
+    expect(d.reason).toMatch(/claude:all weekly: .*resets in 10h.* → spend/);
   });
   // Phase 5: every reset within a week is inside the credit window now; a week on course to run dry is what earns nothing.
   it('a week projected to run dry earns no credit, and the work stays at its floor', () => {
@@ -116,7 +116,7 @@ describe('d) overspent: conserve', () => {
   it('claude 90% used with 5 days left: codex, even with the session on claude', () => {
     const d = at({ claude: { week: 90, weekH: 120 }, codex: { week: 30, weekH: 120 } }, lead({ continuity: 'claude' }));
     expect(d.cli).toBe('codex');
-    expect(d.reason).toMatch(/claude:all weekly: .* -> protect/);
+    expect(d.reason).toMatch(/claude:all weekly: .* → protect/);
   });
   it('both overspent: the one with more left wins', () => {
     expect(at({ claude: { week: 80, weekH: 120 }, codex: { week: 50, weekH: 120 } }, medium()).cli).toBe('codex');
@@ -125,7 +125,7 @@ describe('d) overspent: conserve', () => {
     const d = at({ claude: { week: 45, weekH: 144 } }, medium(), {}, [cli('claude')]);
     expect(d.model).not.toBe('claude-haiku-5-5');
     expect(d.degraded).toBeUndefined();
-    expect(d.reason).toMatch(/claude:all weekly: .*144h to reset.* -> (conserve|protect)/);
+    expect(d.reason).toMatch(/claude:all weekly: .*resets in 144h.* → (conserve|protect)/);
   });
 });
 
@@ -247,7 +247,7 @@ describe('k) the owner scenario: reset in 27h, 60% left, codex 70% left with 6 d
       expect(d.cli).toBe('claude');
       expect(d.model).toBe(model);
       expect(d.price!.wasteCreditPct).toBeGreaterThan(0);
-      expect(d.reason).toMatch(/claude:all weekly: .*27h to reset.* -> spend/);
+      expect(d.reason).toMatch(/claude:all weekly: .*resets in 27h.* → spend/);
     });
   it('with the reset in 80h there is no credit yet (outside the 72h window)', () => {
     for (const req of [medium({ continuity: 'codex' }), low({ continuity: 'codex' })]) {

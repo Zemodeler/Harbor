@@ -1,12 +1,12 @@
 import type { Effort } from './adapters/types';
 import { poolsOfEntry } from './budget';
-import { describePool, describeRoutePrice } from './budgetText';
+import { describePoolLines, describeRoutePrice } from './budgetText';
 import { modelMatches, type Tier } from './clis/capabilities';
 import { complexityOf } from './difficulty';
 import type { Cand, Evaluation, RouteRequest, RouterInput } from './router';
 
 /**
- * The routing reason (Message.details.reason): the calculation, in plain words. Chosen model and effort, the difficulty and its
+ * The routing reason (Message.details.reason): the calculation, in plain words: a verdict line, then one bullet per fact. Chosen model and effort, the difficulty and its
  * signals, the estimated price against the runner-up, the state of every pool involved, the reserve and the deadline urgency, then
  * what else decided (session, preference, request, skips). Prices and Harbor-only readings are labelled as estimates.
  */
@@ -22,8 +22,7 @@ export function routeReason(o: {
   if (req.difficultySignals?.length) why.push(`difficulty from: ${req.difficultySignals.join('; ')}`);
   why.push(`price${req.prefer === best.cli.id ? ' (not weighed: you asked for this CLI)' : ''}: ${describeRoutePrice(best.opt)}${second ? `; runner-up ${describeRoutePrice(second.opt)}` : ''}`);
   const pools = [...new Set([best, second].flatMap((c) => (c ? poolsOfEntry(c.entry) : [])))].sort();
-  const text = pools.flatMap((p) => (ev.states[p] ? [describePool(ev.states[p]!)] : []));
-  if (text.length) why.push(`pools: ${text.join('; ')}`);
+  for (const p of pools) if (ev.states[p]) why.push(...describePoolLines(ev.states[p]!).map((l) => `quota ${l}`));
   why.push(ev.interactive ? 'interactive work: may use the reserve' : 'helper work: the reserve stays free for interactive work');
   why.push(ev.urgency > 0 ? `deadline urgency ${Math.round(ev.urgency * 100) / 100}: reserve released in part, time priced` : 'no deadline (urgency 0)');
   if (req.continuity === best.cli.id) why.push('continues existing session');
@@ -47,6 +46,7 @@ export function routeReason(o: {
   if (o.degraded) why.push(`degraded: nothing that clears difficulty ${ev.difficulty} was available (a ${o.degraded.wantedTier} model would), got ${o.degraded.gotTier}`);
   if (o.reviewReason) why.push(`needs review: ${o.reviewReason}`);
   why.push(`${req.role}/${label} → effort ${effort}`);
-  if (ev.notes.length) why.push(ev.notes.join('; '));
-  return why.join(' · ');
+  why.push(...ev.notes);
+  // First line is the verdict; every other fact gets its own bullet (the UI shows line breaks; collapsed, the bullets still separate them).
+  return [why[0]!, ...why.slice(1).map((l) => `• ${l}`)].join('\n');
 }

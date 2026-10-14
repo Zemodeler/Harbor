@@ -34,7 +34,7 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
       <dt>Current step</dt><dd>{c.activity?.detail || (status === 'waiting' ? 'Waiting for a response or dependency.' : 'No active lead step.')}</dd>
       <dt>Connection</dt><dd>{cli === 'claude' ? 'Claude Code' : cli === 'codex' ? 'Codex' : cli || 'Not assigned'}</dd><dt>Model</dt><dd>{model === 'default' ? 'Connection default' : model && model !== 'auto' ? model : 'Assigned when work starts'}</dd>
       {model?.toLowerCase().includes('haiku') ? <><dt>Why this model?</dt><dd>Haiku is a lightweight Claude model. Harbor uses it for the first pass and smaller tasks.</dd></> : null}
-      {reason ? <><dt>Routing reason</dt><dd>{reason}</dd></> : null}
+      {reason ? <><dt>Routing reason</dt><dd className={s.routeReason}>{reason}</dd></> : null}
       {c.activity?.complexity ? <><dt>Complexity</dt><dd><ComplexityBadge complexity={c.activity.complexity}/></dd></> : null}
       {c.activity?.effort ? <><dt>Effort</dt><dd>{c.activity.effort}</dd></> : null}
       {c.mode && c.mode !== 'default' ? <><dt>Mode</dt><dd>{modes.find(m => m.id === c.mode)?.label}{c.mode === 'goal' && c.goal ? `: ${c.goal}` : ''}</dd></> : null}

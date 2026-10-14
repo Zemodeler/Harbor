@@ -55,7 +55,7 @@ describe('a) a big gap beats continuity', () => {
   it('claude 10%/20% vs codex 90%/90%: codex, even with the session on claude, and the reason shows both windows of both pools', () => {
     const d = at({ claude: { sess: 10, week: 20 }, codex: { sess: 90, week: 90 } }, lead({ continuity: 'claude' }));
     expect(d.cli).toBe('codex');
-    expect(d.reason).toMatch(/pools: claude:all weekly: .* -> protect .*claude:all 5h: .* -> protect .*codex:all weekly: .* -> spend .*codex:all 5h: .* -> spend/);
+    expect(d.reason).toMatch(/quota claude:all weekly: .* → protect[\s\S]*quota claude:all 5h: .* → protect[\s\S]*quota codex:all weekly: .* → spend[\s\S]*quota codex:all 5h: .* → spend/);
     expect(d.runnerUp!.scarcity).toBeGreaterThan(d.price!.scarcity);
   });
   it('the same state with an explicit reduceEffort keeps the session where it is (the older meaning)', () => {
@@ -80,7 +80,7 @@ describe('c) the 5h window binds now, however full the week is', () => {
   it('claude 5h 3% left (resets in 2h) with 90% weekly vs codex 70%/70%: codex, and the reason says the 5h window is in protect', () => {
     const d = at({ claude, codex: { sess: 70, week: 70 } }, lead({ continuity: 'claude' }));
     expect(d.cli).toBe('codex');
-    expect(d.reason).toMatch(/claude:all 5h: 3% unspent beyond the 0% reserve, 2h to reset.* -> protect/);
+    expect(d.reason).toMatch(/claude:all 5h: 3% free, resets in 2h.* → protect/);
   });
   it('codex signed out or exhausted: the work still goes to claude, never to nothing', () => {
     const signedOut = at({ claude, codex: { sess: 70, week: 70 } }, lead({ continuity: 'claude' }), {}, [cli('claude'), cli('codex', { authState: 'signedOut', signedIn: false })]);
@@ -95,7 +95,7 @@ describe('d) a nearly spent week with a distant reset binds', () => {
   it('claude weekly 5% left, 6 days to reset, 5h at 100%: codex', () => {
     const d = at({ claude: { sess: 100, week: 5, weekResetsIn: 6 * DAY }, codex: { sess: 70, week: 70 } }, lead({ continuity: 'claude' }));
     expect(d.cli).toBe('codex');
-    expect(d.reason).toMatch(/claude:all weekly: 5% unspent beyond the 0% reserve, 144h to reset, burning [\d.]+%\/h \(average since the window began\) -> protect/);
+    expect(d.reason).toMatch(/claude:all weekly: 5% free, resets in 144h, burning [\d.]+%\/h \(average since the window began\) → protect/);
   });
   it('a weekly window with plenty left and a distant reset is abundant: a thin 5h window on the other CLI does not pull the session', () => {
     const d = at({ claude: { sess: 80, week: 90, weekResetsIn: 6 * DAY }, codex: { sess: 100, week: 100 } }, lead({ continuity: 'claude' }));
