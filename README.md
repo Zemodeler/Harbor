@@ -2,36 +2,73 @@
 
 ![Harbor icon](design/harbor-icon.png)
 
-Harbor is a Windows desktop app that runs the AI CLIs you already have (Claude Code, Codex) against a local project. Open a folder, describe the work, and Harbor picks the CLI, model and effort for each run. It uses no API keys and calls no model itself.
+Harbor is a Windows desktop app (Electron + TypeScript) that runs the AI coding CLIs you already have installed and signed in to (Claude Code, Codex, or a CLI you describe yourself) against a local project. You open a folder and describe the work. For each run Harbor picks the CLI, model and effort. It holds no API keys and never calls a model itself.
 
-Personal, open-source, one developer. No team features, and no promise of saving money ([limitations](docs/limitations.md)).
+It is a personal, open-source tool by one developer for one user on one PC. It has no team features, and it makes no promise of saving money or quota ([limitations](docs/limitations.md)).
+
+## Current stage
+
+Working alpha, used by its author. The engine is covered by unit tests that run without network and without real CLIs (`npm test`). Only parts of it have been run against real CLIs. [Limitations](docs/limitations.md) lists what has been verified and what has not. The renderer/main contract is at version 0.1.37 (`src/shared/CHANGELOG.md`).
 
 ## How it works
 
-1. A cheap **concierge** answers trivial messages or escalates.
-2. A **lead** agent (a normal CLI session in your folder) does the work.
-3. When it pays off, the lead hands pieces to **helpers**, which work in their own git worktrees. Harbor schedules them and runs your checks.
-4. Approved branches are merged into a `harbor/integrate-*` branch. Your branch moves only when you press **Apply** (fast-forward). Harbor never pushes.
+1. A cheap **concierge** answers simple messages itself or escalates. It runs with no tools. Obvious work, `/deep`, go-aheads, named CLIs and images skip it.
+2. A **lead** (a normal CLI session in your project folder, resumed every turn) does the work.
+3. When splitting the work pays off, the lead prints `HARBOR_DELEGATE` lines. Harbor then schedules **helpers** (planner, implementer, reviewer, other). Edit helpers each work in their own git worktree on a `harbor/<slug>` branch. Helpers never start agents of their own.
+4. Harbor runs your checks (`.harbor/checks.json`, after you approve them). A Harbor-run **integrator** (plain git, no model) merges only approved branches into a `harbor/integrate-*` branch. Your branch moves only when you press **Apply**, and only as a fast-forward. **Rollback** reverts a task's merge commits on a `harbor/rollback-*` branch, which you also Apply. Harbor never pushes.
+5. Several conversations of one project can run at once. Their leads can see each other and send short `HARBOR_PEER` notes. Only one lead at a time edits the project folder.
 
-Modes: `default` (asks before risky tools), `plan` (read-only), `goal` (keeps going), `auto` (no prompts). `/deep` forces a strong model.
+Modes: `default` asks before risky tools, `plan` is read-only, `goal` keeps going until the goal is reported done (at most 8 continuations), and `auto` asks for nothing. A new message can **steer** a running turn: it interrupts the turn and starts a new one.
 
-You can open any project or helper worktree in a terminal, your editor, or Explorer (Ctrl+K, or the buttons on a helper card).
+Other features, all built on plain text lines and files so that any CLI can use them: skills (a library plus per-project choices), an MCP server registry passed to each CLI in its own format, custom CLIs described as data, screenshots (only after you approve each one), a read-only document viewer, export and import of project bundles (`.harbor.zip`), and import of chats from Claude Code, Codex, and claude.ai or ChatGPT exports. You can open any project or helper worktree in a terminal, your editor or Explorer. Details: [architecture](docs/architecture.md).
 
-## Install
+## Routing and usage (estimates)
 
-Download `Harbor-Setup-<version>.exe` from [Releases](https://github.com/Zemodeler/Harbor/releases). It is unsigned, so SmartScreen warns once: **More info, Run anyway**. Harbor updates itself ([RELEASING.md](RELEASING.md)). Windows only.
+Routing picks, for each run, the cheapest model and effort that clears a capability floor. The floor comes from a 0-10 difficulty that Harbor computes. Prices come from the state of your quota pools. Each decision stores its reason and a plain summary on the message. Usage figures come in two kinds:
+
+- **Reported** figures are read from the provider's own data: Claude's `rate_limit_event` during Harbor runs, and Codex's local session logs. They can be stale.
+- **Estimated** figures come from Harbor's own runs and are labelled as estimates. Harbor cannot see use outside Harbor. Never read an estimate as your provider quota.
+
+Every constant in the budget code is a starting value tuned in a simulator, not a provider fact. See [routing and usage](docs/routing-and-usage.md).
+
+**Free resets:** none are offered. The code has a dormant path that could propose a reset through a permission prompt, but it only activates when an entitlement source reports one, and no such source exists (`freeResetAvailable` is never set). Harbor will never use a reset without an explicit yes.
+
+## Terms of service: OWNER TO DECIDE
+
+**Question:** Do the providers' terms for consumer subscription plans (Claude Code on a Claude plan, Codex on a ChatGPT plan) allow driving their CLIs headlessly, automatically and several at a time, as Harbor does?
+
+**What the code does** (facts, not a position):
+- It starts the vendor's own CLI as a child process in its documented non-interactive mode (`claude -p --output-format stream-json`, `codex exec --json`) and sends the prompt on stdin.
+- It uses whatever account that CLI is already signed in to. Sign-in is always the CLI's own flow. Harbor never reads, stores or forwards credentials or tokens, and it has no API keys and no API fallback.
+- It is meant for one person using their own subscriptions on their own PC. There is no multi-account pooling, no account sharing and no hosted service. Phase 4 of the roadmap lists "multi-account pools" and Phase 5 a remote API, and both bear on this question.
+- It runs CLI processes in parallel and without a person at the keyboard: up to 3 helpers at a time (limited further by the quota budget and the concurrency setting), leads in several conversations or projects at once, up to 12 automatic lead turns per user message, and goal mode.
+- It tracks usage against the provider's 5-hour and weekly windows, holds a reserve for your interactive work, and stops on rate limits. It does not try to get around any limit.
+
+**Position:** OWNER TO DECIDE. The provider terms have not been researched in this repository. Until the owner states a position, check your plan's terms yourself before using Harbor.
+
+## Install and update
+
+Download `Harbor-Setup-<version>.exe` from [GitHub Releases](https://github.com/Zemodeler/Harbor/releases). Windows only.
+
+- The installer is not code-signed, so SmartScreen warns on the first install. Choose **More info**, then **Run anyway**.
+- Harbor updates itself from GitHub Releases. It checks 30 seconds after launch and then every 4 hours, downloads in the background, and asks before restarting. It never restarts while agents are running. Set `HARBOR_NO_UPDATE=1` to turn updates off.
+- Every push to `main` that passes tests, typecheck and build publishes release `0.1.<run number>`. A head commit containing `[skip release]` skips it. See [RELEASING.md](RELEASING.md). The release workflow and a real auto-update have **not** been verified.
+
+Data lives in `%APPDATA%\Harbor\` and survives uninstall. Harbor never deletes a branch.
 
 ## First run
 
-Install and sign in to `claude` and/or `codex`. Harbor finds them automatically (override with `HARBOR_CLAUDE_PATH` / `HARBOR_CODEX_PATH`); Settings > Connections shows their state. Harbor never touches credentials.
+Install `claude` and/or `codex` and sign in to them. Harbor finds them on PATH and in common install folders. You can override the location in Settings > Connections or with `HARBOR_CLAUDE_PATH` / `HARBOR_CODEX_PATH`. Gemini CLI is detected but has no built-in adapter; it can be added as a custom CLI.
 
-To verify helper work, add `.harbor/checks.json`, e.g. `{"checks": ["npm test", "npm run typecheck"]}`. Harbor asks you to approve the commands before running them.
+To let Harbor verify helper work, add `.harbor/checks.json`, for example `{"checks": ["npm test", "npm run typecheck"]}`. Harbor asks you to approve these commands before it runs them.
 
-## Status
+## Roadmap
 
-Young. Tests run without network or real CLIs. Claude Code and Codex basics were checked on real installs; a multi-helper run with a real model, Codex as lead, and auto-update are not verified ([limitations](docs/limitations.md)).
+The current plan is `PLAN-roadmap-2.md` (2026-10-14):
+- Phase 0: spend ceilings, secret scanning of helper diffs, crash capture, hands-on verification of the Codex adapter and model ids, and this docs and terms-of-service work.
+- Then: measurement (an eval harness comparing Harbor with a single agent), orchestration (project knowledge, repo map), git/PR/CI, more providers, a headless/remote API, storage, and UI.
 
-Data lives in `%APPDATA%\Harbor\` and survives uninstall. Harbor never deletes a branch.
+Linux is deferred. Mobile and macOS are out of scope. Open work items are in [BACKLOG.md](BACKLOG.md).
 
 ## Development
 
@@ -39,10 +76,10 @@ Data lives in `%APPDATA%\Harbor\` and survives uninstall. Harbor never deletes a
 npm install      # then: node node_modules/electron/install.js if electron/dist is missing
 npm run dev
 npm test && npm run typecheck && npm run build   # all three must pass
-npm run smoke    # real CLI check, uses a little quota
+npm run smoke    # real CLI check, uses a little subscription quota
 ```
 
-Rules and file ownership: [AGENTS.md](AGENTS.md). Open work: [BACKLOG.md](BACKLOG.md). MIT ([LICENSE](LICENSE)).
+Rules and file ownership: [AGENTS.md](AGENTS.md). License: MIT ([LICENSE](LICENSE)).
 
 ## Docs
 
