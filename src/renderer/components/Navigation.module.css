@@ -1,0 +1,81 @@
+/* Command palette, toasts, onboarding, tags, slash menu and shell accessibility helpers. Colors come from the theme tokens. */
+
+/* Command palette */
+.palette { display: flex; flex-direction: column; min-height: 0; }
+.hint { margin: 10px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+.hint kbd, .optionMeta kbd { font: inherit; font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+.options { list-style: none; margin: 12px 0 0; padding: 0; max-height: min(56dvh, 520px); overflow-y: auto; display: grid; gap: 2px; }
+.option { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.option[data-active] { background: var(--wash); border-color: var(--accent); }
+.option[aria-disabled=true] { opacity: .55; cursor: default; }
+.optionMain { min-width: 0; display: flex; flex-direction: column; }
+.optionTitle { overflow-wrap: anywhere; }
+.optionMain small { display: block; margin-top: 2px; overflow-wrap: anywhere; }
+.excerpt { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.option mark, .excerpt mark { background: transparent; color: inherit; font-weight: 700; text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+.optionMeta { display: flex; align-items: center; gap: 8px; flex: none; font-size: 11px; color: var(--muted); }
+.kind { text-transform: uppercase; letter-spacing: .4px; font-size: 10px; }
+.status p { margin: 12px 0 0; font-size: 12px; }
+
+/* Toasts */
+.toastRegion { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: grid; gap: 8px; width: min(380px, calc(100vw - 32px)); pointer-events: none; }
+.toast { pointer-events: auto; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px #0003; animation: toastIn .18s ease-out; }
+.toast[data-kind=failed] { border-left-color: var(--error); }
+.toast[data-kind=question] { border-left-color: var(--warning, var(--accent)); }
+.toast strong { display: block; font-size: 13px; }
+.toast p { margin: 2px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.toastActions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.toastActions button { padding: 4px 10px; min-height: 28px; font-size: 12px; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(6px); } }
+
+/* Onboarding */
+.wizard { display: grid; gap: 14px; }
+.steps { display: flex; gap: 6px; list-style: none; padding: 0; margin: 0; }
+.steps li { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+.steps li[data-done] { background: var(--accent); }
+.cliList { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.cliRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.cliRow small { display: block; }
+.modeList { display: grid; gap: 10px; margin: 0; }
+.modeList dt { font-weight: 600; }
+.modeList dd { margin: 2px 0 0; color: var(--muted); line-height: 1.6; }
+.wizardActions { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.wizardActions > span { display: flex; gap: 8px; }
+
+/* Tags */
+.tagFilter { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 8px; }
+.tagFilter button, .tag { font-size: 11px; padding: 1px 7px; min-height: 22px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: transparent; }
+.tagFilter button[aria-pressed=true] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
+.tag { display: inline-block; line-height: 18px; min-height: 0; }
+.archivedToggle { margin: 6px 12px 0; font-size: 12px; color: var(--muted); }
+
+/* Slash menu */
+.slashMenu { list-style: none; margin: 0 0 8px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); max-height: 220px; overflow-y: auto; }
+.slashItem { display: flex; gap: 10px; align-items: baseline; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.slashItem[aria-selected=true] { background: var(--wash); outline: 1px solid var(--accent); }
+.slashItem code { font-weight: 600; color: var(--accent); }
+.slashItem span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Shell */
+.skipLink { position: fixed; left: 12px; top: -60px; z-index: 100; background: var(--accent); color: var(--on-accent); padding: 8px 14px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+.skipLink:focus { top: 12px; }
+.visuallyHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+
+/* App-wide: reduced motion stops every animation and transition, not only the ones listed one by one. */
+@media (prefers-reduced-motion: reduce) {
+  :global(*), :global(*::before), :global(*::after) { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+/* High contrast (Settings → Appearance, or the system asks for more contrast): heavier focus and borders. */
+:global(:root[data-contrast=more]) :global(:focus-visible) { outline: 3px solid var(--accent); outline-offset: 2px; }
+:global(:root[data-contrast=more]) :global(button), :global(:root[data-contrast=more]) :global(input), :global(:root[data-contrast=more]) :global(select), :global(:root[data-contrast=more]) :global(textarea) { border-width: 2px; border-color: var(--ink); }
+:global(:root[data-contrast=more]) :global(button:disabled) { opacity: .7; border-style: dashed; }
+:global(:root[data-contrast=more]) :global(a) { text-decoration: underline; }
+/* Windows contrast themes (forced colors): keep focus and selection visible with system colors. */
+@media (forced-colors: active) {
+  :global(:focus-visible) { outline: 3px solid Highlight !important; }
+  .option[data-active], .slashItem[aria-selected=true] { outline: 2px solid Highlight; }
+  .tagFilter button[aria-pressed=true] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+}

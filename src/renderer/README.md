@@ -29,7 +29,16 @@ The standalone renderer dependencies are isolated to avoid changing the core eng
 
 Types are imported directly from `src/shared/api.ts`. `installMockApi()` supplies the mock only if `window.harbor` is undefined, so an Electron preload automatically takes precedence without renderer changes. Mock connections, usage, login, and reset actions are explicitly sample data; they never alter a real project or account. The browser demo does not persist across reloads.
 
-Drafts are isolated per conversation while the conversation view stays mounted. Ctrl+K switches projects; Ctrl+N starts a conversation; Enter sends and Shift+Enter inserts a line. Direct agent chats name their recipient and provide Back to main. Permissions appear in a queued modal, trap focus, and require Approve or Deny; Escape grants nothing.
+Drafts are isolated per conversation while the conversation view stays mounted. Ctrl+K opens the command palette (`components/CommandMenu.tsx`, ranking in `palette.ts`): commands, projects, conversations by title and, through `searchConversations`, by message text, plus saved prompts; `>` limits it to commands, `@` to projects, `#` to tagged conversations, and recently used entries come first. Ctrl+Shift+F searches this project's conversations, archived ones included. Ctrl+N starts a conversation; Enter sends and Shift+Enter inserts a line. Direct agent chats name their recipient and provide Back to main. Permissions appear in a queued modal, trap focus, and require Approve or Deny; Escape grants nothing.
+
+Navigation polish (local-only layers are marked; core requests are in `BACKLOG.md`):
+
+- Pin and archive use `updateConversation`; archived conversations appear in a "Show archived" section of the list and in history. Tags are **local to this device** (`conversationMeta.ts`, `hooks/useConversationMeta.ts`) until the contract has them; the list can be filtered by tag. Fork is not offered (no API).
+- First-run guide (`components/Onboarding.tsx`, `onboarding.ts`): detected CLIs and sign-in state, the first project, and the modes. It never calls a model. It reopens from the palette ("Show the welcome guide").
+- Toasts (`hooks/useToasts.ts`, `toasts.ts`): "Needs your answer", "Finished" and "Failed" with Open/Answer and Dismiss, for changes seen while the window is open, never for the conversation on screen while focused. An optional clickable Windows notification (Notification API, `notificationPrefs.ts`) is off while main's desktop notifications are on.
+- Themes: Use system (default; follows light/dark and `prefers-contrast: more`), Light, Dark, High contrast (`resolveTheme`, `contrastTokens` in `appearance.ts`). Reduced motion stops all animations; forced-colors mode keeps focus visible.
+- Composer: type `/` for `/deep`, built-in prompts and saved prompts (`slashCommands.ts`; `{{project}}`, `{{conversation}}`, `{{date}}` are filled in). Text, log and source files (several at once, by picker, drop or paste) are quoted into the message; PDFs and credential files are refused with a reason (`attachments.ts`).
+- Accessibility: skip link, labelled landmarks, palette as combobox/listbox with `aria-activedescendant`, arrow keys in the conversation list.
 
 Markdown supports paragraphs, headings, bold, inline code, unordered lists, and fenced code blocks with copying. Raw HTML stays inert text. Full CommonMark, embedded media, and advanced tables are not implemented.
 

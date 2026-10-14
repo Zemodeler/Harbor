@@ -117,7 +117,10 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     },
     async searchConversations(query, projectId) {
       const term = query.trim().toLowerCase();
-      return copy(data.conversations.filter(c => (!projectId || c.projectId === projectId) && (c.title.toLowerCase().includes(term) || data.messages.some(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)))).map(c => ({ conversation: c, projectName: data.projects.find(p => p.id === c.projectId)?.name || '', excerpt: data.messages.find(m => m.conversationId === c.id && m.text.toLowerCase().includes(term))?.text.slice(0, 180) })));
+      if (!term) return [];
+      // Like main (service.ts): the excerpt is a window around the first matching message's match.
+      const excerpt = (c: { id: string }) => { const m = data.messages.find(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)); if (!m) return undefined; const at = m.text.toLowerCase().indexOf(term); return m.text.slice(Math.max(0, at - 50), at + 150); };
+      return copy(data.conversations.filter(c => (!projectId || c.projectId === projectId) && (c.title.toLowerCase().includes(term) || data.messages.some(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)))).map(c => ({ conversation: c, projectName: data.projects.find(p => p.id === c.projectId)?.name || '', excerpt: excerpt(c) })));
     },
     async stopConversation(conversationId) {
       const c = requireConversation(conversationId);

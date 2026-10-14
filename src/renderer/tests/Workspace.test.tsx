@@ -49,8 +49,7 @@ describe('Workspace quality of life', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Archive', hidden: true }).find(b => b.closest('details')?.open)!);
     await waitFor(() => expect(within(screen.getByRole('navigation')).queryByRole('button', { name: 'Polish the checkout' })).not.toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Conversation history' }));
-    const history = await screen.findByRole('dialog', { name: 'Conversation history' });
-    await userEvent.click(within(history).getByRole('button', { name: /Polish the checkout Storefront · Archived/ }));
+    const history = await screen.findByRole('dialog', { name: 'Conversation history' });    await userEvent.click(within(history).getByRole('option', { name: /Polish the checkout Storefront · Archived/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Restore conversation' }));
     expect(await within(screen.getByRole('navigation')).findByRole('button', { name: 'Polish the checkout' })).toBeInTheDocument();
   });
@@ -73,9 +72,9 @@ describe('Workspace quality of life', () => {
     expect(screen.getByText(/^Subagents · \d+$/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Close session information' }));
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    const input = screen.getByLabelText('Find a project');
+    const input = screen.getByLabelText('Search commands, projects and conversations');
     await userEvent.type(input, 'settings');
-    await userEvent.keyboard('{ArrowDown}{Enter}');
+    await userEvent.keyboard('{ArrowDown}{ArrowUp}{Enter}');
     expect(await screen.findByRole('heading', { name: 'Connections & preferences' })).toBeInTheDocument();
   });
   it('groups only consecutive tools and keeps commands available on expansion', async () => {

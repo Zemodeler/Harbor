@@ -1,7 +1,7 @@
 import { useState, type CSSProperties } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
 import type { AppearanceState } from '../hooks/useAppearance';
-import { layouts, palettes, paletteTokens } from '../appearance';
+import { appearanceModes, layouts, palettes, paletteTokens } from '../appearance';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { WorkspaceSettings } from './WorkspaceSettings';
 import { RoutingFields, RoutingSettings } from './RoutingSettings';
@@ -32,12 +32,12 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
           <button className={s.recommendedTheme} onClick={() => { const layout = layouts.find(l => l.id === appearance.layout)!; updateAppearance({ palette: layout.palette, mode: layout.mode }); }}>Use this mode’s original colors</button>
           <p className={s.muted}>Layout and colors are independent. Try any palette with any mode.</p>
         </fieldset>
-        <fieldset className={s.appearanceGroup}><legend>Appearance</legend><p className={s.muted} id="appearance-help">Follow your device, or keep Harbor always light or dark.</p>
-          <div className={s.modeChoices} aria-describedby="appearance-help">{(['system', 'light', 'dark'] as const).map(mode => <label key={mode} className={s.modeChoice}>
-            <input type="radio" name="appearance-mode" checked={appearance.mode === mode} onChange={() => updateAppearance({ mode })}/><span>{mode === 'system' ? 'Use system' : mode === 'light' ? 'Light' : 'Dark'}</span>
+        <fieldset className={s.appearanceGroup}><legend>Appearance</legend><p className={s.muted} id="appearance-help">Follow your device (including its high-contrast setting), keep Harbor always light or dark, or use high contrast. High contrast replaces the palette.</p>
+          <div className={s.modeChoices} aria-describedby="appearance-help">{appearanceModes.map(mode => <label key={mode} className={s.modeChoice}>
+            <input type="radio" name="appearance-mode" checked={appearance.mode === mode} onChange={() => updateAppearance({ mode })}/><span>{mode === 'system' ? 'Use system' : mode === 'light' ? 'Light' : mode === 'dark' ? 'Dark' : 'High contrast'}</span>
           </label>)}</div>
         </fieldset>
-        <fieldset className={s.appearanceGroup}><legend>Color palette</legend><p className={s.muted} id="palette-help">A coordinated set of colors for navigation, messages, and controls.</p>
+        <fieldset className={s.appearanceGroup}><legend>Color palette</legend><p className={s.muted} id="palette-help">A coordinated set of colors for navigation, messages, and controls.{appearanceState.contrast ? ' High contrast is on, so the palette applies once it is off.' : ''}</p>
           <div className={s.paletteGrid} aria-describedby="palette-help">{palettes.map(palette => <label key={palette.id} className={s.paletteChoice} style={paletteTokens(palette.id, scheme, '--preview-') as CSSProperties}>
             <input type="radio" name="color-palette" aria-label={palette.name} checked={appearance.palette === palette.id} onChange={() => updateAppearance({ palette: palette.id })}/>
             <span className={s.palettePreview} aria-hidden="true"><span className={s.previewRail}><i/><i/></span><span className={s.previewSidebar}><i/><i/><i/></span><span className={s.previewChat}><i/><i/><span><i/></span></span></span>
