@@ -368,6 +368,18 @@ export class Git {
     return { truncated: true, files: names.code === 0 ? names.stdout.split('\0').filter(Boolean) : [] };
   }
 
+  /**
+   * The text diff the secret scan reads (secretScan.scanDiff): `from..to`, or from their merge-base with `mergeBase`, no context,
+   * renames as renames, binary files as one line, credential files INCLUDED (they are exactly what the scan looks for). Bounded:
+   * past `maxChars` the scan is told it saw only part of the change.
+   */
+  async diffForScan(cwd: string, from: string, to: string, o: { mergeBase?: boolean; maxChars?: number } = {}): Promise<{ diff: string; truncated: boolean; failed: boolean }> {
+    const range = o.mergeBase ? [`${from}...${to}`] : [from, to];
+    const r = await this.git(cwd, ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '-U0', '-M', '--diff-filter=ACMR', ...range, '--'], LONG_GIT_TIMEOUT_MS, o.maxChars ?? MAX_PATCH_CHARS);
+    if (r.code !== 0 && !r.truncated) return { diff: '', truncated: false, failed: true };
+    return { diff: r.stdout, truncated: !!r.truncated, failed: !!r.timedOut };
+  }
+
   /** Merge commits reachable from `head` but not from any of `exclude`, newest first (topological), with their parents. */
   async mergeCommits(repo: string, head: string, exclude: string[]): Promise<Array<{ commit: string; parents: string[] }>> {
     const r = await this.git(repo, ['rev-list', '--merges', '--parents', '--topo-order', head, ...exclude.map((x) => `^${x}`)]);
