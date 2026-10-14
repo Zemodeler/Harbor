@@ -21,8 +21,9 @@ import { streamLines, type StdinSink, type StreamedLine, type StreamResult } fro
  * and memory, but it may require API-key auth, which a subscription login does not have). NOT verified: how much of the
  * default prompt cost these flags remove; measure with `npm run smoke -- claude` and compare costUsd of a concierge run.
  * The prompt goes through stdin so it never touches the command line.
- * NOT VERIFIED (`claude --help` could not be run when these were added): --add-dir (images) and
- * --permission-mode bypassPermissions (auto mode). Both are documented Claude Code options.
+ * NOT VERIFIED (`claude --help` could not be run when these were added): --permission-mode bypassPermissions (auto mode), a
+ * documented Claude Code option. --add-dir (images, worktree git metadata, skill folders) is listed by `claude --help` of 2.1.295
+ * ("Additional directories to allow tool access to"); a real run reading a skill through it was not made.
  *
  * Git-write deny rules (`denyGitWrites`, lead runs): `Bash(git merge *)` etc. appended to the variadic --disallowedTools list.
  * NOT VERIFIED here (`claude` could not be run in the session that added this): the exact `Bash(prefix *)` rule syntax,
@@ -104,7 +105,8 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
   }
   // Attached images live outside the project: the agent may only Read them if their folder is added. Variadic flag, so it
   // must be followed by another flag (--disallowedTools below).
-  const dirs = [...new Set([...(o.images ?? []).map((p) => dirname(p)), ...(o.writableDirs ?? [])])];
+  // Enabled skills outside the working folder (readableDirs) are added the same way; --add-dir verified on claude.exe 2.1.295 --help.
+  const dirs = [...new Set([...(o.images ?? []).map((p) => dirname(p)), ...(o.writableDirs ?? []), ...(o.readableDirs ?? []).filter((d) => d && !/[\r\n\0]/.test(d))])];
   if (dirs.length) a.push('--add-dir', ...dirs);
   // Subagents must not spawn agents (docs/architecture.md): block native delegation tools.
   a.push('--disallowedTools', 'Task', 'Agent');

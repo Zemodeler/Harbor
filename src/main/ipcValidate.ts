@@ -5,6 +5,7 @@ const MAX_DESCRIPTOR = 64_000;
 const CONTROL = /[\0\r\n]/;
 
 const isId = (v: unknown): v is string => typeof v === 'string' && v.length >= 1 && v.length <= 200 && !CONTROL.test(v);
+const isSkillId = (v: unknown): v is string => typeof v === 'string' && v.length >= 3 && v.length <= 400 && !CONTROL.test(v);
 
 /**
  * Shape check for the methods whose arguments reach disk, git or a CLI prompt. It runs after the sender check and
@@ -73,6 +74,35 @@ export function validateInvoke(method: string, args: unknown[]): void {
     }
     case 'removeCustomCli':
       if (!isId(args[0])) bad('CLI id must be a short non-empty string');
+      break;
+    case 'readSkill':
+    case 'removeSkill':
+    case 'setSkillEnabled':
+      if (!isSkillId(args[0])) bad('skill id must be a short non-empty string');
+      if (method === 'setSkillEnabled' && args[1] !== null && typeof args[1] !== 'boolean') bad('enabled must be true, false or null');
+      if (method !== 'removeSkill') { const p = args[method === 'setSkillEnabled' ? 2 : 1]; if (p !== undefined && p !== null && !isId(p)) bad('project id must be a short non-empty string'); }
+      break;
+    case 'listSkills':
+      if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'previewSkillImport': {
+      const s = args[0] as { kind?: unknown; path?: unknown; ref?: unknown } | null;
+      if (!s || typeof s !== 'object' || Array.isArray(s)) bad('source must be an object');
+      if (s!.kind === 'folder' || s!.kind === 'zip') { if (typeof s!.path !== 'string' || !s!.path.trim() || s!.path.length > MAX_PATH || CONTROL.test(s!.path)) bad('path must be a folder or file path'); }
+      else if (s!.kind === 'github') { if (typeof s!.ref !== 'string' || !s!.ref.trim() || s!.ref.length > 500 || CONTROL.test(s!.ref)) bad('ref must be a GitHub address'); }
+      else bad('kind must be folder, zip or github');
+      const o = args[1] as { confirmDownload?: unknown } | undefined | null;
+      if (o !== undefined && o !== null && (typeof o !== 'object' || (o.confirmDownload !== undefined && !isId(o.confirmDownload)))) bad('options must be an object with an optional confirmDownload token');
+      break;
+    }
+    case 'importSkills': {
+      if (!isId(args[0])) bad('token must be a short non-empty string');
+      const o = args[1] as { names?: unknown } | undefined | null;
+      if (o !== undefined && o !== null && (typeof o !== 'object' || (o.names !== undefined && (!Array.isArray(o.names) || o.names.length > 100 || !o.names.every(isId))))) bad('names must be a list of skill names');
+      break;
+    }
+    case 'browseSkillSource':
+      if (args[0] !== 'folder' && args[0] !== 'zip') bad('kind must be folder or zip');
       break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');

@@ -106,7 +106,17 @@ if (startupAction === 'start') app.whenReady().then(() => {
     pickFile: async () => {
       const r = await dialog.showOpenDialog({ properties: ['openFile'], title: 'Choose the CLI executable', filters: [{ name: 'Programs', extensions: ['exe', 'cmd', 'bat', 'com'] }, { name: 'All files', extensions: ['*'] }] });
       return r.canceled ? undefined : r.filePaths[0];
-    }
+    },
+    pickSkillSource: async (kind) => {
+      const r = kind === 'folder'
+        ? await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Choose a skill folder (or a folder of skills)' })
+        : await dialog.showOpenDialog({ properties: ['openFile'], title: 'Choose a skill .zip file', filters: [{ name: 'Zip archives', extensions: ['zip'] }] });
+      return r.canceled ? undefined : r.filePaths[0];
+    },
+    // Skills already in the CLIs' own folders are listed read-only (only SKILL.md files and file names are read there).
+    skillHomes: { claude: join(app.getPath('home'), '.claude'), codex: process.env['CODEX_HOME'] || join(app.getPath('home'), '.codex') },
+    // GitHub skill import only, and only after the user's explicit click (skills/github.ts).
+    fetch: (url, init) => fetch(url, init)
   });
   let tray: Tray | undefined;
   const openWindow = (): void => {

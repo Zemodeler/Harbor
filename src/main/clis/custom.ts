@@ -26,7 +26,7 @@ const PLACEHOLDER_RE = /\{([A-Za-z]+)\}/g;
 /** Placeholders replaced inside an argument. */
 const INLINE = ['model', 'effort', 'cwd', 'promptFile'] as const;
 /** Placeholders that stand for a whole list of arguments and must be a whole argument on their own. */
-export const SLOTS = ['resumeArgs', 'effortArgs', 'permissionArgs', 'imageArgs'] as const;
+export const SLOTS = ['resumeArgs', 'effortArgs', 'permissionArgs', 'imageArgs', 'readDirArgs'] as const;
 type Slot = typeof SLOTS[number];
 
 /** Variables of the user's environment a custom CLI gets: what Windows programs and Node shims need to start, nothing that holds secrets. */
@@ -304,6 +304,15 @@ export function validateDescriptor(raw: unknown, ctx: ValidationContext): { desc
         const ia = flagList(image['args'], 'run.image.args', ['path']);
         if (ia && !ia.some((a) => a.includes('{path}'))) p('run.image.args must contain {path}.');
         else if (ia) r.image = { args: ia };
+      }
+    }
+    const readDir = run['readDir'];
+    if (readDir !== undefined) {
+      if (!isObj(readDir)) p('run.readDir must be { "args": [...] } with {path}.');
+      else {
+        const da = flagList(readDir['args'], 'run.readDir.args', ['path']);
+        if (da && !da.some((a) => a.includes('{path}'))) p('run.readDir.args must contain {path}.');
+        else if (da) r.readDir = { args: da };
       }
     }
     out.run = r;

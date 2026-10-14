@@ -56,6 +56,11 @@ export interface OrchestratorDeps {
   verified?: (cli: CliId) => boolean;
   /** Whether a read-only run on this CLI stays read-only (a custom CLI without a read-only mode does not, unless the user accepted that). */
   readOnlySafe?: (cli: CliId) => boolean;
+  /**
+   * The enabled skills for one lead or helper run on `cli` in `cwd` (plan section 3.3): text appended to its system prompt and
+   * folders the run must be able to read. Undefined = no skills. Asked after routing, because it depends on the chosen CLI.
+   */
+  skillsFor?: (projectId: Id, cli: CliId, cwd: string) => { system: string; readableDirs: string[] } | undefined;
   /** Capability catalog (editable data); defaults to the built-in one. */
   catalog?: CatalogEntry[];
   worktreesRoot: string;
@@ -300,6 +305,8 @@ interface RoutedOptions {
   /** Extra writable directories (a worktree's git metadata) and command prefixes an edit run may use unasked. */
   writableDirs?: string[];
   allowedCommands?: string[];
+  /** Lead and helper runs: add the project's enabled skills for the chosen CLI (never the concierge, which stays lean). */
+  skills?: boolean;
 }
 
 export class Orchestrator {
@@ -1155,7 +1162,7 @@ export class Orchestrator {
     let out: RoutedRun;
     try {
       out = await this.runRouted(main, {
-        prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held, checksConfigured: checkCmds.length > 0 }), system: LEAD_SYSTEM,
+        prompt: leadPrompt(project.name, this.registerFor(project.id, conversationId), trigger, { notes, mode, goal, peers: this.sessionPeers(project.id, conversationId), inbox, held, checksConfigured: checkCmds.length > 0 }), system: LEAD_SYSTEM, skills: true,
         contextIfNoResume: context,
         // The lead's difficulty comes from the concierge's rating, already raised by the request's own signals (combineComplexity).
         role: 'main', complexity: plan.complexity, difficulty: plan.difficulty ?? COMPLEXITY_DIFFICULTY[plan.complexity], interactive: true,
@@ -1962,7 +1969,7 @@ export class Orchestrator {
     const writableDirs = permission === 'edit' && a.worktree ? await this.d.git.worktreeWritableDirs(a.worktree).catch(() => []) : [];
     const allowed = permission === 'edit' ? commandPrefixes(this.checkCommands(this.project(a.projectId))) : [];
     return this.runRouted(a, {
-      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
+      prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), skills: true, role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
       ...(a.difficulty !== undefined ? { difficulty: a.difficulty } : {}), ...(a.size ? { size: a.size } : {}), ...(a.difficultySignals ? { difficultySignals: a.difficultySignals } : {}),
       ...(a.escalateFrom ? { escalateFrom: a.escalateFrom } : {}), ...(a.keepModel ? { keepModel: a.keepModel } : {}),
       avoid: a.avoid, fanOut: a.role === 'planner' || a.role === 'implementer' || a.role === 'reviewer',
@@ -3167,6 +3174,13 @@ export class Orchestrator {
       }
       if (partialNote) prompt = `${partialNote}\n\n${prompt}`;
       if (o.nonce) prompt = `${prompt}\n\n${nonceInstruction(o.nonce)}`;
+      // Skills depend on the CLI just chosen (native folders, read access, inlining), so they are added per attempt.
+      let skills: { system: string; readableDirs: string[] } | undefined;
+      if (o.skills && !o.lean && this.d.skillsFor) {
+        try { skills = this.d.skillsFor(agent.projectId, decision.cli, o.cwd); }
+        catch (e) { this.log({ kind: 'triage', projectId: agent.projectId, text: `skills could not be listed: ${String((e as Error).message ?? e)}` }); }
+      }
+      const system = skills?.system ? `${o.system}\n\n${skills.system}` : o.system;
 
       // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
       let text = '', final = '', ok = false, error: string | undefined, rateLimited = false;
@@ -3223,7 +3237,7 @@ export class Orchestrator {
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images: o.images, systemPrompt: o.system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images: o.images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.
