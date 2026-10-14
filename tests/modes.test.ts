@@ -302,7 +302,7 @@ describe('plan mode constrains helpers at execution time', () => {
     const rec = h.svc.store.listAgentRecords(h.project.id).find((a) => a.title === 'build')!;
     expect(h.all().find((c) => c.prompt.includes('edit things'))!.opts.permission).toBe('edit');
     await h.svc.setConversationMode(h.conv.id, 'auto');
-    expect((await h.texts()).some((t) => /Auto mode applies to runs that start from now on/.test(t))).toBe(true);
+    expect((await h.texts()).some((t) => /Auto mode is on for this conversation now/.test(t))).toBe(true);
     await h.svc.setConversationMode(h.conv.id, 'plan');
     const direct = await h.svc.openAgentConversation(rec.id);
     const before = h.all().length;

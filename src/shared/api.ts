@@ -121,7 +121,7 @@ export type HarborEvent =
  | { type:'usage'; windows: UsageWindow[] }
  | { type:'cli'; cli: CliStatus }
  | { type:'permission'; requestId: Id; kind:'freeReset'|'tool'|'conflict'|'screenshot'; prompt: string; agentId?: Id; conversationId?: Id; tool?: string; alwaysAllow?: boolean; expiresAt?: number; screenshot?: ScreenshotRequestInfo }   // kind 'tool': conversationId = where the asking agent runs; tool = tool name; alwaysAllow = "always allow for this project" may be offered; expiresAt = denied automatically after this time. kind 'screenshot' (CHANGELOG 0.1.33): answer with previewScreenshot + answerScreenshot (answerPermission(id, false) also denies)
- | { type:'question'; requestId: Id; conversationId: Id; prompt: string; options?: string[]; allowText?: boolean; agentId?: Id }   // an agent needs a decision; answer with answerQuestion
+ | { type:'question'; requestId: Id; conversationId: Id; prompt: string; options?: string[]; allowText?: boolean; multiSelect?: boolean; questions?: Array<{ prompt: string; options?: string[]; allowText?: boolean; multiSelect?: boolean }>; agentId?: Id }   // an agent needs a decision (multiSelect = several options may be picked; questions = follow-up questions of the same card, answer all in one answerQuestion text); answer with answerQuestion
  | { type:'document'; projectId: Id; conversationId: Id; path: string; title?: string; agentId?: Id };   // an agent's HARBOR_OPEN_DOCUMENT passed Harbor's path checks; open it with openDocument(projectId, path, { agentId }) (CHANGELOG 0.1.34)
 export type PendingPermission = Extract<HarborEvent, { type: 'permission' }>;
 export interface HarborApi {
