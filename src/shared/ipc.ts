@@ -14,7 +14,8 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'listPendingPermissions', 'answerQuestion',
-  'listToolRules', 'removeToolRule', 'exportDiagnostics'
+  'listToolRules', 'removeToolRule', 'exportDiagnostics',
+  'getTaskReport', 'rateResult', 'listRatings', 'getRatingSummary', 'replayRouting'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;

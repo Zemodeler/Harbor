@@ -187,7 +187,7 @@ export function detailsOf(d: RouteDecision): NonNullable<Message['details']> {
     ...(d.scored ? { scored: d.scored } : {}), ...(d.margin !== undefined ? { margin: d.margin } : {}), ...(d.tied ? { tied: true } : {}),
     ...(d.degraded ? { degraded: d.degraded } : {}), difficulty: d.difficulty,
     ...(d.needsReview ? { needsReview: true, ...(d.reviewReason ? { reviewReason: d.reviewReason } : {}) } : {}),
-    ...(d.skipped?.length ? { skipped: d.skipped } : {})
+    ...(d.skipped?.length ? { skipped: d.skipped } : {}), ...(d.request ? { request: d.request } : {})
   };
 }
 
