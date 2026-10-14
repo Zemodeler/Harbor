@@ -45,6 +45,14 @@ Next:
 - **Concierge quality** (S): watch for wrong "simple" answers; `/deep` forces a strong lead. Consider a per-conversation "always use lead" toggle.
 - **Doc reconcile** (product owner): README and `docs/*` still describe the old planner/implementer pipeline and sibling messaging.
 
+## Project knowledge and repo map (roadmap 2 Phase 2, contract 0.1.29) — follow-ups
+
+Done: `knowledge.ts` (notes: dedupe, caps, relevance selection within a character budget, provenance wording), `HARBOR_NOTE` lead line, `Store` notes with `listProjectNotes`/`removeProjectNote`; `repoMap.ts` (read-only map, cached by HEAD + status hash, 6,000-character cap, credential files skipped, works without git) injected into non-reviewer helper prompts. Next:
+- **Helpers cannot write notes** (S): a helper that discovers a pitfall can only put it in its report; the lead decides whether to note it. A `HARBOR_NOTE` from helpers (lower trust, shown as helper-written) is a possible extension.
+- **Note relevance is word overlap** (S): good enough for tens of notes; revisit if projects keep many more.
+- **Map in subfolder projects** (S): the map lists the project subfolder only (git runs there); monorepo root scripts are not shown.
+- **Measure the effect** (Phase 1 eval harness): compare helper turn count and tokens with and without the map on the same tasks before tuning the cap.
+
 ## Delegation sizing and coordination (Phase 4, contract 0.1.28) — follow-ups
 
 Done: size gate and plan estimate (`sizeGate.ts`), soft/hard helper limits with one automatic resume (`softCap.ts`), lead woken by Harbor's own stops (root cause: `maybeReportToMain` skipped every all-stopped batch as a stop-all, including cap stops), helper questions routed to the lead first with a safe default for user-owned ones (`askRouting.ts`), dirty-base holds (`dirtyBase.ts`), reviewer binding and automatic review, budget-driven helper concurrency (`helperLimit.ts`), new lead line `HARBOR_REPLY`. Next:
@@ -78,6 +86,8 @@ Next (core):
 - Unverified: real tool-line shapes beyond Claude's `<Tool> <path|command>` and Codex's command text; the week simulator does not model run durations, so it shows nothing about the quota the guard saves.
 
 ## UI requests (src/renderer — owned by the UI engineer)
+
+- Project knowledge (contract 0.1.29): a "Project notes" list in the project's settings or side panel from `listProjectNotes(projectId)` (text, topic, date: `updated ?? created`), with a delete button per note (`removeProjectNote`, which returns the remaining list). Label them as written by the lead agent (advisory, may be outdated). No add/edit from the UI yet; ask core for `addProjectNote` if that is wanted.
 
 - Loop guard (Phase 6): show a helper with `stopKind: 'loop'` as "stopped: looping" (distinct from the user's Stop and the time limit), with its error text (what repeated, how often); later, a setting to tune or turn off the guard once core exposes one.
 
