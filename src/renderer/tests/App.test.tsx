@@ -54,13 +54,13 @@ describe('Harbor main flows', () => {
   it('keeps drafts separate and supports project switching and new-chat shortcuts', async () => {
     await ready(); await userEvent.type(screen.getByLabelText('Message Harbor'), 'Storefront draft');
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    await userEvent.type(screen.getByLabelText('Find a project'), 'Internal');
-    await userEvent.click(screen.getByRole('button', { name: /Internal tools C:/ }));
+    await userEvent.type(screen.getByLabelText('Search commands, projects and conversations'), 'Internal');
+    await userEvent.click(screen.getByRole('option', { name: /Internal tools C:/ }));
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'New conversation' })[0]).toBeEnabled());
     fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
     expect(await screen.findByLabelText('Message Harbor')).toHaveValue('');
     fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-    await userEvent.click(screen.getByRole('button', { name: /Storefront C:/ }));
+    await userEvent.click(screen.getByRole('option', { name: /Storefront C:/ }));
     await waitFor(() => expect(screen.getByLabelText('Message Harbor')).toHaveValue('Storefront draft'));
   });
   it('retains a failed prompt and shows an error', async () => {
