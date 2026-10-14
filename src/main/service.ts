@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, RemoteScope, RemoteTokenInfo } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -22,9 +22,13 @@ import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
+import { RemoteTokens } from './remote/tokens';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & {
+  createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
+  listRemoteTokens(): Promise<RemoteTokenInfo[]>;
+  revokeRemoteToken(id: Id): Promise<void>;
   setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
   openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
@@ -33,6 +37,8 @@ export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'g
   /** Main-process extras (not part of the renderer contract). */
   readonly orchestrator: Orchestrator;
   readonly store: Store;
+  /** Hashed remote-API tokens (remote/server.ts verifies against them). */
+  readonly remoteTokens: RemoteTokens;
   whenIdle(timeoutMs?: number): Promise<void>;
   /**
    * Quitting: aborts every run, ends the CLI processes Harbor started (through the injected killer) and persists. The abort and
@@ -222,6 +228,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   });
 
   // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
+  // Hashes only (see remote/tokens.ts); in memory without a data folder, like the Store.
+  const remoteTokens = new RemoteTokens(opts.dataDir ? join(opts.dataDir, 'remote-tokens.json') : undefined);
   const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
   const orchestrator = new Orchestrator({
     store, bus, ledger, git, worktreesRoot, ask, freeReset, journal,
@@ -287,12 +295,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
 
   return {
-    orchestrator, store,
+    orchestrator, store, remoteTokens,
     whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
     shutdown: async () => {
       if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
       await orchestrator.shutdown(); // aborts and flushes before its first await
       store.flush();
+      remoteTokens.flush();
     },
     activeRuns: () => orchestrator.activeRunCount(),
     onResume: () => orchestrator.rearmTimers(),
@@ -533,6 +542,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       store.removeToolRule(projectId, ruleId);
       return store.listToolRules(projectId);
     },
+    async createRemoteToken(name, scope) {
+      if (scope === 'full' && store.getSettings().remote?.allowFullScope !== true) throw new Error('Full remote access is off. Turn on remote.allowFullScope in settings first, or create a read-only or answer-permissions token.');
+      return remoteTokens.create(name, scope);
+    },
+    async listRemoteTokens() { return remoteTokens.list(); },
+    async revokeRemoteToken(id) { remoteTokens.revoke(id); },
     onEvent: (cb) => bus.on(cb)
   };
 }

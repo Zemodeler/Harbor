@@ -77,7 +77,18 @@ Next (core):
 - Settings are injected only (`ServiceOptions.stall.loopGuard`: `enabled`, `limits`, `probe`, `probeIntervalMs`); a user-facing setting needs a Settings field (contract change, not done).
 - Unverified: real tool-line shapes beyond Claude's `<Tool> <path|command>` and Codex's command text; the week simulator does not model run durations, so it shows nothing about the quota the guard saves.
 
+## Remote API (Phase 5, contract 0.1.29) — follow-ups
+- Done: `npm run headless` (`src/main/headless.ts`, no Electron), the HTTP + WebSocket server (`src/main/remote/`), hashed per-device tokens with scopes, the `harbor` CLI skeleton (`npm run harbor -- status|projects|conversations|send|answer|watch`), an instance lock so the app and the headless service never share a data folder (`instanceLock.ts`). Tests: `tests/remote.test.ts`.
+- Build: `electron.vite.config.ts` only builds `src/main/index.ts`, so headless and the CLI run through `tsx` (dev dependency) only. Adding `src/main/headlessMain.ts` and `scripts/harbor.ts` as main-build inputs (and a `bin` for the CLI) needs the packaging owner.
+- Unverified: TLS mode (`remote.tlsCertFile`/`tlsKeyFile`) has no test with a real certificate; the event stream was only tested with Harbor's own client, not a third-party WebSocket client; behaviour behind Tailscale/Cloudflare tunnels (Host names, `allowedHosts`) was not tried.
+- The WebSocket takes the token only in the `Authorization` header, which browsers cannot set; serving the renderer over the port (roadmap) needs a different handshake (e.g. a one-time ticket from an authenticated POST), designed with the Origin rule in mind.
+- Remote settings are read once at startup; changing them needs a restart. `remote-config set` and `token create/list/revoke` in headless refuse while any Harbor runs (they would race the running instance's files); in-app token management needs the UI below.
+- Failed-auth limiting is per address plus a global cap; behind a tunnel everything is 127.0.0.1, so a local process can lock the owner out for a minute (DoS, not a bypass).
+- Events are not filtered by scope (every scope can read everything, including message text); per-project tokens would need a project filter on both methods and events.
+
 ## UI requests (src/renderer — owned by the UI engineer)
+
+- Remote access (contract 0.1.29): a Settings page "Remote access": the `Settings.remote` fields (enabled, host, port, allowFullScope with a warning, allowPlainHttp with a warning that tokens then cross the network in clear text, TLS cert/key file pickers, allowedHosts), a note that changes apply after restart; a token list from `listRemoteTokens()` (name, scope, created, last used) with Revoke (`revokeRemoteToken`) and "New token" (`createRemoteToken(name, scope)`; show the returned `token` once with a copy button and say it will not be shown again; the full scope option is disabled unless allowFullScope is on). Add the three methods to `mockApi.ts`.
 
 - Loop guard (Phase 6): show a helper with `stopKind: 'loop'` as "stopped: looping" (distinct from the user's Stop and the time limit), with its error text (what repeated, how often); later, a setting to tune or turn off the guard once core exposes one.
 
@@ -148,6 +159,7 @@ Behavior the core already provides that the UI should surface or respect:
 - The "free reset" claim: no entitlement source exists (`freeResetAvailable` is never set). Remove or qualify the claim until one does.
 - An eval harness comparing Harbor to a single agent on the same tasks (quality, cost, time) is needed before claiming routing and delegation pay off.
 - macOS and Linux support: `openLogin`, tray, discovery paths, `taskkill` process cleanup and the installer are Windows-only today; decide whether and when to support them.
+- Remote API (contract 0.1.29): `docs/safety.md` and `docs/architecture.md` should describe the remote surface: off by default, loopback bind, TLS or an explicit plain-HTTP acknowledgement off-box, scopes (read-only / answer-permissions / full, full off by default), free resets and token management never remote, no CORS and no browser Origins, the instance lock between app and headless. The CSP note "allows ws://127.0.0.1:*" in safety.md is unrelated (renderer CSP).
 - A UI for stored project decisions (`HARBOR_DECISION`, kept as `decision` coordination entries) with delete (needs a core method; ask core when scheduled).
 
 ## Hardening wave 2 (core, one agent; details in `HARDENING-PLAN.md`)
