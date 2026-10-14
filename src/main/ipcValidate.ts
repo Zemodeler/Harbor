@@ -54,6 +54,10 @@ export function validateInvoke(method: string, args: unknown[]): void {
       }
       break;
     }
+    case 'getSpendStatus':
+      if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
+      if (args[1] !== undefined && args[1] !== null && !isId(args[1])) bad('conversation id must be a short non-empty string');
+      break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

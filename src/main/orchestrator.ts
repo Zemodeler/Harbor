@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity, SpendStatus } from '../shared/api';
 import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
 import { DEFAULT_CATALOG, autoRoutable, entryFor, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
 import type { TaskSize } from './calibration';
@@ -44,6 +44,12 @@ import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
 import { isModelSpecific } from './adapters/types';
 import type { EventBus } from './events';
+import {
+  SPEND_CHECK_MS, SPEND_SCOPES, SPEND_TOOL, ceilingsConfigured, checksFor, continuePrompt, counts, describeHit, describeLimit, firstHit, liveRunOf, spendRunOf, statusOf,
+  type SpendHit, type SpendRun
+} from './spend';
+import { SECRET_TOOL, applyAllowlist, describeFindings, findingsFingerprint, scanDiff } from './secretScan';
+import type { SecretScanRecord } from './types';
 
 export interface OrchestratorDeps {
   store: Store;
@@ -95,6 +101,9 @@ export interface OrchestratorDeps {
   now?: () => number;
   /** Report wake-ups of the lead are gathered for `ms` (default 400) so a cascade of finishing helpers wakes it once; 0 = immediately. */
   reportDebounce?: { ms?: number; setTimer?: (fn: () => void, ms: number) => () => void };
+  /** How often runs in flight are measured against the spend ceilings (default spend.SPEND_CHECK_MS) and its timer (tests). */
+  spendCheckMs?: number;
+  spendTimer?: (fn: () => void, ms: number) => () => void;
 }
 
 /** A run with no output for this long is flagged as possibly stuck (it is never killed for that alone). */
@@ -227,7 +236,22 @@ interface RoutedRun {
   loop?: LoopEvidence;
   /** The CLI ended without a completion event after producing output (exit code 0); counted as finished, with a warning. */
   noCompletion?: boolean;
+  /** A spend ceiling stopped the run, or kept it from starting (spend.ts); `error` says which. Never retried elsewhere. */
+  spent?: boolean;
 }
+
+/** A run in flight as the spend ceilings see it (spendTick). */
+interface SpendFlight {
+  key: string; projectId: Id; taskId?: Id;
+  /** Where the user is told it was stopped: the lead's conversation, or the one that delegated the helper. */
+  conversationId: Id;
+  stopped?: boolean;
+  measure(now: number): SpendRun;
+  stop(hit: SpendHit): void;
+}
+
+/** Harbor stopped it (time limit, loop guard, spend ceiling), not the user: the lead is woken and decides. */
+const harborStopped = (a: Pick<AgentRecord, 'stopKind'>): boolean => a.stopKind === 'cap' || a.stopKind === 'loop' || a.stopKind === 'spend';
 
 /**
  * Helper results carried by one lead turn: a reports trigger's items (snapshots taken when queued), plus held reports added
@@ -367,6 +391,12 @@ export class Orchestrator {
   private twoLeadsWarned = new Set<Id>();
   /** Checks files already asked about in this run (project + content hash), so several helpers finishing together ask once. */
   private checksAsks = new Map<string, Promise<boolean>>();
+  /** Runs in flight, measured against the spend ceilings. */
+  private spendFlights = new Map<symbol, SpendFlight>();
+  /** One open "continue past this ceiling?" question per ceiling key; every run waiting on it shares the answer. */
+  private spendAsks = new Map<string, Promise<boolean>>();
+  /** Ceilings the user declined to extend (key -> project, absent = all projects): not asked again until the user's next message. */
+  private spendDenied = new Map<string, Id | undefined>();
   private shuttingDown = false;
   /** Settles when the startup git work of recover() (prune, checkpoints, cleanup) is done. */
   private startup: Promise<void> = Promise.resolve();
@@ -723,6 +753,8 @@ export class Orchestrator {
     }
     this.goalTurns.set(conversationId, 0);
     this.malformedResumed.delete(conversationId);
+    // A new message is a new decision: a ceiling the user declined to extend is asked about again the next time it stops a run.
+    for (const [key, p] of this.spendDenied) if (p === undefined || p === conv.projectId) this.spendDenied.delete(key);
     this.d.store.setGoalPaused(conversationId, false); // a new message clears a goal pause
     for (const [id, q] of this.questions) if (q.conversationId === conversationId) this.questions.delete(id);
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: titleFrom(text) });
@@ -1073,8 +1105,8 @@ export class Orchestrator {
       signal, resume: false, conversationId, stream: false, sessionKey: `concierge:${conversationId}`
     });
     if (!out.ok) {
-      this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.error);
-      this.post(conversationId, 'system', out.stopped ? 'Stopped.' : `Harbor could not run: ${out.error}`, { agentId: main.id });
+      this.sessionState(conversationId, out.stopped ? 'stopped' : 'failed', out.spent ? 'Stopped: spend ceiling reached (estimate).' : out.error);
+      this.post(conversationId, 'system', out.spent ? `Not answered: ${out.error}` : out.stopped ? 'Stopped.' : `Harbor could not run: ${out.error}`, { agentId: main.id });
       return 'handled';
     }
     const details = out.decision && detailsOf(out.decision);
@@ -1174,6 +1206,14 @@ export class Orchestrator {
     await this.detectLeadMerge(project, main, conversationId, headBefore);
     if (!out.ok && out.stopped && this.steered.has(conversationId)) {
       this.post(conversationId, 'system', 'Interrupted to follow your new message.', { agentId: main.id });
+      return;
+    }
+    if (!out.ok && out.spent) {
+      // The reason reaches the lead on its next turn (the user's next message, or a wake once the user allowed more).
+      if (out.started) this.addNote(conversationId, `Harbor stopped your previous turn at a spend ceiling: ${out.error ?? 'spend ceiling reached'} Check what is already done before continuing, and keep the rest of the work small.`);
+      this.sessionState(conversationId, 'stopped', 'Stopped: spend ceiling reached (estimate).');
+      this.post(conversationId, 'system', `The lead ${out.started ? 'was stopped' : 'did not start'}: ${out.error} Send a message to continue; Harbor asks you before it spends more.`, { agentId: main.id });
+      if (goalMode) { this.d.store.setGoalPaused(conversationId, true); this.post(conversationId, 'system', 'Goal mode paused: a spend ceiling was reached.'); }
       return;
     }
     if (!out.ok) {
@@ -2028,6 +2068,7 @@ export class Orchestrator {
           report += `\n\nWARNING: edits outside claimed files: ${outside.join(', ')}`;
         }
         report += this.harborDirWarning(a, files);
+        if (cp.head && cp.head !== a.baseCommit) report += await this.secretEvidence(a, a.worktree, a.baseCommit, cp.head);
         if (cp.head && !stopped) report += await this.runChecks(a, cp.head, ctl?.signal);
       } else {
         if (cp.committed) report += `\n\nThe run did not finish cleanly; Harbor committed its uncommitted work to ${a.branch} so nothing is lost.`;
@@ -2055,6 +2096,7 @@ export class Orchestrator {
     // Harbor's time limit, not the user: resumed once from the saved session (its work is committed above) before the lead hears of it.
     const capStopped = !!res.capped && !ctl?.signal.aborted;
     const loopStopped = !!res.loop && !ctl?.signal.aborted;
+    const spendStopped = !!res.spent && !ctl?.signal.aborted;
     if (loopStopped && this.loopStop(a, res.loop!, report)) return;
     if (capStopped && capResumeAllowed(a) && !this.stoppedSessions.has(a.parentConversationId) && !this.shuttingDown) {
       a.capResumes = (a.capResumes ?? 0) + 1;
@@ -2076,7 +2118,8 @@ export class Orchestrator {
       const where = `Its work so far is committed${a.branch ? ` on ${a.branch}` : ''}${a.headCommit ? ` at ${a.headCommit.slice(0, 10)}` : ''}.`;
       const capError = `${res.error ?? 'Harbor stopped this run at its time limit'}${a.capResumes ? ' (after one automatic resume)' : ''}. ${where} The lead decides: continue it (HARBOR_REPLY), split what is left, or do it itself.`;
       const loopError = res.loop ? `Harbor stopped this run again because it was going in circles: ${describeLoop(res.loop)} (after one automatic resume with a different instruction). ${where} The lead decides: re-scope it, split it, or take it over.` : '';
-      this.setState(a, 'stopped', { report, error: loopStopped ? loopError : capStopped ? capError : 'Stopped by the user.', stopKind: loopStopped ? 'loop' : capStopped ? 'cap' : 'user', summary: undefined });
+      const spendError = `${res.error ?? 'Harbor stopped this run at a spend ceiling'} ${where} Nothing more runs in this scope until the user allows it; the lead decides what is still worth doing.`;
+      this.setState(a, 'stopped', { report, error: loopStopped ? loopError : capStopped ? capError : spendStopped ? spendError : 'Stopped by the user.', stopKind: loopStopped ? 'loop' : capStopped ? 'cap' : spendStopped ? 'spend' : 'user', summary: undefined });
     }
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed', summary: undefined });
     else if (asking) this.setState(a, 'waiting', { report, summary, error: askRoute?.to === 'lead' ? "Waiting for the lead's answer." : 'Waiting for your answer.' });
@@ -2137,6 +2180,80 @@ export class Orchestrator {
     this.post(a.parentConversationId, 'system', msg, { agentId: a.id });
     this.log({ kind: 'outside-claim', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: msg });
     return `\n\nWARNING: changes under .harbor/: ${touched.join(', ')}. Review them before this branch is integrated.`;
+  }
+
+  // ------------------------------------------------------------ secret scanning (secretScan.ts)
+
+  /** Harbor's secret scan of `base..head` in `cwd`, minus the project's allowlist. Types and locations only, never values. */
+  private async secretScan(a: AgentRecord, cwd: string, base: string, head: string): Promise<SecretScanRecord> {
+    const { diff, truncated, failed } = await this.d.git.diffForScan(cwd, base, head);
+    if (failed) return { commit: head, findings: [], total: 0, allowed: 0, failed: true };
+    const scan = scanDiff(diff);
+    const { kept, allowed } = applyAllowlist(scan.findings, effectiveSettings(this.d.store.getSettings(), a.projectId).secretAllowlist);
+    // Findings past MAX_FINDINGS were not run through the allowlist: they count as kept (the safe side).
+    const total = kept.length + Math.max(0, scan.total - scan.findings.length);
+    return { commit: head, findings: kept, total, allowed: allowed.length, ...(truncated ? { truncated: true } : {}) };
+  }
+
+  /** After an edit helper's run: the scan of its branch, recorded as evidence (the lead's report, reviewers, the integration gate). */
+  private async secretEvidence(a: AgentRecord, cwd: string, base: string, head: string): Promise<string> {
+    const rec = await this.secretScan(a, cwd, base, head).catch(() => undefined);
+    a.secretScan = rec;
+    if (!rec) return '';
+    if (rec.failed) return `\n\nHarbor could not run its secret scan on ${head.slice(0, 10)} (git failed); the integration scans again.`;
+    if (!rec.total) return '';
+    const text = `Secret scan (Harbor) on ${head.slice(0, 10)}: ${rec.total} possible secret${rec.total === 1 ? '' : 's'}: ${describeFindings(rec.findings, rec.total)}. Values are not shown. Integration is blocked until they are removed, allowlisted, or the user allows them.`;
+    this.post(a.parentConversationId, 'system', `"${a.title}": ${text}`, { agentId: a.id });
+    this.log({ kind: 'secret-scan', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `"${a.title}" ${head.slice(0, 10)}: ${describeFindings(rec.findings, rec.total, 5)}` });
+    return `\n\nWARNING: ${text}`;
+  }
+
+  /**
+   * Before applying an integration: its head must have passed the secret scan, or the user must have allowed exactly its findings.
+   * An integration from before secret scanning is scanned now; findings then need a re-run of the integration, which asks.
+   */
+  private async secretsCleared(a: AgentRecord, cwd: string, base: string, head: string): Promise<void> {
+    const prior = a.secretScan;
+    const clean = (r: SecretScanRecord | undefined) => !!r && r.commit === head && !r.failed && (r.overridden || (!r.total && !r.truncated));
+    if (clean(prior)) return;
+    const rec = prior?.commit === head && !prior.failed ? prior : await this.secretScan(a, cwd, base, head);
+    a.secretScan = rec;
+    this.d.store.upsertAgent(a);
+    if (clean(rec)) return;
+    const fp = `${findingsFingerprint(head, rec.findings)}${rec.truncated ? ':partial' : ''}`;
+    if (!rec.failed && this.d.store.hasSecretOverride(a.projectId, fp)) { rec.overridden = true; this.d.store.upsertAgent(a); return; }
+    throw new Error(rec.failed
+      ? `Harbor could not run its secret scan on ${head.slice(0, 10)}, so nothing was changed. Try again.`
+      : `Harbor's secret scan found ${rec.total ? `${rec.total} possible secret${rec.total === 1 ? '' : 's'} (${describeFindings(rec.findings, rec.total, 5)})` : 'a change too large to scan completely'} on ${head.slice(0, 10)}, so nothing was changed. Run the integration again: Harbor asks you before integrating them.`);
+  }
+
+  /**
+   * Integration gate: the scan of everything the integration brings onto the target (`base..head`). A hit (or a change too large to
+   * scan completely, or a scan that failed) blocks it unless the user says yes to exactly these findings on this commit (a `permission`
+   * event; no answer is a no). A yes is remembered per project, so re-running or applying the same head does not ask again.
+   */
+  private async secretGate(a: AgentRecord, cwd: string, base: string, head: string, signal?: AbortSignal): Promise<{ blocked?: string; note: string }> {
+    const h = head.slice(0, 10);
+    const rec = await this.secretScan(a, cwd, base, head);
+    a.secretScan = rec;
+    if (rec.failed) return { blocked: `Harbor could not run its secret scan on ${h} (git failed), so the integration is not cleared. Run it again.`, note: '' };
+    if (!rec.total && !rec.truncated) return { note: `\n\nSecret scan (Harbor) on ${h}: nothing found${rec.allowed ? ` (${rec.allowed} allowlisted)` : ''}.` };
+    const summary = [rec.total ? `${rec.total} possible secret${rec.total === 1 ? '' : 's'}: ${describeFindings(rec.findings, rec.total)}` : '', rec.truncated ? 'the change is too large to scan completely' : ''].filter(Boolean).join('; ');
+    const fp = `${findingsFingerprint(head, rec.findings)}${rec.truncated ? ':partial' : ''}`;
+    const journal = (text: string) => this.log({ kind: 'secret-scan', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `integration ${h}: ${text}` });
+    const allowedNote = `\n\nSecret scan (Harbor) on ${h}: ${summary}. You allowed integrating these (values not shown).`;
+    if (this.d.store.hasSecretOverride(a.projectId, fp)) { rec.overridden = true; journal('allowed earlier by the user'); return { note: allowedNote }; }
+    journal(`${describeFindings(rec.findings, rec.total, 5)}${rec.truncated ? ' (partial scan)' : ''}; asked the user`);
+    const prompt = `Harbor's secret scan found ${summary} in what "${a.title}" would integrate (head ${h}). Values are not shown. Integrate anyway? Yes allows exactly these findings on this commit; anything new asks again. No blocks the integration: remove them (or add the paths to the project's secret allowlist) and run it again.`;
+    const d = await this.askTool(a, this.convFor(a), ++this.runSeq, { tool: SECRET_TOOL, input: {} }, signal ?? new AbortController().signal, { noRules: true, prompt });
+    if (d.allow) {
+      this.d.store.addSecretOverride(a.projectId, fp);
+      rec.overridden = true;
+      journal('allowed by the user');
+      return { note: allowedNote };
+    }
+    journal('blocked');
+    return { blocked: `Secret scan found ${summary} on ${h}. Integration blocked (values not shown): remove them, allowlist the paths in the project's settings, or run the integration again and allow it.`, note: '' };
   }
 
   /**
@@ -2279,7 +2396,7 @@ export class Orchestrator {
   private scheduleReport(a: AgentRecord): void {
     const conv = a.parentConversationId;
     // Judgement needed now: a failure, Harbor's own stop (the user's stops never wake it), a helper that says it is blocked, or a planner nothing waits on.
-    const own = a.state === 'failed' || (a.state === 'stopped' && (a.stopKind === 'cap' || a.stopKind === 'loop')) || a.result?.outcome === 'blocked' || (a.role === 'planner' && !this.plannerFeedsDependents(a));
+    const own = a.state === 'failed' || (a.state === 'stopped' && harborStopped(a)) || a.result?.outcome === 'blocked' || (a.role === 'planner' && !this.plannerFeedsDependents(a));
     const pending = this.reportWakes.get(conv);
     if (pending) { pending.wake ||= own; pending.last = a; return; }
     const ms = this.d.reportDebounce?.ms ?? REPORT_DEBOUNCE_MS;
@@ -2307,7 +2424,7 @@ export class Orchestrator {
     if (!fresh.length) return;
     // A stop-all should not trigger a flurry of lead turns: a batch of only USER-stopped helpers is skipped on purpose. A helper Harbor
     // stopped at its time limit is not a stop-all: skipping it left a real run's lead idle for 28 minutes until the user typed again.
-    if (fresh.every((x) => x.state === 'stopped' && x.stopKind !== 'cap' && x.stopKind !== 'loop')) { fresh.forEach((x) => this.reported.add(reportKey(x))); store.markReports(fresh, 'skipped'); return; }
+    if (fresh.every((x) => x.state === 'stopped' && !harborStopped(x))) { fresh.forEach((x) => this.reported.add(reportKey(x))); store.markReports(fresh, 'skipped'); return; }
     if (!this.autoTurn(a.parentConversationId)) return;
     // Uncertain results join when the turn starts (`heldReports`), within the same bound as any other turn.
     fresh.forEach((x) => this.reported.add(reportKey(x)));
@@ -2326,7 +2443,7 @@ export class Orchestrator {
     return pickHeld(this.registerFor(projectId, conversationId).filter((x) => {
       if (x.byUser || !TERMINAL.includes(x.state) || this.reported.has(reportKey(x))) return false;
       const d = deliveryOf(x);
-      return d ? UNCERTAIN.includes(d.status) : x.state !== 'stopped' || x.stopKind === 'cap' || x.stopKind === 'loop';
+      return d ? UNCERTAIN.includes(d.status) : x.state !== 'stopped' || harborStopped(x);
     }));
   }
 
@@ -2562,7 +2679,16 @@ export class Orchestrator {
       return end('failed', report, `Merge conflict: ${why}`);
     }
 
-    // 5. Checks on the combined result: the sources' own checks do not cover it.
+    // 5. Secret scan of everything this brings onto the target: a hit blocks it unless the user says yes to exactly these findings.
+    a.secretScan = undefined;
+    if (head && head !== base) {
+      const secrets = await this.secretGate(a, wt, base, head, signal);
+      if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
+      if (secrets.blocked) return end('failed', `${report}\n\n${secrets.blocked}`, `Secret scan: ${secrets.blocked}`);
+      report += secrets.note;
+    }
+
+    // 6. Checks on the combined result: the sources' own checks do not cover it.
     Object.assign(a, { checks: undefined, testedCommit: undefined, testedWorktree: undefined, outdated: undefined });
     if (head) report += await this.runChecks(a, head, signal);
     if (signal?.aborted) return end('stopped', `${report}\n\nStopped by the user.`, 'Stopped by the user.');
@@ -2612,6 +2738,7 @@ export class Orchestrator {
       if (dirty.timedOut) throw new Error('git timed out while checking the project folder for uncommitted changes, so nothing was changed. Try again.');
       if (dirty.failed) throw new Error('git could not read the status of the project folder, so nothing was changed.');
       if (dirty.dirty) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
+      if (a.integration) await this.secretsCleared(a, project.path, base, head);
       if (!git.sameBranch(await git.currentBranch(project.path), target)) {
         const elsewhere = await git.worktreeOf(project.path, target);
         if (elsewhere) throw new Error(`${target} is checked out in ${elsewhere}. Apply from there or switch the project folder to ${target}.`);
@@ -2996,6 +3123,118 @@ export class Orchestrator {
     return true;
   }
 
+  // ------------------------------------------------------------ spend ceilings (spend.ts)
+
+  /** The task (user request) a run counts towards: the newest user message of the lead's conversation, or the one a helper was delegated under. */
+  private spendTaskFor(agent: AgentRecord, conversationId: Id): Id | undefined {
+    const lastUser = (c: Id): Id | undefined => this.d.store.listMessages(c).filter((m) => m.role === 'user').at(-1)?.id;
+    if (agent.role === 'main') return lastUser(conversationId);
+    if (!agent.spendTask) {
+      const t = agent.parentConversationId ? lastUser(agent.parentConversationId) : undefined;
+      if (!t) return undefined;
+      agent.spendTask = t;
+      this.d.store.upsertAgent(agent);
+    }
+    return agent.spendTask;
+  }
+
+  /** Every run the ceilings count: recorded usage, runs a crash ended (carried), and the runs in flight now. */
+  private spendRuns(now: number): SpendRun[] {
+    const runs = this.d.store.listUsage().map(spendRunOf);
+    runs.push(...this.d.store.listCarriedSpend());
+    for (const f of this.spendFlights.values()) runs.push(f.measure(now));
+    return runs;
+  }
+
+  /** The first ceiling a run of this project and task has reached (none configured: undefined, without counting anything). */
+  private spendHitFor(projectId: Id, taskId: Id | undefined, now: number): SpendHit | undefined {
+    const checks = checksFor(this.d.store.getSettings(), projectId, taskId);
+    return checks.length ? firstHit(checks, this.spendRuns(now), this.d.store.listSpendGrants(), now) : undefined;
+  }
+
+  /** Spend against the ceilings for the UI (getSpendStatus): global ones, a project's, and a conversation's current task. */
+  spendStatus(projectId?: Id, conversationId?: Id): SpendStatus {
+    const now = this.d.ledger.time();
+    const s = this.d.store.getSettings();
+    const conv = conversationId ? this.d.store.getConversation(conversationId) : undefined;
+    if (conversationId && (!conv || (projectId && conv.projectId !== projectId))) throw new Error('Unknown conversation');
+    const pid = projectId ?? conv?.projectId;
+    const owner = conv ? this.d.store.getAgent(conv.agentId) : undefined;
+    const taskId = conv && owner ? this.spendTaskFor(owner, conv.id) : undefined;
+    const checks = pid ? checksFor(s, pid, taskId) : checksFor({ spendCeilings: s.spendCeilings }, '', undefined);
+    return { estimate: true, entries: statusOf(checks, this.spendRuns(now), this.d.store.listSpendGrants(), now) };
+  }
+
+  /**
+   * Before a run starts: a ceiling already reached keeps it from starting unless the user allows one more limit's worth (an explicit
+   * yes through a `permission` event; no answer in time is a no, never a yes). Returns why the run may not start, or undefined.
+   */
+  private async spendGate(agent: AgentRecord, o: RoutedOptions, taskId: Id | undefined): Promise<string | undefined> {
+    // Each yes extends one ceiling; another scope may be reached too, so look again (at most once per scope).
+    for (let i = 0; i <= SPEND_SCOPES.length; i++) {
+      const hit = this.spendHitFor(agent.projectId, taskId, this.d.ledger.time());
+      if (!hit) return undefined;
+      if (o.signal.aborted) return describeHit(hit);
+      if (this.spendDenied.has(hit.key)) return `${describeHit(hit)} You declined to continue; send a new message to be asked again.`;
+      if (!(await this.askSpend(agent, o.conversationId, hit, o.signal))) return `${describeHit(hit)} Not continued: Harbor spends more only after your explicit yes.`;
+    }
+    return undefined;
+  }
+
+  /** One question per ceiling: every run waiting on it shares the answer. A yes is persisted; a no holds until the user's next message. */
+  private askSpend(agent: AgentRecord, conversationId: Id, hit: SpendHit, signal: AbortSignal): Promise<boolean> {
+    const open = this.spendAsks.get(hit.key);
+    if (open) return open;
+    const journal = (text: string) => this.log({ kind: 'spend', projectId: agent.projectId, conversationId, agentId: agent.id, text: `${hit.scope} ceiling${hit.projectId && hit.scope !== 'task' ? ' (project)' : ''}: ${text}` });
+    journal(`reached (${hit.unit}, estimate); asked the user`);
+    const pending = this.askTool(agent, conversationId, ++this.runSeq, { tool: SPEND_TOOL, input: {} }, signal, { noRules: true, prompt: continuePrompt(hit) })
+      .then((d) => {
+        if (d.allow) {
+          this.d.store.addSpendGrant(hit.key);
+          journal('extended by one limit after the user\'s yes');
+          this.post(conversationId, 'system', `Continuing: you allowed one more ${describeLimit(hit.limit)} (estimate) ${hit.scope === 'task' ? 'for this request' : `for the next ${hit.scope === 'day' ? '24 hours' : '7 days'}`}.`, { agentId: agent.id });
+        } else if (!signal.aborted) {
+          // A no or no answer in time; a request withdrawn because its run stopped is not the user's answer.
+          this.spendDenied.set(hit.key, hit.scope === 'task' || hit.projectId ? agent.projectId : undefined);
+          journal('not extended');
+        }
+        return d.allow;
+      });
+    this.spendAsks.set(hit.key, pending);
+    void pending.finally(() => { if (this.spendAsks.get(hit.key) === pending) this.spendAsks.delete(hit.key); });
+    return pending;
+  }
+
+  /**
+   * Measures the runs in flight against the ceilings (on a timer and on every usage report a run streams). A reached ceiling stops
+   * every run in its scope; their work so far is kept, and the next run in that scope asks the user first (spendGate). The live
+   * measurements are persisted, so a crash does not forget what these runs had spent.
+   */
+  private spendTick(): void {
+    if (!this.spendFlights.size) return;
+    const settings = this.d.store.getSettings();
+    if (!ceilingsConfigured(settings)) return;
+    const now = this.d.ledger.time();
+    const runs = this.spendRuns(now);
+    const grants = this.d.store.listSpendGrants();
+    const live = [...this.spendFlights.values()];
+    for (const f of live) this.d.store.setSpendFlight(f.key, f.measure(now));
+    const hits = new Map<string, SpendHit>();
+    for (const f of live) {
+      if (f.stopped) continue;
+      const hit = firstHit(checksFor(settings, f.projectId, f.taskId), runs, grants, now);
+      if (hit && !hits.has(hit.key)) hits.set(hit.key, hit);
+    }
+    for (const hit of hits.values()) {
+      const caught = live.filter((f) => !f.stopped && counts(hit, f.measure(now), now));
+      if (!caught.length) continue;
+      for (const f of caught) f.stop(hit);
+      const text = `${describeHit(hit)} Harbor stopped ${caught.length === 1 ? 'the run' : `${caught.length} runs`} in this scope; work so far is kept. Harbor asks you before anything in this scope runs again.`;
+      for (const c of new Set(caught.map((f) => f.conversationId))) this.post(c, 'system', text);
+      this.log({ kind: 'spend', projectId: caught[0]!.projectId, text: `${hit.scope} ceiling reached (${hit.unit}, estimate): stopped ${caught.length} run(s)` });
+    }
+  }
+
   // ------------------------------------------------------------ help requests
 
   private helpRequested(a: AgentRecord, h: HelpRequest): void {
@@ -3084,8 +3323,12 @@ export class Orchestrator {
     const leadCapMs = wd.leadCapMs ?? LEAD_CAP_MS;
     const wdTimer = wd.setTimer ?? defaultTimer;
     const wdNow = wd.now ?? Date.now;
+    // The user request this run's spend counts towards (spend.ts), and the ceilings checked before every attempt.
+    const taskId = this.spendTaskFor(agent, o.conversationId);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const ceiling = await this.spendGate(agent, o, taskId);
+      if (ceiling) return { ok: false, text: '', error: ceiling, stopped: true, spent: true, started, nonce: o.nonce, toolCalls };
       const link = store.getSession(key);
       // Read every attempt: a settings change applies to the next routing decision, not only to new agents.
       const eff = effectiveSettings(store.getSettings(), agent.projectId);
@@ -3215,6 +3458,19 @@ export class Orchestrator {
       });
       const loop: { evidence?: LoopEvidence; noticed?: boolean } = {};
       const cancelCap = wdTimer(() => capStop('hard'), capL ? capL.hardMs : leadCapMs);
+      // Spend ceilings: this run is measured with every other run in flight; a reached ceiling stops it like Harbor's time limit does.
+      const spend: { hit?: SpendHit } = {};
+      const runStart = Date.now();
+      const flight: SpendFlight = {
+        key: `${agent.id}:${runStart}:${attempt}`, projectId: agent.projectId, ...(taskId ? { taskId } : {}),
+        conversationId: agent.role === 'main' ? o.conversationId : agent.parentConversationId || o.conversationId,
+        measure: (now) => liveRunOf({ projectId: agent.projectId, taskId, now, elapsedMs: Date.now() - runStart, tokens: perRunUsage(decision.cli, usage.result(false), prevTotals).tokens }),
+        stop: (hit) => { if (!spend.hit) { spend.hit = hit; flight.stopped = true; runCtl.abort(); } }
+      };
+      this.spendFlights.set(flightKey, flight);
+      let cancelSpend = (): void => {};
+      const armSpend = (): void => { cancelSpend = (this.d.spendTimer ?? defaultTimer)(() => { this.spendTick(); if (!flight.stopped && this.spendFlights.has(flightKey)) armSpend(); }, this.d.spendCheckMs ?? SPEND_CHECK_MS); };
+      if (ceilingsConfigured(store.getSettings())) armSpend();
       try {
         o.onAttempt?.();
         armStall(stallMs);
@@ -3239,7 +3495,7 @@ export class Orchestrator {
               }
             }
           } else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
-          else if (c.kind === 'usage') usage.add(c);
+          else if (c.kind === 'usage') { usage.add(c); this.spendTick(); }
           else if (c.kind === 'limits') { firstLimits ??= c.limits; limits = c.limits; ledger.observe(decision.cli, c.limits); }
           else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; exitedClean = c.exitCode === 0; if (c.text) final = c.text; }
           const v = loopWatch && !loop.evidence && !loop.noticed ? loopWatch.observe(c) : undefined;
@@ -3253,17 +3509,22 @@ export class Orchestrator {
         cancelStall();
         cancelSoft();
         cancelCap();
+        cancelSpend();
         loopWatch?.stop();
         this.inFlight.delete(flightKey);
+        // Its usage event (recorded below, in the same tick) takes over from the live measurement.
+        this.spendFlights.delete(flightKey);
+        store.setSpendFlight(flight.key, undefined);
         o.signal.removeEventListener('abort', onOuterAbort);
       }
 
       const stopped = o.signal.aborted;
       const looped = !!loop.evidence && !stopped && !cap.kind;
       const capped = !!cap.kind && !stopped;
+      const spentStop = !!spend.hit && !stopped && !capped;
       // Exit code 0 after real output but without the CLI's closing event: it finished, the stream just did not say so.
       let noCompletion = false;
-      if (!ok && !stopped && !capped && !looped && exitedClean && parsed > 0 && !rateLimited) {
+      if (!ok && !stopped && !capped && !looped && !spentStop && exitedClean && parsed > 0 && !rateLimited) {
         ok = true; noCompletion = true; error = undefined;
         this.post(o.conversationId, 'system', `${agent.title}: ${decision.cli} ended without a completion event (it exited normally after its output). Harbor counted the run as finished; check that the work is complete.`, { agentId: agent.id });
       }
@@ -3277,7 +3538,7 @@ export class Orchestrator {
         if (!limits) { const during = readingsDuring(ledger.readings(decision.cli), startedAt); if (during.length) limits = during; }
         // A stopped, capped or failed run still costs quota: it records what streamed so far, marked partial (an estimate).
         const own = perRunUsage(decision.cli, usage.result(ok), prevTotals);
-        const event = ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, durationMs: Date.now() - t0, ok, rateLimited: limited, ...(limited && !isModelSpecific(error) ? { cliWide: true } : {}), limits, ...own.tokens });
+        const event = ledger.record({ cli: decision.cli, model: decision.model, projectId: agent.projectId, agentId: agent.id, conversationId: o.conversationId, ...(taskId ? { taskId } : {}), durationMs: Date.now() - t0, ok, rateLimited: limited, ...(limited && !isModelSpecific(error) ? { cliWide: true } : {}), limits, ...own.tokens });
         const sess = store.getSession(key, decision.cli);
         if (sess && own.totals) store.setSession({ ...sess, totals: own.totals });
         this.learnFrom(event, o.role, decision, [...readingsBefore, ...(firstLimits ?? [])], startedAt);
@@ -3295,6 +3556,8 @@ export class Orchestrator {
         const error = capL ? `Harbor stopped this run: ${capReason(cap.kind!, capL)}` : `Harbor stopped this run at its ${Math.round(leadCapMs / 60_000)} minute limit`;
         return { ok: false, text, allText: text, stopped: true, capped: true, capKind: cap.kind, error, started: true, ...base };
       }
+      // A spend ceiling: stopped, resumable once the user allows more, never retried elsewhere (that would spend the same budget).
+      if (spentStop) return { ok: false, text, allText: text, stopped: true, spent: true, error: `Harbor stopped this run: ${describeHit(spend.hit!)}`, started: true, ...base };
       lastError = `${decision.cli} failed${limited ? ' (rate limit)' : overloaded ? ' (overloaded)' : ''}: ${clip(error ?? 'unknown error', 300)}`;
       const retryKind: 'oauth' | 'network' | 'overload' | undefined = limited ? undefined : overloaded ? 'overload' : transientKind(error);
       if (retryKind) {

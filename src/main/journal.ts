@@ -6,7 +6,7 @@ import type { Id } from '../shared/api';
  * What went wrong in Harbor's own runs, so recurring problems become backlog items instead of anecdotes.
  * Append-only JSONL beside state.json; kept out of state.json so it never slows down the main store.
  */
-export type JournalKind = 'protocol' | 'helper-failed' | 'lead-failed' | 'fallback' | 'checks-failed' | 'outside-claim' | 'triage' | 'permission' | 'rollback' | 'question' | 'loop';
+export type JournalKind = 'protocol' | 'helper-failed' | 'lead-failed' | 'fallback' | 'checks-failed' | 'outside-claim' | 'triage' | 'permission' | 'rollback' | 'question' | 'loop' | 'spend' | 'secret-scan';
 
 export interface JournalEntry { time: number; kind: JournalKind; projectId: Id; conversationId?: Id; agentId?: Id; text: string }
 

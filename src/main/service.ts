@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -24,7 +24,8 @@ import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'getSpendStatus'> & {
+  getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
   setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
   openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
@@ -91,6 +92,9 @@ export interface ServiceOptions {
   codexModels?: () => CodexModel[] | undefined;
   /** Shown by exportDiagnostics (index.ts passes app.getVersion(); this module never imports electron). */
   appVersion?: string;
+  /** How often runs in flight are measured against the spend ceilings, and its timer (tests); defaults in spend.ts. */
+  spendCheckMs?: number;
+  spendTimer?: (fn: () => void, ms: number) => () => void;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -241,7 +245,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     stall: opts.stall,
     questionTimeoutMs: opts.questionTimeoutMs,
     maxAutoTurns: opts.maxAutoTurns,
-    autoApproveChecks: opts.autoApproveChecks
+    autoApproveChecks: opts.autoApproveChecks,
+    spendCheckMs: opts.spendCheckMs,
+    spendTimer: opts.spendTimer
   });
 
   // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
@@ -524,6 +530,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
         notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings,
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
+    },
+    async getSpendStatus(projectId, conversationId) {
+      if (projectId) needProject(projectId);
+      return orchestrator.spendStatus(projectId ?? undefined, conversationId ?? undefined);
     },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },

@@ -3,6 +3,8 @@ import type { Need } from './clis/capabilities';
 import type { Effort } from './adapters/types';
 import type { TaskSize } from './calibration';
 import type { Complexity } from './router';
+import type { SecretFinding } from './secretScan';
+import type { SpendGrant, SpendRun } from './spend';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
 export interface AgentRecord extends Agent {
@@ -85,7 +87,11 @@ export interface AgentRecord extends Agent {
    * Who stopped it: the user, Harbor's time limit, Harbor's loop guard (loopGuard.ts), or a Harbor restart (absent on older records =
    * the user). Only Harbor's own stops (cap, loop) wake the lead.
    */
-  stopKind?: 'user' | 'cap' | 'restart' | 'loop';
+  stopKind?: 'user' | 'cap' | 'restart' | 'loop' | 'spend';
+  /** The task (user request) whose spend this helper counts towards (spend.ts): the user message it was delegated under. */
+  spendTask?: Id;
+  /** Harbor's secret scan of this agent's branch at `commit` (secretScan.ts): types and locations only, never values. */
+  secretScan?: SecretScanRecord;
   /** Automatic resumes after a cap stop (softCap.MAX_CAP_RESUMES). */
   capResumes?: number;
   /** Automatic resumes after a loop stop (loopGuard.MAX_LOOP_RESUMES). */
@@ -102,6 +108,12 @@ export interface AgentRecord extends Agent {
   leadAsks?: number;
 }
 type Id = string;
+
+/**
+ * One secret scan of a branch. `findings` are those the allowlist did not cover (at most secretScan.MAX_FINDINGS); `total` counts
+ * them all. `overridden`: the user allowed integrating them (an explicit yes). `failed`: git could not produce the diff.
+ */
+export interface SecretScanRecord { commit: string; findings: SecretFinding[]; total: number; allowed: number; overridden?: boolean; truncated?: boolean; failed?: boolean }
 
 /**
  * Delivery of one helper result (revision + delivery generation + terminal state) to the lead. A mark for another result says nothing
@@ -149,6 +161,8 @@ export interface SessionLink {
 /** One observed unit of consumption. Never fabricated: fields stay undefined when unknown. */
 export interface UsageEvent {
   id: Id; time: number; cli: CliId; model: string; projectId: Id; agentId: Id; conversationId?: Id;
+  /** The task (user request) the run worked on, for the spend ceilings (spend.ts). Absent on older events. */
+  taskId?: Id;
   inputTokens?: number; outputTokens?: number; costUsd?: number; durationMs: number; ok: boolean;
   /** Claude prompt-cache tokens; `inputTokens` excludes them. */
   cacheReadTokens?: number; cacheWriteTokens?: number;
@@ -193,4 +207,11 @@ export interface State {
   toolRules?: Record<Id, ToolRule[]>;
   /** Hash of the `.harbor/checks.json` commands the user approved per project; changed commands need a new approval. */
   checksApproved?: Record<Id, string>;
+  /** Spend ceiling extensions the user allowed (spend.ts); pruned once they no longer matter. */
+  spendGrants?: SpendGrant[];
+  /** Last measured spend of runs in flight, by run key; a run Harbor never saw end (a crash) moves to `spendCarried` at load. */
+  spendFlights?: Record<string, SpendRun>;
+  spendCarried?: SpendRun[];
+  /** Secret-scan overrides the user allowed, by project: fingerprints of exact findings on an exact commit (secretScan.findingsFingerprint). */
+  secretOverrides?: Record<Id, string[]>;
 }
