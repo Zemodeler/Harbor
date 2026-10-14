@@ -307,7 +307,8 @@ describe('HARBOR_OPEN_DOCUMENT parsing and prompt text', () => {
   });
   it('lead and helper prompts explain the line; the lead prompt stays under its limit', () => {
     for (const text of [LEAD_SYSTEM, systemFor('implementer'), systemFor('reviewer'), SCREENSHOT_INSTRUCTIONS]) expect(text).toContain('HARBOR_OPEN_DOCUMENT: {"path":"<path>","title":"<optional>"}');
-    expect(LEAD_SYSTEM.length).toBeLessThan(7950);
+    // Raised from 8000/7950 when project notes (HARBOR_NOTE) joined screenshots and documents in one prompt (roadmap wave 1).
+    expect(LEAD_SYSTEM.length).toBeLessThan(8400);
   });
 });
 
