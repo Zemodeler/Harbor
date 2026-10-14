@@ -64,6 +64,19 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
   const out: Partial<Settings> = { ...patch, ...scoped(patch as Record<string, unknown>) };
   if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') throw new Error('keepRunningInBackground must be a boolean.');
   if ('editor' in patch && patch.editor !== undefined && !['code', 'code-insiders', 'cursor', 'windsurf'].includes(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
+  if ('cliPaths' in patch) {
+    const cp: unknown = patch.cliPaths;
+    if (cp !== undefined && !isObj(cp)) throw new Error('cliPaths must map a CLI id to an executable path.');
+    const map: Record<CliId, string> = {};
+    for (const [cli, v] of Object.entries(cp ?? {})) {
+      const p = typeof v === 'string' ? v.trim() : v;
+      if (p === undefined || p === '') { map[cli] = ''; continue; }
+      const problem = typeof p !== 'string' ? 'must be text' : p.length > 1024 ? 'is too long' : /[\0\r\n"%]/.test(p) ? 'contains a quote, % or a line break' : !/^([a-zA-Z]:[\\/]|[\\/])/.test(p) ? 'must be an absolute path' : undefined;
+      if (problem) throw new Error(`cliPaths.${cli} ${problem}.`);
+      map[cli] = p as string;
+    }
+    out.cliPaths = map;
+  }
   if ('projectOverrides' in patch) {
     const po: unknown = patch.projectOverrides;
     if (po === undefined) out.projectOverrides = undefined;
@@ -88,6 +101,11 @@ export function applySettingsPatch(cur: Settings, patch: Partial<Settings>): Set
     const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
     for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
     next.projectOverrides = merged;
+  }
+  if ('cliPaths' in p) {
+    const merged: Record<CliId, string> = { ...(cur.cliPaths ?? {}) };
+    for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
+    if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
   }
   for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
     if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];

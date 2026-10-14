@@ -5,7 +5,7 @@ import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCo
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
-import { discoverClis, loginCommand, toStatus, type ResolvedCli } from './clis/discovery';
+import { cliPathProblem, defaultDiscoveryDeps, discoverClis, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
 import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
 import { mergeCodexModels, type CodexModel } from './clis/codexModels';
 import { CLI_DEFINITIONS } from './clis/registry';
@@ -14,7 +14,7 @@ import { Git } from './git';
 import { GitView } from './gitView';
 import { isEditorId } from './launcher';
 import { Orchestrator, toAgent, type OrchestratorDeps } from './orchestrator';
-import type { ProcessKiller } from './proc';
+import type { ProcessKiller, Runner } from './proc';
 import { newId, Store } from './store';
 import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
@@ -53,8 +53,13 @@ export interface ServiceOptions {
   openFolder?: (path: string) => Promise<void>;
   /** Opens a terminal or the editor on a folder (and optionally one file inside it); injected so this module never imports electron. */
   launch?: (kind: 'terminal' | 'editor', target: { dir: string; file?: string }, editor?: EditorId) => Promise<void>;
+  /** Executable picker for browseCliPath(); injected so this module never imports electron. */
+  pickFile?: () => Promise<string | undefined>;
   /** Replace discovery (tests). */
   discover?: () => Promise<ResolvedCli[]>;
+  /** Process runner and file check for CLI checks that bypass `discover` (testCliPath; tests inject fakes). */
+  cliRunner?: Runner;
+  isFile?: (path: string) => boolean;
   /** Replace adapter construction (tests). */
   adapterFor?: (cli: CliId, resolved: ResolvedCli | undefined) => CliAdapter | undefined;
   ledger?: LedgerOptions;
@@ -173,6 +178,16 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const dataRoot = opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test');
   const worktreesRoot = opts.worktreesRoot ?? join(dataRoot, 'worktrees');
   let clis: ResolvedCli[] = [];
+  const isFile = opts.isFile ?? isFilePath;
+  const discoveryDeps = (cliPaths?: Record<CliId, string>) => ({ ...defaultDiscoveryDeps(cliPaths), isFile, ...(opts.cliRunner ? { run: opts.cliRunner } : {}) });
+  /** A Settings executable path as given, refused with a readable message unless it is an absolute path to an existing file. */
+  const checkedCliPath = (cli: CliId, path: unknown): string => {
+    const p = typeof path === 'string' ? path.trim() : path;
+    const problem = cliPathProblem(p);
+    if (problem) throw new Error(`The path for ${cli} ${problem}.`);
+    if (!isFile(p as string)) throw new Error(`${p as string} is not an existing file. Choose the CLI's executable (.exe, .cmd or .bat).`);
+    return p as string;
+  };
 
   const defaultAdapter = (id: CliId, r?: ResolvedCli): CliAdapter | undefined => {
     if (!r?.installed || !r.path) return undefined;
@@ -264,7 +279,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // startup chain any missing CLI is re-checked, including ones that are genuinely absent (they just stay missing).
   const refresh = async (attempt = 0, startup = false): Promise<ResolvedCli[]> => {
     if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
-    clis = await (opts.discover ?? discoverClis)();
+    clis = await (opts.discover ? opts.discover() : discoverClis(discoveryDeps(store.getSettings().cliPaths)));
     for (const c of clis) { if (c.installed) seenInstalled.add(c.id); bus.emit({ type: 'cli', cli: toStatus(c) }); }
     const lost = clis.some((c) => !c.installed && (startup || seenInstalled.has(c.id)));
     if (lost && attempt < recheckDelays.length) {
@@ -306,6 +321,16 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (process.platform !== 'win32') throw new Error('Opening a login terminal is only implemented on Windows');
       // Visible terminal; Harbor never reads or stores credentials.
       spawn('cmd.exe', ['/d', '/c', loginCommand(def, r.path)], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
+    },
+    async testCliPath(cliId, path) {
+      const def = CLI_DEFINITIONS.find((d) => d.id === cliId);
+      if (!def) throw new Error(`Unknown CLI ${String(cliId)}.`);
+      // Runs only the CLI's own version and status commands, the same ones discovery runs; nothing is saved.
+      return toStatus(await resolveCli(def, discoveryDeps({ [cliId]: checkedCliPath(cliId, path) })));
+    },
+    async browseCliPath() {
+      if (!opts.pickFile) throw new Error('Choosing a file is available in the desktop app.');
+      return (await opts.pickFile()) ?? null;
     },
 
     async listProjects() { return store.listProjects(); },
@@ -497,9 +522,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async getUsage() { await ready; return ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)); },
     async getSettings() { return store.getSettings(); },
     async setSettings(s) {
+      // An executable path must exist when it is saved; the shape (absolute, no quotes) is checked by the store.
+      const paths = s && typeof s === 'object' && s.cliPaths && typeof s.cliPaths === 'object' ? Object.entries(s.cliPaths) : [];
+      for (const [cli, p] of paths) if (typeof p === 'string' && p.trim()) checkedCliPath(cli, p);
       const next = store.setSettings(s);
       // A raised concurrency limit should start waiting work now, not at the next unrelated event.
       for (const p of store.listProjects()) orchestrator.pump(p.id);
+      // A new executable path takes effect now (cli events follow), not at the next manual refresh.
+      if (s && typeof s === 'object' && 'cliPaths' in s) await refresh();
       return next;
     },
     async answerPermission(requestId, allow, o) {

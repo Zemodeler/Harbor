@@ -7,6 +7,7 @@ import { WorkspaceSettings } from './WorkspaceSettings';
 import { RoutingFields, RoutingSettings } from './RoutingSettings';
 import { UsageWindows } from './UsageWindows';
 import { ToolRules } from './ToolRules';
+import { CliPathField } from './CliPath';
 import { canExportDiagnostics, Diagnostics } from './Diagnostics';
 import s from '../Harbor.module.css';
 
@@ -52,6 +53,7 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
           <small>{cli.version ? `Version ${cli.version}` : 'Version unavailable'}{cli.note ? ` · ${cli.note}` : ''}</small>
           <div className={s.connectionActions}>{cli.installed && !cli.signedIn && cli.authState !== 'unknown' ? <button disabled={pending} onClick={() => void action(() => state.run(() => state.api.openLogin(cli.id)))}>Sign in to {cli.name}</button> : null}
             <label><input type="checkbox" disabled={!cli.installed || pending} checked={state.settings?.cliOverrides[cli.id]?.enabled !== false} onChange={e => void action(() => state.updateSettings({ cliOverrides: { ...state.settings!.cliOverrides, [cli.id]: { enabled: e.target.checked } } }))}/> Enable {cli.name}</label></div>
+          <CliPathField key={`${cli.id}:${state.settings?.cliPaths?.[cli.id] ?? ''}`} api={state.api} cli={cli} saved={state.settings?.cliPaths?.[cli.id]} disabled={pending} onSave={path => state.saveSettings({ cliPaths: { [cli.id]: path } })}/>
         </div>)}
       </> : tab === 'Routing' ? <>
         <h3>Routing defaults</h3><p>Choose how Harbor assigns work to your enabled connections.</p>

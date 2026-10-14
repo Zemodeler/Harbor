@@ -54,6 +54,10 @@ export function validateInvoke(method: string, args: unknown[]): void {
       }
       break;
     }
+    case 'testCliPath':
+      if (!isId(args[0])) bad('CLI id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > MAX_PATH || CONTROL.test(args[1])) bad('path must be an executable path');
+      break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

@@ -102,6 +102,10 @@ if (startupAction === 'start') app.whenReady().then(() => {
     pickFolder: async () => {
       const r = await dialog.showOpenDialog({ properties: ['openDirectory'], title: 'Open project folder' });
       return r.canceled ? undefined : r.filePaths[0];
+    },
+    pickFile: async () => {
+      const r = await dialog.showOpenDialog({ properties: ['openFile'], title: 'Choose the CLI executable', filters: [{ name: 'Programs', extensions: ['exe', 'cmd', 'bat', 'com'] }, { name: 'All files', extensions: ['*'] }] });
+      return r.canceled ? undefined : r.filePaths[0];
     }
   });
   let tray: Tray | undefined;
