@@ -6,6 +6,7 @@ import { isEditorId } from './launcher';
 import { cliPathProblem } from './clis/discovery';
 import { withRating } from './ratings';
 import { mergeNote, type NoteDraft } from './knowledge';
+import { normalizeRemoteSettings } from './remote/guard';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
@@ -777,6 +778,7 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
     }
     out.cliPaths = map;
   }
+  if ('remote' in patch) out.remote = normalizeRemoteSettings(patch.remote);
   if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
   if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {

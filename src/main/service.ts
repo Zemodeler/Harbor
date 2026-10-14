@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, SpendStatus } from '../shared/api';
+import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -35,6 +35,7 @@ import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import type { RepoMapCache } from './repoMap';
+import { RemoteTokens } from './remote/tokens';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStoredPath } from './images';
 import { ScreenshotBroker, type Capturer } from './screenshots';
@@ -46,7 +47,10 @@ import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
 type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting';
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote'> & Required<Pick<HarborApi, Extras>> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
+  createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
+  listRemoteTokens(): Promise<RemoteTokenInfo[]>;
+  revokeRemoteToken(id: Id): Promise<void>;
   listProjectNotes(projectId: Id): Promise<ProjectNote[]>;
   removeProjectNote(projectId: Id, noteId: Id): Promise<ProjectNote[]>;
   getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
@@ -72,6 +76,8 @@ export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'g
   /** Main-process extras (not part of the renderer contract). */
   readonly orchestrator: Orchestrator;
   readonly store: Store;
+  /** Hashed remote-API tokens (remote/server.ts verifies against them). */
+  readonly remoteTokens: RemoteTokens;
   whenIdle(timeoutMs?: number): Promise<void>;
   /**
    * Quitting: aborts every run, ends the CLI processes Harbor started (through the injected killer) and persists. The abort and
@@ -354,6 +360,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   });
 
   // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
+  // Hashes only (see remote/tokens.ts); in memory without a data folder, like the Store.
+  const remoteTokens = new RemoteTokens(opts.dataDir ? join(opts.dataDir, 'remote-tokens.json') : undefined);
   const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
 
   // ---- skills (plan section 3): the library lives in the data folder; without one (tests) nothing can be imported.
@@ -517,12 +525,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
 
   return {
-    orchestrator, store,
+    orchestrator, store, remoteTokens,
     whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
     shutdown: async () => {
       if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
       await orchestrator.shutdown(); // aborts and flushes before its first await
       store.flush();
+      remoteTokens.flush();
     },
     activeRuns: () => orchestrator.activeRunCount(),
     onResume: () => orchestrator.rearmTimers(),
@@ -1008,6 +1017,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       store.removeProjectNote(projectId, noteId);
       return store.listProjectNotes(projectId);
     },
+    async createRemoteToken(name, scope) {
+      if (scope === 'full' && store.getSettings().remote?.allowFullScope !== true) throw new Error('Full remote access is off. Turn on remote.allowFullScope in settings first, or create a read-only or answer-permissions token.');
+      return remoteTokens.create(name, scope);
+    },
+    async listRemoteTokens() { return remoteTokens.list(); },
+    async revokeRemoteToken(id) { remoteTokens.revoke(id); },
     onEvent: (cb) => bus.on(cb)
   };
 }

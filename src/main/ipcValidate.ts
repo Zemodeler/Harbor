@@ -209,6 +209,18 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!o || typeof o !== 'object' || Array.isArray(o) || !isId(o.cli)) bad('options must name a CLI');
       break;
     }
+    case 'createRemoteToken':
+      if (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > 80 || /[\x00-\x1f]/.test(args[0])) bad('name must be 1 to 80 characters');
+      if (args[1] !== 'read-only' && args[1] !== 'answer-permissions' && args[1] !== 'full') bad('scope must be read-only, answer-permissions or full');
+      break;
+    case 'revokeRemoteToken':
+      if (!isId(args[0])) bad('token id must be a short non-empty string');
+      break;
+    case 'answerPermission':
+      if (!isId(args[0])) bad('request id must be a short non-empty string');
+      if (typeof args[1] !== 'boolean') bad('allow must be true or false');
+      if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'object' || Array.isArray(args[2]))) bad('options must be an object');
+      break;
     case 'getSpendStatus':
       if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
       if (args[1] !== undefined && args[1] !== null && !isId(args[1])) bad('conversation id must be a short non-empty string');
