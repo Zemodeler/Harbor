@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
-import { cliPathProblem, defaultDiscoveryDeps, discoverClis, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
+import { cliPathProblem, defaultDiscoveryDeps, discoverClis, findExecutable, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
 import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
 import { mergeCodexModels, type CodexModel } from './clis/codexModels';
 import { CLI_DEFINITIONS } from './clis/registry';
@@ -34,6 +35,10 @@ import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStor
 import { ScreenshotBroker, type Capturer } from './screenshots';
 import { canOpenExternally, openDocumentAt, resolveDocumentPath, type DocumentRoot } from './documents';
 import { Transfer } from './bundles/transfer';
+import { MCP_SERVERS_FILE, McpRegistry, validateMcpServer } from './mcp/registry';
+import { planMcpRun, type McpTarget } from './mcp/materialize';
+import { probeMcpServer, type McpFetch } from './mcp/probe';
+import { discoverCliMcpServers } from './mcp/discover';
 
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported'> & {
   previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
@@ -143,6 +148,10 @@ export interface ServiceOptions {
   pickBundleSave?: (defaultName: string) => Promise<string | undefined>;
   /** Open dialog for a bundle or an account export (browseImportFile). */
   pickImportFile?: (kind: 'bundle' | 'chatExport') => Promise<string | undefined>;
+  /** Network access for testing an http/sse MCP server (index.ts passes fetch). Absent = such tests report that they need the app. */
+  mcpFetch?: McpFetch;
+  /** How long testMcpServer waits for a server (tests shorten it); default 20 s (mcp/probe.ts). */
+  mcpTestTimeoutMs?: number;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -337,6 +346,24 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   /** How a run on this CLI can reach a skill folder outside its working folder (skills/delivery.ts). */
   const skillAccess = (cli: CliId): SkillAccess => (cli === 'claude' ? 'readDirs' : cli === 'codex' ? 'readable' : customOf(cli)?.run.readDir ? 'readDirs' : 'inline');
   const nativeSkills = (cli: CliId): boolean => (clis.find((c) => c.id === cli)?.features ?? CLI_DEFINITIONS.find((d) => d.id === cli)?.features)?.nativeSkills === true;
+  // ---- MCP servers (plan section 5): one registry in the data folder, written out per CLI for each run (mcp/materialize.ts).
+  const mcp = new McpRegistry(opts.dataDir ? join(opts.dataDir, MCP_SERVERS_FILE) : undefined, opts.now);
+  const mcpTarget = (cli: CliId): McpTarget => {
+    const features = clis.find((c) => c.id === cli)?.features ?? CLI_DEFINITIONS.find((d) => d.id === cli)?.features;
+    if (features?.mcp === false) return 'none';
+    return cli === 'claude' ? 'claude' : cli === 'codex' ? 'codex' : customOf(cli)?.run.mcp ? 'custom' : 'none';
+  };
+  /** Running a stdio server's command for a test needs the user's explicit OK naming exactly that command (like a custom CLI). */
+  const confirmCommand = (command: string, o: unknown) => {
+    const c = o && typeof o === 'object' ? (o as { confirmCommand?: unknown }).confirmCommand : undefined;
+    const same = typeof c === 'string' && (c.trim() === command || (isAbsolute(command) && normPath(c.trim()) === normPath(command)));
+    if (!same) throw new Error(`Confirm that Harbor may run ${command} first.`);
+  };
+  /** A bare command is looked up on PATH (with PATHEXT, so npx finds npx.cmd); an absolute one must be an existing file. */
+  const resolveMcpCommand = (command: string): string | undefined => {
+    if (isAbsolute(command)) return isFile(command) ? command : undefined;
+    return findExecutable({ id: 'mcp-server', name: command, exeNames: [command], envVar: '', extraDirs: () => [], versionArgs: [], loginArgs: [], models: [] }, { env: process.env, platform: process.platform, isFile });
+  };
   const projectRef = (id: Id | undefined) => { if (id === undefined || id === null) return undefined; const p = needProject(id); return { id: p.id, path: p.path }; };
   // ---- screenshots and shown images (plan section 4): both land in the conversation's attachments folder, never anywhere else.
   const screenshots = new ScreenshotBroker({
@@ -361,6 +388,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const r = p && skills.forRun({ id: p.id, path: p.path }, cli, cwd, skillAccess(cli), nativeSkills(cli));
       return r ? { system: skillsSection(r.delivery), readableDirs: r.delivery.readDirs } : undefined;
     },
+    mcpFor: (projectId, cli, run) => {
+      const plan = planMcpRun({
+        servers: mcp.enabledFor(projectId), cliName: clis.find((c) => c.id === cli)?.name ?? cli, target: mcpTarget(cli), permission: run.permission,
+        // Only Claude answers tool permission prompts through Harbor (adapters/types.ts onToolPermission), and only in edit runs.
+        hostAsks: cli === 'claude' && run.permission === 'edit' && run.asks, claudeOwnMcp: store.getSettings().claudeOwnMcp === true
+      });
+      return { ...(plan.run ? { mcp: plan.run } : {}), notes: plan.notes };
+    },
     catalog,
     neutralDir: opts.dataDir ? join(opts.dataDir, 'neutral') : undefined,
     now: opts.now,
@@ -379,7 +414,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
   // running conversations instead of only in a log nobody reads. Journal entries use a project-less id (diagnostics lists them).
   for (const n of store.startupNotices) journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: n });
-  for (const w of [...loadedCatalog.warnings, ...loadedCustom.warnings]) { console.warn(`[harbor] ${w}`); journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: w }); }
+  for (const w of [...loadedCatalog.warnings, ...loadedCustom.warnings, ...mcp.warnings]) { console.warn(`[harbor] ${w}`); journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: w }); }
   store.onFlushError = (e) => {
     journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: `Harbor could not save its state (${e.message}). It keeps trying; recent changes exist only in memory until then.` });
     for (const p of store.listProjects()) for (const c of store.listConversations(p.id)) {
@@ -550,6 +585,40 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (kind !== 'folder' && kind !== 'zip') throw new Error('Choose a folder or a .zip file.');
       if (!opts.pickSkillSource) throw new Error('Choosing a file is available in the desktop app.');
       return (await opts.pickSkillSource(kind)) ?? null;
+    },
+
+    // MCP servers: the registry is plain text in the data folder; values never reach logs, diagnostics, bundles or run details.
+    async listMcpServers(projectId) { return mcp.list(projectRef(projectId)?.id); },
+    async saveMcpServer(server, o) {
+      const previous = o && typeof o === 'object' && typeof o.previousName === 'string' ? o.previousName : undefined;
+      const projectId = o && typeof o === 'object' ? projectRef(o.projectId)?.id : undefined;
+      mcp.save(server, previous);
+      return mcp.list(projectId);
+    },
+    async removeMcpServer(name, o) {
+      const projectId = o && typeof o === 'object' ? projectRef(o.projectId)?.id : undefined;
+      mcp.remove(name);
+      return mcp.list(projectId);
+    },
+    async setMcpServerEnabled(name, enabled, projectId) {
+      const id = projectRef(projectId)?.id;
+      mcp.setEnabled(name, enabled, id);
+      return mcp.list(id);
+    },
+    async testMcpServer(server, o) {
+      const v = validateMcpServer(server);
+      if (!v.server) throw new Error(`This MCP server cannot be tested:\n- ${v.problems.join('\n- ')}`);
+      const s = v.server;
+      if (s.transport === 'stdio') confirmCommand(s.command!, o);
+      // A fresh empty folder outside every project, removed afterwards.
+      const cwd = mkdtempSync(join(tmpdir(), 'harbor-mcp-test-'));
+      try {
+        return await probeMcpServer(s, { cwd, resolveCommand: resolveMcpCommand, fetch: opts.mcpFetch, timeoutMs: opts.mcpTestTimeoutMs, clientVersion: opts.appVersion });
+      } finally { try { rmSync(cwd, { recursive: true, force: true }); } catch { /* a server that is still exiting may hold it */ } }
+    },
+    async listCliMcpServers(projectId) {
+      const p = projectRef(projectId);
+      return discoverCliMcpServers({ home: opts.chatHomes?.home, codexHome: opts.chatHomes?.codex }, p?.path);
     },
 
     async listProjects() { return store.listProjects(); },
@@ -782,7 +851,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
         counts: { projects: projects.length, conversations: projects.reduce((n, p) => n + store.listConversations(p.id).length, 0), agents: agents.length, agentsByState: byState },
         journal: [...projects.flatMap((p) => journal.list(p.id)), ...journal.list(HARBOR_JOURNAL)].sort((a, b) => a.time - b.time).slice(-40),
         logTail: opts.dataDir ? readLogTail(join(opts.dataDir, 'logs'), 100) : '',
-        notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings, ...loadedCustom.warnings,
+        notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings, ...loadedCustom.warnings, ...mcp.warnings,
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
     },

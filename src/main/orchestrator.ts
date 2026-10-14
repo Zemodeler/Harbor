@@ -48,6 +48,7 @@ import { CLI_DEFINITIONS } from './clis/registry';
 import { resolveShownImage } from './images';
 import { resolveDocumentPath, type DocumentRoot } from './documents';
 import type { ScreenshotBroker, ScreenshotLine, ShotOutcome } from './screenshots';
+import type { McpRun } from './mcp/materialize';
 
 export interface OrchestratorDeps {
   store: Store;
@@ -65,6 +66,11 @@ export interface OrchestratorDeps {
    * folders the run must be able to read. Undefined = no skills. Asked after routing, because it depends on the chosen CLI.
    */
   skillsFor?: (projectId: Id, cli: CliId, cwd: string) => { system: string; readableDirs: string[] } | undefined;
+  /**
+   * The project's MCP servers for one lead or helper run on `cli` (plan section 5, mcp/materialize.ts planMcpRun) and notes for the
+   * run details (server names only). `asks` = the run has Harbor's tool permission handler. Asked after routing, per attempt.
+   */
+  mcpFor?: (projectId: Id, cli: CliId, run: { permission: RoutedOptions['permission']; asks: boolean }) => { mcp?: McpRun; notes: string[] } | undefined;
   /** Capability catalog (editable data); defaults to the built-in one. */
   catalog?: CatalogEntry[];
   worktreesRoot: string;
@@ -3347,6 +3353,12 @@ export class Orchestrator {
         catch (e) { this.log({ kind: 'triage', projectId: agent.projectId, text: `skills could not be listed: ${String((e as Error).message ?? e)}` }); }
       }
       const system = skills?.system ? `${o.system}\n\n${skills.system}` : o.system;
+      // MCP servers depend on the CLI just chosen too (support, whether it can ask about tool calls, what it can be given).
+      let mcp: McpRun | undefined, mcpNotes: string[] = [];
+      if (!o.lean && this.d.mcpFor) {
+        try { const m = this.d.mcpFor(agent.projectId, decision.cli, { permission: o.permission, asks: !!onToolPermission }); mcp = m?.mcp; mcpNotes = m?.notes ?? []; }
+        catch (e) { this.log({ kind: 'triage', projectId: agent.projectId, text: `MCP servers could not be prepared: ${String((e as Error).message ?? e)}` }); }
+      }
 
       // `final` is the CLI's own final answer; the joined `text` also holds mid-run narration that must not become the report.
       let text = '', final = '', ok = false, error: string | undefined, rateLimited = false;
@@ -3358,6 +3370,7 @@ export class Orchestrator {
       let parsed = 0, exitedClean = false; // parsed = chunks of real output (text, tool calls, usage); a bare session id is not output
       const details = detailsOf(decision);
       if (o.complexityNote) details.reason = `${details.reason}\n• ${o.complexityNote}`;
+      if (mcpNotes.length) details.reason = `${details.reason}\n${mcpNotes.map((n) => `• ${n}`).join('\n')}`;
       const t0 = Date.now();
       // The provider's readings just before the run: with those it prints during the run they give a quota-per-token sample.
       const readingsBefore = ledger.readings(decision.cli);
@@ -3403,7 +3416,7 @@ export class Orchestrator {
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.

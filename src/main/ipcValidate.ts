@@ -104,6 +104,35 @@ export function validateInvoke(method: string, args: unknown[]): void {
     case 'browseSkillSource':
       if (args[0] !== 'folder' && args[0] !== 'zip') bad('kind must be folder or zip');
       break;
+    case 'listMcpServers':
+    case 'listCliMcpServers':
+      if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'saveMcpServer':
+    case 'testMcpServer': {
+      const [srv, o] = args;
+      if (!srv || typeof srv !== 'object' || Array.isArray(srv)) bad('server must be an object');
+      let size = Infinity;
+      try { size = JSON.stringify(srv).length; } catch { /* cyclic: rejected below */ }
+      if (size > MAX_DESCRIPTOR) bad(`server must be plain JSON of at most ${MAX_DESCRIPTOR} characters`);
+      if (o !== undefined && o !== null) {
+        if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+        const x = o as { previousName?: unknown; projectId?: unknown; confirmCommand?: unknown };
+        if (method === 'saveMcpServer' && x.previousName !== undefined && !isId(x.previousName)) bad('previousName must be a server name');
+        if (method === 'saveMcpServer' && x.projectId !== undefined && x.projectId !== null && !isId(x.projectId)) bad('project id must be a short non-empty string');
+        if (method === 'testMcpServer' && x.confirmCommand !== undefined && (typeof x.confirmCommand !== 'string' || x.confirmCommand.length > MAX_PATH || CONTROL.test(x.confirmCommand))) bad('confirmCommand must be the command the user approved');
+      }
+      break;
+    }
+    case 'removeMcpServer':
+    case 'setMcpServerEnabled': {
+      if (!isId(args[0])) bad('server name must be a short non-empty string');
+      if (method === 'setMcpServerEnabled' && args[1] !== null && typeof args[1] !== 'boolean') bad('enabled must be true, false or null');
+      const p = method === 'setMcpServerEnabled' ? args[2] : (args[1] as { projectId?: unknown } | null | undefined)?.projectId;
+      if (method === 'removeMcpServer' && args[1] !== undefined && args[1] !== null && (typeof args[1] !== 'object' || Array.isArray(args[1]))) bad('options must be an object');
+      if (p !== undefined && p !== null && !isId(p)) bad('project id must be a short non-empty string');
+      break;
+    }
     case 'previewScreenshot': {
       if (!isId(args[0])) bad('request id must be a short non-empty string');
       const o = args[1] as { sourceId?: unknown } | undefined | null;

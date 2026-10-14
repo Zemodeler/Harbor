@@ -18,15 +18,15 @@ export const RESERVED_IDS = ['claude', 'codex', 'gemini', 'harbor', 'fake', 'aut
 export const MAX_CUSTOM_CLIS = 20;
 
 const ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
-const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-/** Variables a descriptor may not set: they decide which programs run and how the shell resolves them. */
-const ENV_LOCKED = new Set(['path', 'pathext', 'comspec', 'systemroot', 'windir', 'node_options']);
+export const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** Variables a descriptor (or an MCP server, mcp/registry.ts) may not set: they decide which programs run and how the shell resolves them. */
+export const ENV_LOCKED =new Set(['path', 'pathext', 'comspec', 'systemroot', 'windir', 'node_options']);
 const UNSAFE_TEXT = /[\0\r\n]/;
 const PLACEHOLDER_RE = /\{([A-Za-z]+)\}/g;
 /** Placeholders replaced inside an argument. */
 const INLINE = ['model', 'effort', 'cwd', 'promptFile'] as const;
 /** Placeholders that stand for a whole list of arguments and must be a whole argument on their own. */
-export const SLOTS = ['resumeArgs', 'effortArgs', 'permissionArgs', 'imageArgs', 'readDirArgs'] as const;
+export const SLOTS = ['resumeArgs', 'effortArgs', 'permissionArgs', 'imageArgs', 'readDirArgs', 'mcpArgs'] as const;
 type Slot = typeof SLOTS[number];
 
 /** Variables of the user's environment a custom CLI gets: what Windows programs and Node shims need to start, nothing that holds secrets. */
@@ -315,6 +315,15 @@ export function validateDescriptor(raw: unknown, ctx: ValidationContext): { desc
         else if (da) r.readDir = { args: da };
       }
     }
+    const mcp = run['mcp'];
+    if (mcp !== undefined) {
+      if (!isObj(mcp)) p('run.mcp must be { "args": [...] } with {mcpConfigFile}.');
+      else {
+        const ma = flagList(mcp['args'], 'run.mcp.args', ['mcpConfigFile']);
+        if (ma && !ma.some((a) => a.includes('{mcpConfigFile}'))) p('run.mcp.args must contain {mcpConfigFile}.');
+        else if (ma) r.mcp = { args: ma };
+      }
+    }
     out.run = r;
   }
 
@@ -354,8 +363,9 @@ export function featuresOf(d: CustomCliDescriptor): CliFeatures {
   return {
     images: !!d.run.image, resume: !!d.run.resume && jsonl && !!d.run.output?.map?.session, structuredOutput: jsonl,
     permissionModes: !!d.run.permissions && Object.keys(d.run.permissions).length > 0, readOnly: hasReadOnlyMode(d),
-    // Harbor has no MCP or skills materializer for custom CLIs yet, and a custom CLI never reports quota.
-    mcp: false, nativeSkills: false, usageReadings: false
+    // MCP: Harbor writes its registry to a per-run file when the descriptor says how to pass one (run.mcp). No native skills
+    // materializer for custom CLIs, and a custom CLI never reports quota.
+    mcp: !!d.run.mcp, nativeSkills: false, usageReadings: false
   };
 }
 
