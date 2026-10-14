@@ -10,6 +10,8 @@ import { validateInvoke } from '../src/main/ipcValidate';
 import { MAX_NOTE_CHARS, MAX_NOTES_PER_PROJECT, mergeNote, notesText, selectNotes } from '../src/main/knowledge';
 import { leadPrompt, parseProtocol, stripProtocol, subagentPrompt, LEAD_SYSTEM } from '../src/main/prompts';
 import { createHarborService } from '../src/main/service';
+import { Git } from '../src/main/git';
+import { RepoMapCache } from '../src/main/repoMap';
 import { Store } from '../src/main/store';
 import type { ProjectNote } from '../src/shared/api';
 
@@ -130,7 +132,9 @@ describe('notes and the repo map in a running project', () => {
       return say('Found it.\nHARBOR_RESULT: {"outcome":"done","summary":"x","checks":[]}');
     };
     const adapter = new FakeAdapter('claude', script);
-    const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 2 });
+    const git = new Git();
+    const repoMaps = new RepoMapCache({ git: (c, a) => git.exec(c, a), waitMs: 0 });
+    const svc = createHarborService({ discover: async () => [cli], adapterFor: () => adapter, worktreesRoot: join(tmp(), 'wt'), maxActivePerProject: 2, repoMaps });
     const project = (await svc.addProject(repo))!;
     const [first] = await svc.listConversations(project.id);
     await svc.send(first!.id, 'please remember the flaky test thing');

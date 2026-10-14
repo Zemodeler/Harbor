@@ -10,7 +10,7 @@ const dirs: string[] = [];
 const tmp = () => { const d = mkdtempSync(join(tmpdir(), 'harbor-repomap-')); dirs.push(d); return d; };
 afterEach(() => { while (dirs.length) { try { rmSync(dirs.pop()!, { recursive: true, force: true }); } catch { /* Windows handle */ } } });
 const git = new Git();
-const io = { git: (cwd: string, args: string[]) => git.exec(cwd, args) };
+const io = { git: (cwd: string, args: string[]) => git.exec(cwd, args), waitMs: 0 };
 
 function fixture(root: string): void {
   const w = (p: string, t: string) => { mkdirSync(join(root, p, '..'), { recursive: true }); writeFileSync(join(root, p), t); };
@@ -108,6 +108,24 @@ describe('repo map (reading)', () => {
     expect(cache.builds).toBe(3);
     // Read-only: building the map changed nothing git can see (beyond the test's own edit).
     expect(g('status', '--porcelain')).toBe(before.status);
+  });
+
+  it('never holds a caller longer than waitMs: a slow build serves the previous map, or none, and finishes for the next caller', async () => {
+    const root = tmp();
+    fixture(root);
+    mkdirSync(join(root, '.git'));
+    let release!: () => void;
+    const slow = new Promise<void>((r) => { release = r; });
+    const cache = new RepoMapCache({ waitMs: 30, git: async (cwd, args) => {
+      if (args.includes('status')) { await slow; return { ok: true, stdout: '# branch.oid 1234567890abcdef\0' }; }
+      return { ok: true, stdout: ['package.json', 'src/index.ts'].join('\0') };
+    } });
+    expect(await cache.get(root)).toBe('');
+    release();
+    await new Promise((r) => setTimeout(r, 50));
+    const ready = await cache.get(root);
+    expect(ready).toContain('at 1234567');
+    expect(ready).toContain('src/index.ts');
   });
 
   it('measures the size it adds for this repository', async () => {

@@ -5,9 +5,11 @@
 // even refresh the index), files are only opened for their first bytes, credential files (review.ts `reviewable`) are never
 // opened or listed, symlinks are not followed, and big or binary files are skipped. Works in folders without git (bounded walk).
 // Rendering is pure (`renderRepoMap`) and capped at REPO_MAP_MAX_CHARS; the cache rebuilds only when HEAD or the working tree
-// status changes (without git: every few minutes, or when the folder's top level changes).
+// status changes (without git: every few minutes, or when the folder's top level changes). A cache hit costs one `git status`;
+// a helper waits at most MAP_WAIT_MS for a build. A file that was already modified and is edited again leaves the status unchanged,
+// so its header line can lag until the next commit or status change.
 //
-// Size (measured on this repository, 257 tracked files, 2026-10-14): 5,891 characters, roughly 1,470 tokens, per helper prompt
+// Size (measured on this repository, 261 tracked files, 2026-10-14): 5,935 characters, roughly 1,480 tokens, per helper prompt
 // (reviewers get none); the hard cap is 6,000 characters (~1,500 tokens) whatever the repository's size. Project notes add at most
 // 1,200 characters (~300 tokens) to a helper prompt and 1,600 (~400 tokens) to a lead turn, and only notes the session has not seen.
 
@@ -26,6 +28,8 @@ const HEAD_BYTES = 2048;
 const MAX_READ_SIZE = 512 * 1024;
 /** Without git there is no cheap change signal, so the map is rebuilt at most this often (or when the top level changes). */
 export const NO_GIT_TTL_MS = 5 * 60_000;
+/** A slow disk or a busy git must not hold up a helper: past this it starts with the previous map, or none. */
+export const MAP_WAIT_MS = 2500;
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'out', 'build', 'coverage', '.next', '.nuxt', '.svelte-kit', 'target', 'vendor', '__pycache__', '.venv', 'venv', 'env', '.tox', '.idea', '.vs', '.vscode', 'bin', 'obj', '.cache', '.parcel-cache', '.turbo', '.gradle']);
 const CODE_EXT = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|rs|cs|java|kt|rb|php|swift|c|cc|cpp|h|hpp|scala|lua|ps1|sh)$/i;
@@ -336,26 +340,33 @@ export class RepoMapCache {
   private now: () => number;
   /** Builds done, for tests and diagnostics. */
   builds = 0;
-  constructor(private io: RepoMapIo = {}) { this.now = io.now ?? Date.now; }
+  private waitMs: number;
+  /** `waitMs`: how long a caller waits for a (re)build before it gets the last map (or none); the build finishes for the next caller. */
+  constructor(private io: RepoMapIo & { waitMs?: number } = {}) { this.now = io.now ?? Date.now; this.waitMs = io.waitMs ?? MAP_WAIT_MS; }
 
-  /** The project's map, or '' when nothing could be read. Never throws. */
+  /** The project's map, or '' when nothing could be read. Never throws, and never holds a helper's start longer than `waitMs`. */
   async get(root: string): Promise<string> {
     const id = root.replace(/[\\/]+$/, '').toLowerCase();
-    const inflight = this.building.get(id);
-    if (inflight) return inflight;
-    const p = this.refresh(root, id).catch(() => '').finally(() => this.building.delete(id));
-    this.building.set(id, p);
-    return p;
+    let p = this.building.get(id);
+    if (!p) {
+      p = this.refresh(root, id).catch(() => '').finally(() => this.building.delete(id));
+      this.building.set(id, p);
+    }
+    if (!(this.waitMs > 0)) return p;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<string>((r) => { timer = setTimeout(() => r(this.entries.get(id)?.text ?? ''), this.waitMs); timer.unref?.(); });
+    return Promise.race([p, late]).finally(() => clearTimeout(timer));
   }
 
   private async state(root: string): Promise<{ key: string; io: RepoIoState }> {
     const git = this.io.git;
     if (git && insideGitRepo(root)) {
-      const head = await git(root, ['rev-parse', 'HEAD']).catch(() => undefined);
-      if (head?.ok && head.stdout.trim()) {
-        const st = await git(root, ['--no-optional-locks', 'status', '--porcelain=v1', '-z']).catch(() => undefined);
-        const status = st?.ok ? st.stdout : `unknown:${this.now()}`;
-        return { key: `git:${head.stdout.trim()}:${hash(status)}`, io: { git, head: head.stdout.trim(), dirty: !!status.trim() } };
+      // One process gives both halves of the key: `# branch.oid` is HEAD, the entries are the working-tree status.
+      const st = await git(root, ['--no-optional-locks', 'status', '--porcelain=v2', '--branch', '-z']).catch(() => undefined);
+      const head = st?.ok ? /# branch\.oid ([0-9a-f]{7,64})/.exec(st.stdout)?.[1] : undefined;
+      if (head) {
+        const entries = st!.stdout.split('\0').filter((e) => e && !e.startsWith('# ')).join('\0');
+        return { key: `git:${head}:${hash(entries)}`, io: { git, head, dirty: !!entries } };
       }
     }
     let top = '';
