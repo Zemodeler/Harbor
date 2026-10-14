@@ -111,6 +111,15 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     allow => system(conversationId, allow ? 'Sample screenshot approved. Demo only: nothing was captured.' : 'You declined the screenshot request from the lead. Nothing was captured.'),
     { ms: timeout, ended: () => system(conversationId, 'No answer to the screenshot request: declined, nothing was captured.') });
   };
+  /** "run the checks" in a message: Harbor's checks-trust request (a tool request named 'Harbor checks', remembered per file content). */
+  const askSampleChecks = (conversationId: string, projectId: string) => {
+    const helper = data.agents.find(a => a.projectId === projectId && a.role === 'implementer');
+    const cmds = ['npm test', 'npm run typecheck'], timeout = options.toolTimeoutMs ?? 300000, requestId = id();
+    const prompt = `The project's checks (.harbor/checks.json) have not been approved yet. Harbor would run these commands in a helper's worktree, with your user permissions:\n${cmds.map(c => `  ${c}`).join('\n')}\nAllow them? This approves exactly these commands for this project; if the file changes, Harbor asks again.`;
+    ask({ type: 'permission', requestId, kind: 'tool', tool: 'Harbor checks', prompt, agentId: helper?.id, conversationId, alwaysAllow: false, expiresAt: Date.now() + timeout },
+      allow => system(conversationId, allow ? 'Checks approved for this project (demo only; nothing runs).' : 'Checks not approved; helper claims stay unverified.', helper?.id),
+      { ms: timeout, ended: () => system(conversationId, 'No answer: the checks were not approved.', helper?.id) });
+  };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
   const requireConversation = (conversationId: string) => {
@@ -250,6 +259,12 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       if (mode === 'goal') c.goal = goal!.trim(); else delete c.goal;
       emit({ type: 'conversation', conversation: c }); return copy(c);
     },
+    async setConversationDeadline(conversationId, deadline) {
+      const c = requireConversation(conversationId);
+      if (deadline !== null && !(typeof deadline === 'number' && Number.isFinite(deadline) && deadline > 0)) throw new Error('The deadline must be a time (epoch milliseconds), or null to clear it.');
+      if (deadline === null) delete c.deadline; else c.deadline = Math.round(deadline);
+      emit({ type: 'conversation', conversation: c }); return copy(c);
+    },
     async send(conversationId, text, attachments) {
       const c = requireConversation(conversationId);
       if (c.archived) throw new Error('Restore this conversation before sending a message.');
@@ -266,6 +281,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
       if (/ask for permission/i.test(text)) { askSamplePermissions(conversationId, c.projectId); return; }
       if (/take a screenshot/i.test(text)) { askSampleScreenshot(conversationId, c.agentId); return; }
+      if (/run the checks/i.test(text)) { askSampleChecks(conversationId, c.projectId); return; }
       if (/ask me a question/i.test(text)) {
         const requestId = id(); questions.set(requestId, conversationId);
         c.activity = { state: 'waiting', updated: Date.now(), detail: 'Waiting for your design preference.' };

@@ -5,7 +5,11 @@ import { ScreenshotRequest } from './ScreenshotRequest';
 import s from './PermissionRequests.module.css';
 
 const KIND = { tool: 'Tool permission', conflict: 'File conflict', freeReset: 'Optional free reset', screenshot: 'Screenshot' } as const;
-const titleFor = (p: Permission) => p.kind === 'tool' ? `Allow ${p.tool || 'this tool call'}?` : p.kind === 'conflict' ? 'Allow parallel editing?' : p.kind === 'screenshot' ? 'Allow a screenshot?' : 'Approve optional free reset?';
+/** Harbor asks to run a project's `.harbor/checks.json` through a tool request with this name; the approval is remembered per file content. */
+export const isChecksRequest = (p: Pick<Permission, 'kind' | 'tool'>) => p.kind === 'tool' && p.tool === 'Harbor checks';
+const titleFor = (p: Permission) => isChecksRequest(p) ? 'Run this project’s checks?' : p.kind === 'tool' ? `Allow ${p.tool || 'this tool call'}?` : p.kind === 'conflict' ? 'Allow parallel editing?' : p.kind === 'screenshot' ? 'Allow a screenshot?' : 'Approve optional free reset?';
+/** The checks prompt lists one command per indented line; show those as a list so each can be read. */
+const checkCommands = (prompt: string) => prompt.split(/\r?\n/).filter(l => /^\s{2,}\S/.test(l)).map(l => l.trim());
 
 function remaining(ms: number) {
   if (ms < 60_000) return 'less than a minute left';
@@ -88,7 +92,9 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
           </p> : null}
           {/* A screenshot is approved by picking what to capture in a live preview, never by a plain "allow". */}
           {p.kind === 'screenshot' ? <ScreenshotRequest p={p} api={state.api} busy={busy} answer={(choice, shot) => { if (!answering[p.requestId]) void state.answerPermission(p.requestId, choice, shot); }}/> : <>
-          {p.kind === 'tool' && !p.alwaysAllow ? <p className={s.hint}>This call can only be allowed once; Harbor will ask again next time.</p> : null}
+          {isChecksRequest(p) && checkCommands(p.prompt).length ? <ul className={s.prompt} aria-label="Commands Harbor would run" style={{ paddingLeft: 18, whiteSpace: 'normal' }}>{checkCommands(p.prompt).map((c, i) => <li key={i}><code>{c}</code></li>)}</ul> : null}
+          {isChecksRequest(p) ? <p className={s.hint}>Allowing approves exactly these commands for this project. Harbor remembers it and asks again only if the checks file changes.</p>
+            : p.kind === 'tool' && !p.alwaysAllow ? <p className={s.hint}>This call can only be allowed once; Harbor will ask again next time.</p> : null}
           {p.kind === 'conflict' ? <p className={s.hint}>Allowing lets both agents work in separate worktrees; their results will need integration. Deny makes this agent wait.</p> : null}
           {confirming === p.requestId ? <div className={s.confirm}>
             <p className={s.confirmText}>Use one free reset now? Harbor will not use a reset without this confirmation.</p>
@@ -97,7 +103,7 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
             <button aria-disabled={!!busy} onClick={() => answer(p, 'deny')}>{busy === 'deny' ? 'Denying…' : 'Deny'}</button>
             {p.kind === 'tool' && p.alwaysAllow ? <button aria-disabled={!!busy} onClick={() => answer(p, 'always')}>{busy === 'always' ? 'Saving rule…' : 'Always allow for this project'}</button> : null}
             {p.kind === 'freeReset' ? <button className={s.primary} data-reset aria-disabled={!!busy} onClick={() => { if (!busy) setConfirming(p.requestId); }}>Use free reset…</button>
-              : <button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Allowing…' : p.kind === 'conflict' ? 'Allow in parallel' : 'Allow once'}</button>}
+              : <button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Allowing…' : p.kind === 'conflict' ? 'Allow in parallel' : isChecksRequest(p) ? 'Allow these checks' : 'Allow once'}</button>}
           </div>}
           </>}
           {errors[p.requestId] ? <p className={s.error} role="alert">{errors[p.requestId]}</p> : null}
