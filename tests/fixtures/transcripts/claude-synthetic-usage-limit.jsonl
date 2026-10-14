@@ -1,0 +1,4 @@
+{"harborTranscript":1,"cli":"claude","source":"synthetic","scenario":"the account limit is hit: an error result, then exit 1","notes":"Hand-written. Event shapes follow parseClaudeLine and the claude.ts header (stream-json verified against claude 2.1.293). The seven_day_overage_included window key is the one real detail: a Max account sent it on 2026-10-12 (claude.ts). Not real CLI output.","expect":{"done":{"ok":false,"rateLimited":true,"errorIncludes":"usage limit"},"kinds":["session","session","usage","done"]}}
+{"o":"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"b7a1c3d4-0000-4000-8000-000000000001\",\"tools\":[],\"model\":\"claude-opus-5-5\"}"}
+{"o":"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"Claude AI usage limit reached|1792000000\",\"session_id\":\"b7a1c3d4-0000-4000-8000-000000000001\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}"}
+{"exit":1}

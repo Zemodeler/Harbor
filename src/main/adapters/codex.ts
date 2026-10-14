@@ -1,6 +1,6 @@
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
-import { streamLines } from './stream';
+import { streamLines, type AdapterProcessOptions, type StreamedLine, type StreamResult } from './stream';
 import { isEmittableEffort } from '../clis/effort';
 import { codexMcpArgs } from '../mcp/materialize';
 
@@ -46,25 +46,29 @@ export function codexErrorMessage(line: string): string | undefined {
   try { const j = JSON.parse(line); return j?.type === 'error' ? String(j.message ?? j.error?.message ?? 'codex error') : undefined; } catch { return undefined; }
 }
 
+const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+
 /** Parse one JSONL event. Pure; unknown shapes are ignored. */
 export function parseCodexLine(line: string): Chunk[] {
   let j: any;
   try { j = JSON.parse(line); } catch { return []; }
+  // `null`, numbers, strings and arrays are valid JSON too: reading `.type` off them must not throw.
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
   const out: Chunk[] = [];
   const t = j.type as string | undefined;
-  if (t === 'thread.started' && j.thread_id) out.push({ kind: 'session', id: j.thread_id });
-  else if (t === 'item.completed' && j.item) {
+  if (t === 'thread.started' && typeof j.thread_id === 'string' && j.thread_id.trim()) out.push({ kind: 'session', id: j.thread_id });
+  else if (t === 'item.completed' && j.item && typeof j.item === 'object') {
     const it = j.item;
-    if (it.type === 'agent_message' && it.text) out.push({ kind: 'text', text: it.text });
+    if (it.type === 'agent_message' && typeof it.text === 'string' && it.text) out.push({ kind: 'text', text: it.text });
     else if (it.type === 'command_execution') out.push({ kind: 'tool', text: String(it.command ?? '').slice(0, 120) });
     else if (it.type === 'file_change') out.push({ kind: 'tool', text: 'file change' });
   } else if (t === 'turn.completed') {
     // Codex's input count includes the cached part (its session logs show cached_input_tokens <= input_tokens, ~97% of it on a long
     // thread): split it so cache reads are weighed as such (calibration.billableKTok), as Claude's are.
-    const u = j.usage ?? {};
-    const cached = typeof u.cached_input_tokens === 'number' ? u.cached_input_tokens : undefined;
-    const input = typeof u.input_tokens === 'number' ? (cached !== undefined ? Math.max(0, u.input_tokens - cached) : u.input_tokens) : undefined;
-    out.push({ kind: 'usage', inputTokens: input, outputTokens: u.output_tokens, ...(cached !== undefined ? { cacheReadTokens: cached } : {}) });
+    const u = j.usage && typeof j.usage === 'object' ? j.usage : {};
+    const cached = num(u.cached_input_tokens);
+    const input = num(u.input_tokens) !== undefined ? (cached !== undefined ? Math.max(0, u.input_tokens - cached) : u.input_tokens) : undefined;
+    out.push({ kind: 'usage', inputTokens: input, outputTokens: num(u.output_tokens), ...(cached !== undefined ? { cacheReadTokens: cached } : {}) });
     out.push({ kind: 'done', ok: true });
   } else if (t === 'turn.failed') {
     // A bare `error` event is often a transient notice (reconnecting, stream retry); only turn.failed ends the run.
@@ -76,29 +80,42 @@ export function parseCodexLine(line: string): Chunk[] {
 
 export class CodexAdapter implements CliAdapter {
   id = 'codex';
-  constructor(private exe: string) {}
+  constructor(private exe: string, private p: AdapterProcessOptions = {}) {}
 
   async *run(prompt: string, o: RunOptions): AsyncGenerator<Chunk> {
     // Codex has no append-system-prompt flag; role instructions are prepended to the prompt. Only on the first run: a resumed thread
     // already holds them in its history, and repeating several KB on every turn is billed again as input each time.
     const full = o.systemPrompt && !o.resumeId ? `${o.systemPrompt}\n\n---\n\n${prompt}` : prompt;
     let done = false, last = '', lastError: string | undefined;
-    const gen = streamLines(this.exe, codexArgs(o), { cwd: o.cwd, input: full, signal: o.signal });
-    let res = await gen.next();
-    while (!res.done) {
-      if (res.value.stream === 'stdout') {
-        lastError = codexErrorMessage(res.value.line) ?? lastError;
-        for (const c of parseCodexLine(res.value.line)) {
-          if (done) continue; // exactly one terminal chunk
-          if (c.kind === 'text') last = c.text;
-          if (c.kind === 'done') { done = true; yield { ...c, text: c.text ?? last }; } else yield c;
-        }
-      }
+    let gen: AsyncGenerator<StreamedLine, StreamResult> | undefined;
+    let res: IteratorResult<StreamedLine, StreamResult>;
+    try {
+      gen = streamLines(this.exe, codexArgs(o), { cwd: o.cwd, input: full, signal: o.signal, launcher: this.p.launcher, forceResolveMs: this.p.forceResolveMs });
       res = await gen.next();
+      while (!res.done) {
+        this.p.onLine?.(res.value);
+        if (res.value.stream === 'stdout') {
+          lastError = codexErrorMessage(res.value.line) ?? lastError;
+          for (const c of parseCodexLine(res.value.line)) {
+            if (done) continue; // exactly one terminal chunk
+            if (c.kind === 'text') last = c.text;
+            if (c.kind === 'done') { done = true; yield { ...c, text: c.text ?? last }; } else yield c;
+          }
+        }
+        res = await gen.next();
+      }
+    } catch (e) {
+      // Building the arguments or a failing line hook: end like any failed run, with exactly one done.
+      if (!done) yield { kind: 'done', ok: false, error: `Harbor could not run Codex: ${String((e as Error).message ?? e)}`, exitCode: null };
+      return;
+    } finally {
+      // A consumer that stops iterating early must not leave the CLI running: returning the line stream kills its process.
+      await gen?.return(undefined as never).catch(() => undefined);
     }
     if (!done) {
       const r = res.value;
-      const reason = r.aborted ? 'stopped' : r.spawnError ?? (r.stderr.trim().slice(-500) || lastError || `exited with code ${r.code}`);
+      // The error event says what went wrong; any stderr (log lines) only adds to it, so it must not replace it.
+      const reason = r.aborted ? 'stopped' : r.spawnError ?? ([lastError, r.stderr.trim().slice(-500)].filter(Boolean).join('\n') || `exited with code ${r.code}`);
       yield { kind: 'done', ok: false, error: reason, rateLimited: RATE_LIMIT_RE.test(r.stderr) || RATE_LIMIT_RE.test(lastError ?? ''), exitCode: r.aborted || r.spawnError || lastError ? null : r.code };
     }
   }

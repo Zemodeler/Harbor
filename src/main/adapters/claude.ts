@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Chunk, CliAdapter, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from './types';
 import { RATE_LIMIT_RE } from './types';
-import { streamLines, type StdinSink, type StreamedLine, type StreamResult } from './stream';
+import { streamLines, type AdapterProcessOptions, type StdinSink, type StreamedLine, type StreamResult } from './stream';
 import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
 
 /**
@@ -190,12 +190,15 @@ export function isGitWrite(tool: string, input: unknown): boolean {
 export function parseClaudeLine(line: string): Chunk[] {
   let j: any;
   try { j = JSON.parse(line); } catch { return []; }
+  // `null`, numbers, strings and arrays are valid JSON too: reading `.type` off them must not throw.
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return [];
   const out: Chunk[] = [];
-  if (j.type === 'system' && j.subtype === 'init' && j.session_id) out.push({ kind: 'session', id: j.session_id });
+  if (j.type === 'system' && j.subtype === 'init' && isId(j.session_id)) out.push({ kind: 'session', id: j.session_id });
   else if (j.type === 'assistant' && Array.isArray(j.message?.content)) {
     for (const c of j.message.content) {
-      if (c.type === 'text' && c.text) out.push({ kind: 'text', text: c.text });
-      else if (c.type === 'tool_use') out.push({ kind: 'tool', text: `${c.name} ${summarizeInput(c.input)}`.trim() });
+      if (!c || typeof c !== 'object') continue;
+      if (c.type === 'text' && typeof c.text === 'string' && c.text) out.push({ kind: 'text', text: c.text });
+      else if (c.type === 'tool_use') out.push({ kind: 'tool', text: `${typeof c.name === 'string' ? c.name : 'tool'} ${summarizeInput(c.input)}`.trim() });
     }
     // Per-message usage, so a run stopped before its `result` still records what it used (the result's totals win when it comes).
     const u = j.message.usage;
@@ -223,20 +226,25 @@ export function parseClaudeLine(line: string): Chunk[] {
     }
     if (limits.length) out.push({ kind: 'limits', limits });
   } else if (j.type === 'result') {
-    if (j.session_id) out.push({ kind: 'session', id: j.session_id });
-    const u = j.usage ?? {};
+    if (isId(j.session_id)) out.push({ kind: 'session', id: j.session_id });
+    const u = j.usage && typeof j.usage === 'object' ? j.usage : {};
     out.push({
-      kind: 'usage', inputTokens: u.input_tokens, outputTokens: u.output_tokens, costUsd: j.total_cost_usd,
+      kind: 'usage', inputTokens: num(u.input_tokens), outputTokens: num(u.output_tokens), costUsd: num(j.total_cost_usd),
       // Cached prompt tokens are most of a Claude run's input and are NOT in input_tokens; undefined when absent so older output parses as before.
       ...(typeof u.cache_read_input_tokens === 'number' ? { cacheReadTokens: u.cache_read_input_tokens } : {}),
       ...(typeof u.cache_creation_input_tokens === 'number' ? { cacheWriteTokens: u.cache_creation_input_tokens } : {})
     });
-    const err = j.is_error || (j.subtype && j.subtype !== 'success');
+    const err = j.is_error === true || (typeof j.subtype === 'string' && j.subtype !== 'success');
     const text = typeof j.result === 'string' ? j.result : undefined;
     out.push({ kind: 'done', ok: !err, text, error: err ? text || String(j.subtype) : undefined, rateLimited: err && RATE_LIMIT_RE.test(text ?? '') });
   }
   return out;
 }
+
+/** A session id worth resuming: non-empty text. */
+const isId = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
+/** A count or cost: a finite number, else undefined (a string or null in a malformed event is not a usage figure). */
+const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
 function summarizeInput(i: any): string {
   if (!i || typeof i !== 'object') return '';
@@ -312,32 +320,37 @@ class PermissionChannel {
 
 export class ClaudeAdapter implements CliAdapter {
   id = 'claude';
-  constructor(private exe: string) {}
+  constructor(private exe: string, private p: AdapterProcessOptions = {}) {}
 
   async *run(prompt: string, o: RunOptions): AsyncGenerator<Chunk> {
     // Claude Code has no image flag (2.1.295 --help): it sees an image by reading the file, whose folder is added with --add-dir.
     if (o.images?.length) prompt = `${prompt}\n\nImage file(s) come with this message (the user's attachments, or a screenshot Harbor captured for you). Read each one with the Read tool to see it:\n${o.images.map((p) => `- ${p}`).join('\n')}`;
     let done = false;
     let spFile: string | undefined;
-    if (o.systemPrompt) {
-      spFile = join(tmpdir(), `harbor-sp-${randomUUID()}.txt`);
-      writeFileSync(spFile, o.systemPrompt);
-    }
     // The concierge (lean) never gets MCP servers. The file is removed in `finally`: after success, failure and abort alike.
     let mcpFile: { file: string; cleanup: () => void } | undefined;
     let res: IteratorResult<StreamedLine, StreamResult>;
+    let gen: AsyncGenerator<StreamedLine, StreamResult> | undefined;
     const ctl = isControlled(o) ? new PermissionChannel(o) : undefined;
+    const proc = { signal: o.signal, launcher: this.p.launcher, forceResolveMs: this.p.forceResolveMs };
     try {
+      if (o.systemPrompt) {
+        spFile = join(tmpdir(), `harbor-sp-${randomUUID()}.txt`);
+        writeFileSync(spFile, o.systemPrompt);
+      }
       if (o.mcp?.servers.length && !o.lean) mcpFile = writeMcpConfig(o.mcp.servers);
       const args = claudeArgs(o, spFile, mcpFile?.file);
-      const gen = ctl
-        ? streamLines(this.exe, args, { cwd: o.cwd, input: userMessageLine(prompt), signal: o.signal, interactive: (s) => ctl.attach(s) })
-        : streamLines(this.exe, args, { cwd: o.cwd, input: prompt, signal: o.signal });
+      gen = ctl
+        ? streamLines(this.exe, args, { ...proc, cwd: o.cwd, input: userMessageLine(prompt), interactive: (s) => ctl.attach(s) })
+        : streamLines(this.exe, args, { ...proc, cwd: o.cwd, input: prompt });
       res = await gen.next();
       while (!res.done) {
+        this.p.onLine?.(res.value);
         if (res.value.stream === 'stdout') {
           if (ctl?.handle(res.value.line)) { res = await gen.next(); continue; }
           for (const c of parseClaudeLine(res.value.line)) {
+            // Exactly one terminal chunk, and it is the last one: whatever follows the result (a second result, late events) is dropped.
+            if (done) continue;
             if (c.kind === 'done') { done = true; ctl?.finish(); }
             yield c;
           }
@@ -345,12 +358,14 @@ export class ClaudeAdapter implements CliAdapter {
         res = await gen.next();
       }
     } catch (e) {
-      // Only setup can throw here (the temp file could not be written): end like any failed run, with exactly one done.
+      // Setup (a temp file could not be written) or a failing line hook: end like any failed run, with exactly one done.
       ctl?.finish();
-      if (!done) yield { kind: 'done', ok: false, error: `Harbor could not start Claude Code: ${String((e as Error).message ?? e)}`, exitCode: null };
+      if (!done) yield { kind: 'done', ok: false, error: `Harbor could not run Claude Code: ${String((e as Error).message ?? e)}`, exitCode: null };
       return;
     } finally {
       ctl?.finish();
+      // A consumer that stops iterating early must not leave the CLI running: returning the line stream kills its process.
+      await gen?.return(undefined as never).catch(() => undefined);
       mcpFile?.cleanup();
       if (spFile) try { unlinkSync(spFile); } catch { /* already gone */ }
     }
