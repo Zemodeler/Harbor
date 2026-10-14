@@ -11,13 +11,14 @@ import { ToolRules } from './ToolRules';
 import { CliPathField } from './CliPath';
 import { AddCliPanel, CliFeaturesNote, CustomCliActions } from './CustomCli';
 import { canExportDiagnostics, Diagnostics } from './Diagnostics';
+import { SkillsPanel } from './Skills';
 import s from '../Harbor.module.css';
 
 export function Settings({ state, appearanceState, workspace }: { state: HarborState; appearanceState: AppearanceState; workspace: WorkspaceState }) {
   const [tab, setTab] = useState('Connections');
   const { appearance, scheme, updateAppearance, saveError } = appearanceState;
   const [pending, setPending] = useState(false);
-  const tabs = ['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage', 'Project', ...(canExportDiagnostics(state.api) ? ['Diagnostics'] : [])];
+  const tabs = ['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage', 'Project', ...(state.api.listSkills ? ['Skills'] : []), ...(canExportDiagnostics(state.api) ? ['Diagnostics'] : [])];
   const project = state.projects.find(p => p.id === state.projectId);
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   // Custom CLIs (plan 2.2): their descriptors, for Edit, and the open Add/Edit panel.
@@ -32,8 +33,8 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
   }, [tab, api]);
   async function afterCustomChange() { await state.refreshClis(); if (api.listCustomClis) setCustoms(await api.listCustomClis()); }
   return <section className={s.settings} aria-label="Settings">
-    <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : tab === 'Project' ? 'Settings for this project.' : tab === 'Diagnostics' ? 'Help us help you.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
-    <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : tab === 'Project' ? 'Override routing for one project and manage the tools it always allows.' : tab === 'Diagnostics' ? 'Export a redacted bundle for support.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
+    <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : tab === 'Project' ? 'Settings for this project.' : tab === 'Diagnostics' ? 'Help us help you.' : tab === 'Skills' ? 'Skills your agents can use.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
+    <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : tab === 'Project' ? 'Override routing for one project and manage the tools it always allows.' : tab === 'Diagnostics' ? 'Export a redacted bundle for support.' : tab === 'Skills' ? 'Instructions in folders, from Harbor’s library, your project, Claude Code and Codex.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
     <div className={s.tabs} role="tablist" aria-label="Settings sections">{tabs.map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
     <div role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
       {tab === 'Workspace' ? <WorkspaceSettings state={state} workspace={workspace}/> : tab === 'Appearance' ? <>
@@ -84,7 +85,7 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
         <h3>{project.name}</h3><p className={s.muted}>Fields left on “Inherit global” follow Settings → Routing.</p>
         <RoutingFields key={project.id} state={state} projectId={project.id}/>
         <ToolRules api={state.api} projectId={project.id}/>
-      </> : <p>Open a project to change its settings.</p>) : tab === 'Diagnostics' ? <Diagnostics api={state.api}/> : <>
+      </> : <p>Open a project to change its settings.</p>) : tab === 'Skills' ? <SkillsPanel key={project?.id ?? 'none'} api={state.api} projectId={project?.id} projectName={project?.name}/> : tab === 'Diagnostics' ? <Diagnostics api={state.api}/> : <>
         <UsageWindows windows={state.usage} clis={state.clis}/>
       </>}
     </div>
