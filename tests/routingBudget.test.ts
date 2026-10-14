@@ -298,3 +298,16 @@ describe('a few days of mixed work against pools that burn down (router only)', 
     for (const [pool, u] of Object.entries(used)) expect(u.weekly, pool).toBeLessThanOrEqual(100);
   });
 });
+
+describe('the summary says it in plain words', () => {
+  it('names the pick, the difficulty, the quota and the runner-up without internal numbers or formulas', () => {
+    const ledger = ledgerOf({ claude: [healthy5h, { period: 'weekly', used: 40, inH: 50 }] });
+    const sig = difficultyOf({ role: 'implementer', hint: 'medium', text: 'Fix the parser in src/parse.ts', files: ['src/parse.ts'] });
+    const d = route({ role: 'implementer', complexity: 'medium', difficulty: sig.difficulty, difficultySignals: sig.signals, size: sig.size, needs: ['code'] }, input(ledger))!;
+    expect(d.summary).toMatch(new RegExp(`^Harbor picked Claude ${d.model} at ${d.effort} effort\.`));
+    expect(d.summary).toMatch(/The task looks moderate \(\d(\.\d)? out of 10\)/);
+    expect(d.summary).toMatch(/Claude has plenty of quota left|Claude quota is getting limited/);
+    expect(d.summary).toMatch(/Next best was Claude /);
+    expect(d.summary).not.toMatch(/scarcity|rho|→|%\/h|urgency/);
+  });
+});

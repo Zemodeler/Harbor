@@ -183,7 +183,7 @@ export function askedCounts(text: string): { helpers?: number; planners?: number
 /** What a message records about how it was routed: the choice and reason, plus the evidence behind it (scores, margin, ties, tier loss, skips). */
 export function detailsOf(d: RouteDecision): NonNullable<Message['details']> {
   return {
-    cli: d.cli, model: d.model, effort: d.effort, reason: d.reason,
+    cli: d.cli, model: d.model, effort: d.effort, reason: d.reason, ...(d.summary ? { summary: d.summary } : {}),
     ...(d.scored ? { scored: d.scored } : {}), ...(d.margin !== undefined ? { margin: d.margin } : {}), ...(d.tied ? { tied: true } : {}),
     ...(d.degraded ? { degraded: d.degraded } : {}), difficulty: d.difficulty,
     ...(d.needsReview ? { needsReview: true, ...(d.reviewReason ? { reviewReason: d.reviewReason } : {}) } : {}),

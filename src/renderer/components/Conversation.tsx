@@ -34,7 +34,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
     <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? (subAgentId ? <button className={s.agentName} title="Open this agent" onClick={() => openAgent(subAgentId)}>{agentTitle}</button> : agentTitle || 'Harbor') : peer ? 'Between sessions' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
     {m.text ? <Markdown text={m.text}/> : working ? <p>Working…</p> : null}
     {m.attachments?.length ? <ul className={s.messageImages} aria-label="Attached images">{m.attachments.map((a, i) => <li key={i} className={previews?.[i] ? s.hqImageItem : undefined}>{previews?.[i] ? <img src={previews[i]} alt=""/> : null}<span>{a.name}</span></li>)}</ul> : null}
-    {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{complexity ? <> · <ComplexityBadge complexity={complexity}/></> : null}</p><p>{m.details.reason}</p></details> : null}
+    {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{complexity ? <> · <ComplexityBadge complexity={complexity}/></> : null}</p>{m.details.summary ? <><p>{m.details.summary}</p><details className={s.technical}><summary>Technical details</summary><p>{m.details.reason}</p></details></> : <p>{m.details.reason}</p>}</details> : null}
   </article>;
 });
 

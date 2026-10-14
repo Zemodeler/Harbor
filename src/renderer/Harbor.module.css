@@ -101,6 +101,8 @@
 .execution { border-top: 1px solid var(--line); padding: 12px 0; font-size: 12px; color: var(--muted); }
 .execution p { margin: 10px 0 0; white-space: pre-line; }
 .routeReason { white-space: pre-line; }
+.technical { margin-top: 8px; opacity: .8; }
+.technical summary { cursor: pointer; }
 .code { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 16px 0; }
 .code > div { display: flex; justify-content: space-between; align-items: center; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--line); }
 .code button { font-size: 11px; padding: 4px 8px; min-height: 28px; }
