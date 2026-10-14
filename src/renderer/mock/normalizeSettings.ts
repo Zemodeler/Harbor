@@ -63,6 +63,7 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
   if (!isObj(patch)) throw new Error('Settings must be an object.');
   const out: Partial<Settings> = { ...patch, ...scoped(patch as Record<string, unknown>) };
   if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') throw new Error('keepRunningInBackground must be a boolean.');
+  if ('claudeOwnMcp' in patch && patch.claudeOwnMcp !== undefined && typeof patch.claudeOwnMcp !== 'boolean') throw new Error('claudeOwnMcp must be a boolean.');
   if ('editor' in patch && patch.editor !== undefined && !['code', 'code-insiders', 'cursor', 'windsurf'].includes(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
   if ('cliPaths' in patch) {
     const cp: unknown = patch.cliPaths;

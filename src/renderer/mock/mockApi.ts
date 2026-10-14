@@ -4,6 +4,7 @@ import { seed } from './seed';
 import { createMockSkills } from './mockSkills';
 import { createMockDocuments } from './mockDocuments';
 import { createMockTransfer } from './mockTransfer';
+import { createMockMcp } from './mockMcp';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
 const demoCommits: GitCommit[] = [
@@ -158,7 +159,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       customClis = replace ? customClis.map(c => c.id === d.id ? saved : c) : [...customClis, saved];
       const readOnly = !!d.run.permissions?.['read-only'], jsonl = d.run.output?.format === 'jsonl';
       const cli: CliStatus = { id: d.id, name: d.name, installed: true, version: '1.0.0', signedIn: false, authState: 'unknown', models: (d.models ?? [{ id: 'default' }]).map(m => m.id), custom: true, note: 'Demo only: nothing was run.',
-        features: { images: !!d.run.image, resume: !!d.run.resume && jsonl, structuredOutput: jsonl, permissionModes: !!d.run.permissions, readOnly, mcp: false, nativeSkills: false, usageReadings: false } };
+        features: { images: !!d.run.image, resume: !!d.run.resume && jsonl, structuredOutput: jsonl, permissionModes: !!d.run.permissions, readOnly, mcp: !!d.run.mcp, nativeSkills: false, usageReadings: false } };
       data.clis = [...data.clis.filter(c => c.id !== d.id), cli]; emit({ type: 'cli', cli });
       return copy(customClis);
     },
@@ -169,6 +170,8 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     ...createMockDocuments(() => data.projects, pause),
     // Import and export (CHANGELOG 0.1.35): sample bundles and chats only; nothing is read from or written to disk.
     ...createMockTransfer(() => data, () => settings, emit, pause),
+    // MCP servers (CHANGELOG 0.1.36): a sample registry; nothing is run or written.
+    ...createMockMcp(pause),
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;
