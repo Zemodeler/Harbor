@@ -118,6 +118,22 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (a!.forConversation !== undefined && typeof a!.forConversation !== 'boolean') bad('forConversation must be true or false');
       break;
     }
+    case 'openDocument':
+    case 'documentAction': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > MAX_PATH || CONTROL.test(args[1])) bad('path must be a file path');
+      if (method === 'documentAction' && args[2] !== 'openExternal' && args[2] !== 'reveal') bad('action must be openExternal or reveal');
+      const o = args[method === 'documentAction' ? 3 : 2] as { agentId?: unknown; since?: unknown } | undefined | null;
+      if (o !== undefined && o !== null) {
+        if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+        if (o.agentId !== undefined && !isId(o.agentId)) bad('agent id must be a short non-empty string');
+        if (method === 'openDocument' && o.since !== undefined && (typeof o.since !== 'number' || !Number.isFinite(o.since))) bad('since must be a time in milliseconds');
+      }
+      break;
+    }
+    case 'pickDocument':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

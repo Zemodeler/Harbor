@@ -32,7 +32,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
   const previews = m.attachments?.length ? previewsFor(m) : undefined;
   return <article className={`${s.message} ${m.role === 'user' ? s.user : s.assistant} ${peer ? s.hqPeer : ''}`} data-peer={peer || undefined}>
     <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? (subAgentId ? <button className={s.agentName} title="Open this agent" onClick={() => openAgent(subAgentId)}>{agentTitle}</button> : agentTitle || 'Harbor') : peer ? 'Between sessions' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
-    {m.text ? <Markdown text={m.text}/> : working ? <p>Working…</p> : null}
+    {m.text ? <Markdown text={m.text} agentId={m.agentId}/> : working ? <p>Working…</p> : null}
     {m.attachments?.length ? <ul className={s.messageImages} aria-label={m.attachments.some(a => a.origin === 'screenshot') ? 'Screenshot' : 'Attached images'}>{m.attachments.map((a, i) => {
       // Harbor serves its stored copies through harbor-file:// (main checks the path); a just-sent image may still use its local preview.
       const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];

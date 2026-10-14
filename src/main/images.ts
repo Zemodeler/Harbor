@@ -55,12 +55,13 @@ export function looksLikeImage(data: Buffer, mime: string): boolean {
 }
 
 /** True when `child` is `root` itself or inside it (Windows paths compared case-insensitively). */
-function within(root: string, child: string): boolean {
+export function within(root: string, child: string): boolean {
   const r = normPath(resolve(root)), c = normPath(resolve(child));
   return c === r || c.startsWith(`${r}/`);
 }
 
-function real(p: string): string | undefined { try { return realpathSync.native(p); } catch { return undefined; } }
+/** The real path (after links and junctions), or undefined when it cannot be resolved. */
+export function real(p: string): string | undefined { try { return realpathSync.native(p); } catch { return undefined; } }
 
 /**
  * The file a `harbor-file://attachments/<conversationId>/<name>` URL names, or undefined. Only files Harbor wrote under its own

@@ -1,7 +1,7 @@
 import type { HarborApi } from './api';
 
-/** Request/response methods exposed over IPC (everything on HarborApi except onEvent). */
-export type InvokeMethod = Exclude<keyof HarborApi, 'onEvent'>;
+/** Request/response methods exposed over IPC (everything on HarborApi except onEvent and the preload-only pathForFile). */
+export type InvokeMethod = Exclude<keyof HarborApi, 'onEvent' | 'pathForFile'>;
 
 export const INVOKE_METHODS: InvokeMethod[] = [
   'listClis', 'refreshClis', 'openLogin', 'testCliPath', 'browseCliPath',
@@ -16,6 +16,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'previewScreenshot', 'answerScreenshot', 'listPendingPermissions', 'answerQuestion',
+  'openDocument', 'pickDocument', 'documentAction',
   'listToolRules', 'removeToolRule', 'exportDiagnostics'
 ];
 
