@@ -11,7 +11,8 @@ export const LOG_MAX_BYTES = 1024 * 1024;
 export const LOG_FILES = 3;
 const LINE_MAX = 4000;
 
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
+/** Also the base of the bundle secret scan (bundles/secrets.ts). */
+export const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[redacted key]'],
   [/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}/g, '[redacted]'],
   [/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}/g, '[redacted]'],

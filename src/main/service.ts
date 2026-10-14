@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -33,8 +33,18 @@ import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStoredPath } from './images';
 import { ScreenshotBroker, type Capturer } from './screenshots';
 import { canOpenExternally, openDocumentAt, resolveDocumentPath, type DocumentRoot } from './documents';
+import { Transfer } from './bundles/transfer';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported'> & {
+  previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
+  exportBundle(token: string, opts?: { keepSecrets?: boolean; redactSecrets?: boolean }): Promise<BundleExportResult | null>;
+  browseImportFile(kind: 'bundle' | 'chatExport'): Promise<string | null>;
+  previewBundle(path: string): Promise<BundlePreview>;
+  importBundle(token: string, opts: BundleImportOptions): Promise<BundleImportResult>;
+  listImportSources(): Promise<ChatImportSourceInfo[]>;
+  previewImport(source: ChatImportSourceId, opts?: { path?: string }): Promise<ChatImportPreview>;
+  importConversation(projectId: Id, token: string, entryIds: string[]): Promise<ChatImportResult>;
+  continueImported(conversationId: Id, opts: { cli: CliId }): Promise<Conversation>;
   openDocument(projectId: Id, path: string, opts?: { agentId?: Id; since?: number }): Promise<DocumentResult>;
   pickDocument(projectId: Id): Promise<DocumentResult | null>;
   documentAction(projectId: Id, path: string, action: 'openExternal' | 'reveal', opts?: { agentId?: Id }): Promise<void>;
@@ -127,6 +137,12 @@ export interface ServiceOptions {
   pickDocument?: () => Promise<string | undefined>;
   /** Selects a file in Explorer (documentAction 'reveal'); index.ts passes shell.showItemInFolder. */
   revealPath?: (path: string) => void | Promise<void>;
+  /** Folders of the chat importers: ~/.claude, CODEX_HOME, and the home folder (shown as ~). Absent = folder sources unavailable (tests). */
+  chatHomes?: { claude?: string; codex?: string; home?: string };
+  /** Save dialog for exportBundle; injected so this module never imports electron. */
+  pickBundleSave?: (defaultName: string) => Promise<string | undefined>;
+  /** Open dialog for a bundle or an account export (browseImportFile). */
+  pickImportFile?: (kind: 'bundle' | 'chatExport') => Promise<string | undefined>;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -424,6 +440,29 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     if (!view) throw new Error('This project folder is not a Git repository.');
     return view;
   };
+  // ---- import and export (plan section 6): bundles and chat importers; imported chats are read-only history.
+  const transfer = new Transfer({
+    store, skills, dataRoot, dataDir: opts.dataDir, worktreesRoot, appVersion: opts.appVersion,
+    env: { claudeHome: opts.chatHomes?.claude, codexHome: opts.chatHomes?.codex, home: opts.chatHomes?.home, now: opts.now ?? Date.now },
+    mainAgentId: (projectId) => orchestrator.ensureProject(needProject(projectId)).main.id,
+    newConversation: (projectId) => orchestrator.newConversation(projectId),
+    emit: (e) => bus.emit(e),
+    journal: (projectId, text) => journal.add({ kind: 'import', projectId, text }),
+    pickSave: opts.pickBundleSave,
+    cliProblem: (cli) => {
+      const c = clis.find((x) => x.id === cli);
+      if (!c?.installed) return `${cli} is not installed.`;
+      if (c.blocked) return `Harbor will not run ${c.name}: ${c.blocked}.`;
+      if (store.getSettings().cliOverrides[cli]?.enabled === false) return `${c.name} is turned off in Settings.`;
+      if (c.authState === 'signedOut') return `${c.name} needs a sign-in first.`;
+      if (!adapterFor(cli)) return `Harbor cannot run ${c.name} yet.`;
+      return undefined;
+    },
+    cliName: (cli) => clis.find((x) => x.id === cli)?.name ?? cli
+  });
+  const readOnlyImported = (c: Conversation | undefined) => {
+    if (c?.imported) throw new Error('This is imported history and is read-only. Use "Continue with…" to keep working on it.');
+  };
 
   return {
     orchestrator, store,
@@ -639,12 +678,14 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       await ready;
       if (!text.trim() && !attachments?.length) return;
       if (!store.getConversation(conversationId)) throw new Error('This conversation is no longer available.');
+      readOnlyImported(store.getConversation(conversationId));
       const saved = attachments?.length ? saveAttachments(attachmentDir(dataRoot, conversationId), attachments) : [];
       await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved, { steer: opts?.steer === true });
     },
     async setConversationMode(conversationId, mode, goal) {
       const c = store.getConversation(conversationId);
       if (!c) throw new Error('This conversation is no longer available.');
+      readOnlyImported(c);
       if (!CONVERSATION_MODES.includes(mode)) throw new Error('Unknown conversation mode.');
       const text = goal?.trim();
       if (mode === 'goal' && !text) throw new Error('Goal mode needs a goal: say what should be true when the lead is done.');
@@ -787,6 +828,20 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!opts.openFolder) throw new Error('Opening files is available in the desktop app.');
       await opts.openFolder(r.path);
     },
+    // Import and export (plan section 6). Nothing here runs a CLI; imported text never becomes an instruction.
+    async previewBundleExport(projectId, selection) { return transfer.previewExport(projectId, selection); },
+    async exportBundle(token, o) { return transfer.exportBundle(token, o && typeof o === 'object' ? { keepSecrets: o.keepSecrets === true, redactSecrets: o.redactSecrets === true } : {}); },
+    async browseImportFile(kind) {
+      if (kind !== 'bundle' && kind !== 'chatExport') throw new Error('Choose a bundle or an export file.');
+      if (!opts.pickImportFile) throw new Error('Choosing a file is available in the desktop app.');
+      return (await opts.pickImportFile(kind)) ?? null;
+    },
+    async previewBundle(path) { return transfer.previewBundle(path); },
+    async importBundle(token, o) { return transfer.importBundle(token, o); },
+    async listImportSources() { return transfer.listSources(); },
+    async previewImport(source, o) { return transfer.previewImport(source, o && typeof o === 'object' ? o : {}); },
+    async importConversation(projectId, token, entryIds) { return transfer.importConversations(projectId, token, entryIds); },
+    async continueImported(conversationId, o) { await ready; return transfer.continueImported(conversationId, o); },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },

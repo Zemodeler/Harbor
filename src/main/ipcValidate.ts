@@ -134,6 +134,52 @@ export function validateInvoke(method: string, args: unknown[]): void {
     case 'pickDocument':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       break;
+    case 'previewBundleExport': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const s = args[1] as Record<string, unknown> | null;
+      if (!s || typeof s !== 'object' || Array.isArray(s)) bad('selection must be an object');
+      for (const k of ['settings', 'toolRules', 'skillChoices', 'images']) if (s![k] !== undefined && typeof s![k] !== 'boolean') bad(`${k} must be true or false`);
+      if (s!['conversations'] !== undefined && (!Array.isArray(s!['conversations']) || s!['conversations'].length > 200 || !s!['conversations'].every(isId))) bad('conversations must be a list of at most 200 conversation ids');
+      if (s!['skills'] !== undefined && (!Array.isArray(s!['skills']) || s!['skills'].length > 50 || !s!['skills'].every(isSkillId))) bad('skills must be a list of at most 50 skill ids');
+      break;
+    }
+    case 'exportBundle': {
+      if (!isId(args[0])) bad('token must be a short non-empty string');
+      const o = args[1] as { keepSecrets?: unknown; redactSecrets?: unknown } | undefined | null;
+      if (o !== undefined && o !== null && (typeof o !== 'object' || Array.isArray(o) || (o.keepSecrets !== undefined && typeof o.keepSecrets !== 'boolean') || (o.redactSecrets !== undefined && typeof o.redactSecrets !== 'boolean'))) bad('options must be an object with optional boolean keepSecrets and redactSecrets');
+      break;
+    }
+    case 'browseImportFile':
+      if (args[0] !== 'bundle' && args[0] !== 'chatExport') bad('kind must be bundle or chatExport');
+      break;
+    case 'previewBundle':
+      if (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || CONTROL.test(args[0])) bad('path must be a file path');
+      break;
+    case 'importBundle': {
+      if (!isId(args[0])) bad('token must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o) || !isId(o['projectId'])) bad('options must name a project');
+      for (const k of ['settings', 'replaceSettings', 'toolRules', 'skillChoices']) if (o![k] !== undefined && typeof o![k] !== 'boolean') bad(`${k} must be true or false`);
+      for (const k of ['skills', 'conversations']) if (o![k] !== undefined && (!Array.isArray(o![k]) || (o![k] as unknown[]).length > 200 || !(o![k] as unknown[]).every(isId))) bad(`${k} must be a list of names from the preview`);
+      break;
+    }
+    case 'previewImport': {
+      if (!['claude-code', 'codex', 'claude-export', 'chatgpt-export'].includes(args[0] as string)) bad('source must be claude-code, codex, claude-export or chatgpt-export');
+      const o = args[1] as { path?: unknown } | undefined | null;
+      if (o !== undefined && o !== null && (typeof o !== 'object' || Array.isArray(o) || (o.path !== undefined && (typeof o.path !== 'string' || o.path.length > MAX_PATH || CONTROL.test(o.path))))) bad('options must be an object with an optional file path');
+      break;
+    }
+    case 'importConversation':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (!isId(args[1])) bad('token must be a short non-empty string');
+      if (!Array.isArray(args[2]) || args[2].length < 1 || args[2].length > 200 || !args[2].every((x) => typeof x === 'string' && x.length >= 1 && x.length <= 600 && !CONTROL.test(x))) bad('entryIds must be a list of 1 to 200 entries from the preview');
+      break;
+    case 'continueImported': {
+      if (!isId(args[0])) bad('conversation id must be a short non-empty string');
+      const o = args[1] as { cli?: unknown } | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o) || !isId(o.cli)) bad('options must name a CLI');
+      break;
+    }
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

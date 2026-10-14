@@ -261,6 +261,7 @@ export class Store {
     this.state.conversations = this.state.conversations.filter((c) => c.projectId !== id);
     this.state.messages = this.state.messages.filter((m) => !convIds.has(m.conversationId));
     for (const c of convIds) this.unindexConversation(c);
+    this.forgetImports(convIds);
     this.state.agents = this.state.agents.filter((a) => a.projectId !== id);
     this.state.locks = this.state.locks.filter((l) => l.projectId !== id);
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
@@ -280,7 +281,29 @@ export class Store {
     this.state.conversations = this.state.conversations.filter((c) => c.id !== id);
     this.state.messages = this.state.messages.filter((m) => m.conversationId !== id);
     this.unindexConversation(id);
+    this.forgetImports(new Set([id]));
     this.dirty();
+  }
+
+  // ---- imported history (bundles/transfer.ts): decisions of imported conversations, continuation handoffs
+  importedDecisions(conversationId: Id): Array<{ text: string; time?: number }> { return [...(this.state.imports?.decisions?.[conversationId] ?? [])]; }
+  setImportedDecisions(conversationId: Id, list: Array<{ text: string; time?: number }>): void {
+    if (!list.length) return;
+    const imp = this.state.imports ?? {};
+    this.state.imports = { ...imp, decisions: { ...(imp.decisions ?? {}), [conversationId]: list } };
+    this.dirty();
+  }
+  continuation(conversationId: Id): { text: string; cli: CliId; from: Id } | undefined { return this.state.imports?.continuations?.[conversationId]; }
+  setContinuation(conversationId: Id, c: { text: string; cli: CliId; from: Id }): void {
+    const imp = this.state.imports ?? {};
+    this.state.imports = { ...imp, continuations: { ...(imp.continuations ?? {}), [conversationId]: c } };
+    this.flush(); // the new conversation must not lose its handoff to a crash before its first turn
+  }
+  private forgetImports(ids: Set<Id>): void {
+    const imp = this.state.imports;
+    if (!imp) return;
+    const drop = <T>(m?: Record<Id, T>) => (m ? Object.fromEntries(Object.entries(m).filter(([k]) => !ids.has(k))) : undefined);
+    this.state.imports = { ...(imp.decisions ? { decisions: drop(imp.decisions) } : {}), ...(imp.continuations ? { continuations: drop(imp.continuations) } : {}) };
   }
   addConversation(c: Conversation): Conversation { this.state.conversations.push(c); this.dirty(); return c; }
   patchConversation(id: Id, patch: Partial<Conversation>): Conversation | undefined {

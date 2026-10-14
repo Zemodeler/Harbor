@@ -739,6 +739,8 @@ export class Orchestrator {
     const agent = this.d.store.getAgent(conv.agentId);
     if (!agent) throw new Error('Conversation has no agent');
     if (conv.archived) throw new Error('Restore this conversation before sending a message.');
+    // Imported history (plan 6.2) is read-only: no agent ever runs in it; continueImported starts a new conversation instead.
+    if (conv.imported) throw new Error('This is imported history and is read-only. Use "Continue with…" to keep working on it.');
     this.post(conversationId, 'user', text, { agentId: agent.id, ...(attachments.length ? { attachments } : {}) });
     // A go-ahead after a plan ends plan mode: the lead now executes what it proposed.
     if (conv.mode === 'plan' && isApproval(text)) {
@@ -901,7 +903,12 @@ export class Orchestrator {
       let plan: Escalation = this.plans.get(conversationId) ?? { complexity: 'medium', needs: [], ack: '' };
       if (trigger.kind === 'user') {
         const deep = /^\/deep\b\s*/i.exec(trigger.text);
-        if (deep) {
+        // Continuing an imported chat: the front desk cannot see that chat, so the first turn goes to the lead, which gets the handoff.
+        const continuation = this.d.store.continuation(conversationId);
+        const freshContinuation = !!continuation && !this.d.store.getSession(`lead:${conversationId}`);
+        if (freshContinuation && !deep && !trigger.images?.length) {
+          plan = this.estimated(conversationId, trigger.text);
+        } else if (deep) {
           // "/deep" skips the front desk and gives the lead the strongest reasoning: difficulty 9 is beyond what any model reaches
           // only by thinking harder, so the price cannot trade it down to a weaker model at high effort.
           plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high', difficulty: DEEP_DIFFICULTY };
@@ -930,6 +937,8 @@ export class Orchestrator {
         // An explicit "use codex" applies to this request (and its go-aheads); other messages keep the earlier choice.
         const asked = requestedCli(trigger.text);
         if (asked) plan = { ...plan, preferCli: asked };
+        // The CLI the user picked in "Continue with…" is preferred until a message names another one.
+        else if (continuation && !plan.preferCli) plan = { ...plan, preferCli: continuation.cli };
         this.plans.set(conversationId, plan);
         // Vision is a need of this turn only; later go-ahead turns must not inherit it.
         if (trigger.images?.length && !plan.needs.includes('vision')) plan = { ...plan, needs: [...plan.needs, 'vision'] };
@@ -1170,7 +1179,9 @@ export class Orchestrator {
     // Only built when the lead's native session cannot be resumed (new conversation, lost session, or another CLI took over).
     const context = async (): Promise<string> => {
       const handoff = await this.handoffFor(project, conversationId).catch(() => '');
-      return [handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n');
+      // A conversation that continues an imported chat: Harbor's summary of it, framed as quoted history (handoff.ts).
+      const imported = this.d.store.continuation(conversationId)?.text ?? '';
+      return [imported, handoff, history.length ? `Conversation so far (your earlier session is not available):\n${historyText(history)}` : ''].filter(Boolean).join('\n\n');
     };
     // Whatever started this turn (a user message, a goal step, a report, a help request, a peer), it also carries the
     // reports Harbor still holds for this conversation, settled with the turn like a reports trigger's own.

@@ -440,8 +440,44 @@ export class SkillManager {
     return this.stage('github', st.source, { skills: st.skills, problems: [], warnings }, { github: st.github, downloaded: true });
   }
 
+  /**
+   * A skill's files for a Harbor bundle (plan section 6.1): a usable skill only (no links, no problems), within the import caps, so
+   * the other side can import it. `folder` is a safe name for the bundle; nothing of the absolute path goes along.
+   */
+  exportFiles(skillId: string, project?: { id: Id; path: string }): { name: string; folder: string; files: Array<{ path: string; data: Buffer }> } {
+    const s = this.find(skillId, project);
+    if (s.skill.problems?.length) throw new Error(`${s.skill.name} cannot be exported: ${s.skill.problems.join(' ')}`);
+    const w = walk(s.skill.path, LIMITS.maxFiles + 1);
+    if (w.links.length || w.truncated || w.files.length > LIMITS.maxFiles) throw new Error(`${s.skill.name} cannot be exported: it has links or more than ${LIMITS.maxFiles} files.`);
+    if (w.files.reduce((n, f) => n + f.bytes, 0) > LIMITS.maxTotalBytes) throw new Error(`${s.skill.name} is larger than ${fmtBytes(LIMITS.maxTotalBytes)}.`);
+    const files = w.files.sort((a, b) => a.path.localeCompare(b.path)).map((f) => {
+      const full = join(s.skill.path, ...f.path.split('/'));
+      const st = lst(full);
+      if (!st?.isFile() || st.size > LIMITS.maxFileBytes) throw new Error(`${s.skill.name}: ${f.path} changed or is larger than ${fmtBytes(LIMITS.maxFileBytes)}.`);
+      return { path: f.path, data: readFileSync(full) };
+    });
+    return { name: s.skill.name, folder: safeFolderName(s.skill.name), files };
+  }
+
+  /** Stages skills found in files from another container (a Harbor bundle) with the same checks as a .zip import. Writes nothing. */
+  previewFiles(source: string, files: Array<{ path: string; data: Buffer }>): SkillImportPreview {
+    const byPath = new Map<string, Buffer>();
+    const problems: string[] = [];
+    for (const f of files) {
+      const ok = checkArchivePath(f.path);
+      if (!ok.path || ok.path.endsWith('/')) { problems.push(`It contains ${ok.why ?? 'a folder entry'}.`); continue; }
+      byPath.set(ok.path, f.data);
+    }
+    if (problems.length) return this.stage('zip', source, { skills: [], problems, warnings: [] });
+    const r = this.candidates([...byPath].map(([path, data]) => ({ path, bytes: data.length })), basename(source), (_dir, list) => new Map(list.map((p) => [p, byPath.get(p)!])));
+    return this.stage('zip', source, r);
+  }
+
   /** Writes a checked preview into the library. Each skill goes to a temp folder first and is renamed into place. */
-  importStaged(token: string, names?: string[]): Skill[] {
+  importStaged(token: string, names?: string[]): Skill[] { return this.importStagedDetailed(token, names).skills; }
+
+  /** importStaged, plus which library skill each imported source folder became (`dir` inside the source -> new skill id). */
+  importStagedDetailed(token: string, names?: string[]): { skills: Skill[]; byDir: Record<string, string> } {
     if (!this.o.libraryDir) throw new Error('Harbor has no library folder here.');
     const st = typeof token === 'string' ? this.stages.get(token) : undefined;
     if (!st) throw new Error('That import preview has expired. Check the source again.');
@@ -453,6 +489,7 @@ export class SkillManager {
     mkdirSync(this.o.libraryDir, { recursive: true });
     this.assignTargets(chosen); // the library may have changed since the preview
     const done: string[] = [];
+    const byDir: Record<string, string> = {};
     for (const c of chosen) {
       const tmp = join(this.o.libraryDir, `.import-${randomUUID()}`);
       try {
@@ -470,8 +507,9 @@ export class SkillManager {
       }
       this.o.state.setSkillImport(c.targetName, { source: c.dir ? `${st.source} (${c.dir})` : st.source, hash: c.hash!, importedAt: this.now() });
       done.push(`library:${c.targetName}`);
+      byDir[c.dir] = `library:${c.targetName}`;
     }
     this.runCache.clear();
-    return this.list().filter((s) => done.includes(s.id));
+    return { skills: this.list().filter((s) => done.includes(s.id)), byDir };
   }
 }

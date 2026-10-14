@@ -17,7 +17,9 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',
   'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'previewScreenshot', 'answerScreenshot', 'listPendingPermissions', 'answerQuestion',
   'openDocument', 'pickDocument', 'documentAction',
-  'listToolRules', 'removeToolRule', 'exportDiagnostics'
+  'listToolRules', 'removeToolRule', 'exportDiagnostics',
+  'previewBundleExport', 'exportBundle', 'browseImportFile', 'previewBundle', 'importBundle',
+  'listImportSources', 'previewImport', 'importConversation', 'continueImported'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;

@@ -1,0 +1,12 @@
+{"timestamp":"2026-10-02T10:00:00.000Z","type":"session_meta","payload":{"id":"01a10000-aaaa-7bbb-8ccc-dddddddddddd","session_id":"01a10000-aaaa-7bbb-8ccc-dddddddddddd","timestamp":"2026-10-02T10:00:00.000Z","cwd":"C:\\Users\\someone\\Projects\\demo","originator":"codex_exec","cli_version":"0.160.0","source":"exec"}}
+{"timestamp":"2026-10-02T10:00:00.100Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-10-02T10:00:00.200Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Codex instructions that must not be imported."}]}}
+{"timestamp":"2026-10-02T10:00:00.300Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>C:\\x</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-10-02T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Write a unit test for the parser."}]}}
+{"timestamp":"2026-10-02T10:00:02.000Z","type":"turn_context","payload":{"cwd":"C:\\x","model":"gpt-x"}}
+{"timestamp":"2026-10-02T10:00:03.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"opaque"}}
+{"timestamp":"2026-10-02T10:00:04.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Reading the parser now."}]}}
+{"timestamp":"2026-10-02T10:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"c1","name":"shell","input":"ls"}}
+{"timestamp":"2026-10-02T10:00:06.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"parser.ts"}]}}
+{"timestamp":"2026-10-02T10:00:07.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Added tests/parser.test.ts with three cases."}]}}
+{"timestamp":"2026-10-02T10:00:08.000Z","type":"token_usage_record","payload":{"usage":{"input_tokens":1}}}
