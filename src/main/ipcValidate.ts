@@ -1,6 +1,7 @@
 const MAX_TEXT = 200_000;
 const MAX_ANSWER = 20_000;
 const MAX_PATH = 1024;
+const MAX_DESCRIPTOR = 64_000;
 const CONTROL = /[\0\r\n]/;
 
 const isId = (v: unknown): v is string => typeof v === 'string' && v.length >= 1 && v.length <= 200 && !CONTROL.test(v);
@@ -57,6 +58,21 @@ export function validateInvoke(method: string, args: unknown[]): void {
     case 'testCliPath':
       if (!isId(args[0])) bad('CLI id must be a short non-empty string');
       if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > MAX_PATH || CONTROL.test(args[1])) bad('path must be an executable path');
+      break;
+    case 'dryRunCustomCli':
+    case 'saveCustomCli': {
+      const [d, o] = args;
+      if (!d || typeof d !== 'object' || Array.isArray(d)) bad('descriptor must be an object');
+      let size = Infinity;
+      try { size = JSON.stringify(d).length; } catch { /* cyclic: rejected below */ }
+      if (size > MAX_DESCRIPTOR) bad(`descriptor must be plain JSON of at most ${MAX_DESCRIPTOR} characters`);
+      const c = o as { confirmExe?: unknown; replace?: unknown } | null | undefined;
+      if (!c || typeof c !== 'object' || typeof c.confirmExe !== 'string' || c.confirmExe.length > MAX_PATH || CONTROL.test(c.confirmExe)) bad('options must carry confirmExe, the executable path the user approved');
+      if (c!.replace !== undefined && typeof c!.replace !== 'boolean') bad('replace must be true or false');
+      break;
+    }
+    case 'removeCustomCli':
+      if (!isId(args[0])) bad('CLI id must be a short non-empty string');
       break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');

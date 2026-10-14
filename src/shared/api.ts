@@ -1,6 +1,30 @@
 export type Id = string;
 export type CliId = 'claude' | 'codex' | 'gemini' | string;
-export interface CliStatus { id: CliId; name: string; installed: boolean; version?: string; signedIn: boolean; models: string[]; note?: string; authState?: 'signedIn'|'signedOut'|'unknown' }
+export interface CliStatus { id: CliId; name: string; installed: boolean; version?: string; signedIn: boolean; models: string[]; note?: string; authState?: 'signedIn'|'signedOut'|'unknown'; features?: CliFeatures; custom?: boolean }   // features = what Harbor can use on this CLI (CHANGELOG 0.1.31); custom = added by the user as a CustomCliDescriptor
+export interface CliFeatures { images: boolean; resume: boolean; structuredOutput: boolean; permissionModes: boolean; readOnly: boolean; mcp: boolean; nativeSkills: boolean; usageReadings: boolean }   // a missing feature never blocks routing; it changes what Harbor does (no resume = handoff text every turn, no images = vision work goes elsewhere, no readOnly = no read-only work unless the user accepted it)
+export type CliArg = string | string[];   // a string[] is a group: dropped whole when any placeholder in it expands to nothing (e.g. ["--model","{model}"] with the CLI's default model)
+export interface CustomCliDescriptor {   // a user-described CLI (Settings > Connections > Add CLI), stored in the data folder's custom-clis.json; never read from a project folder (CHANGELOG 0.1.31)
+ id: CliId; name: string; exe: string;   // id: lowercase letters, digits and dashes, not a built-in id; exe: absolute path of the approved executable
+ version?: { args: string[] };   // default ["--version"]
+ status?: { args: string[]; signedInExit?: number; signedOutPattern?: string };   // signedOutPattern = plain text (case-insensitive) that means "signed out"; absent status = sign-in unknown
+ login?: { args: string[] };
+ run: {
+  args: CliArg[];   // placeholders: {model} {effort} {cwd} {promptFile}; whole-argument slots {resumeArgs} {effortArgs} {permissionArgs} {imageArgs} (appended at the end when absent)
+  prompt?: 'stdin' | 'file';   // default stdin; file = written to a temp file passed as {promptFile}
+  env?: Record<string, string>;   // extra variables you typed; the CLI otherwise gets only a fixed allowlist of Windows variables
+  output?: { format: 'text' | 'jsonl'; map?: { text?: string; session?: string; done?: string; error?: string; usage?: { input?: string; output?: string } } };   // map paths: $.a.b[0].c; done may be "$.type==result"
+  resume?: { args: CliArg[] };   // {sessionId} allowed here only; absent = no resume (Harbor sends its handoff text instead)
+  effort?: Partial<Record<'low' | 'medium' | 'high', string[]>>;
+  permissions?: Partial<Record<'read-only' | 'edit' | 'full', string[]>>;   // no read-only entry = no read-only work unless acceptReadOnlyRisk
+  image?: { args: string[] };   // per image, {path} = the image file; absent = not vision-capable
+ };
+ models?: Array<{ id: string; tier?: 'cheap' | 'standard' | 'strong'; strengths?: string[] }>;   // catalog entries (capabilities.json entries for the same cli/model win); default one 'default' model with no strengths
+ acceptReadOnlyRisk?: boolean;   // the user accepted that this CLI may write during read-only roles (planners, reviewers, plan mode)
+ approvedHash?: string; approvedAt?: number;   // set by Harbor on save: sha256 of the executable the user approved, and when; a changed file blocks the CLI until approved again
+}
+export interface CliTemplate { id: string; name: string; description: string; verified?: string; descriptor: Omit<CustomCliDescriptor, 'exe'> & { exe?: string } }   // verified = which CLI version the flags were checked against with --help
+export interface CliDryRunStep { name: 'version' | 'status' | 'prompt'; command: string; exitCode: number | null; stdout: string; stderr: string; error?: string; durationMs: number }   // stdout/stderr clipped for display
+export interface CliDryRun { ok: boolean; problems?: string[]; version?: string; authState?: 'signedIn' | 'signedOut' | 'unknown'; steps: CliDryRunStep[]; parsed?: { text?: string; sessionId?: string; inputTokens?: number; outputTokens?: number; chunks: number; ok?: boolean; error?: string } }   // problems = descriptor errors (nothing was run when present); parsed = what Harbor understood from the prompt run
 export interface Project { id: Id; name: string; path: string; lastOpened: number; image?: string }   // image = small data: URL chosen by the user
 export interface Conversation { id: Id; projectId: Id; title: string; updated: number; agentId: Id; pinned?: boolean; archived?: boolean; customTitle?: boolean; activity?: SessionActivity; reviewBase?: string; mode?: ConversationMode; goal?: string; deadline?: number }   // agentId = main agent, or a subagent for direct chats; deadline = epoch ms the owner needs this conversation's work by (setConversationDeadline; CHANGELOG 0.1.27)
 export type EditorId = 'code' | 'code-insiders' | 'cursor' | 'windsurf';   // editors Harbor can open a folder or file in (CHANGELOG 0.1.25)
@@ -50,6 +74,10 @@ export interface HarborApi {
  listClis(): Promise<CliStatus[]>; refreshClis(): Promise<CliStatus[]>; openLogin(cli: CliId): Promise<void>;
  testCliPath?(cli: CliId, path: string): Promise<CliStatus>;   // runs the CLI's version and sign-in checks against this executable without saving it; rejects a path that is not an existing file (CHANGELOG 0.1.30)
  browseCliPath?(): Promise<string | null>;   // file picker for an executable; null when cancelled (CHANGELOG 0.1.30)
+ listCustomClis?(): Promise<CustomCliDescriptor[]>; listCliTemplates?(): Promise<CliTemplate[]>;   // CHANGELOG 0.1.31
+ dryRunCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string }): Promise<CliDryRun>;   // validates, then runs version, status and one "reply OK" prompt in a temp folder; confirmExe must repeat descriptor.exe (the user's explicit OK to run that file). Saves nothing
+ saveCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string; replace?: boolean }): Promise<CustomCliDescriptor[]>;   // replace = update the custom CLI with the same id (otherwise a used id is refused); validates, records the executable's hash (approval), stores and re-runs discovery; also re-approves a changed file. Rejects invalid descriptors with every problem listed
+ removeCustomCli?(id: CliId): Promise<CustomCliDescriptor[]>;   // returns the remaining custom CLIs
  listProjects(): Promise<Project[]>; addProject(path?: string): Promise<Project|null>; removeProject(id: Id): Promise<void>; setProjectImage(id: Id, image: string | null): Promise<Project>;
  listConversations(projectId: Id): Promise<Conversation[]>; newConversation(projectId: Id): Promise<Conversation>; deleteConversation(id: Id): Promise<void>;
  updateConversation(id: Id, patch: { title?: string; pinned?: boolean; archived?: boolean }): Promise<Conversation>;

@@ -30,7 +30,10 @@ const rejected: Array<[string, unknown[]]> = [
   ['setAgentPriority', ['a1', '5']], ['setAgentPriority', ['a1', 1.5]], ['setAgentPriority', ['a1', Number.NaN]], ['setAgentPriority', [{}, 1]],
   ['integrateBranches', ['p1', []]], ['integrateBranches', ['p1', 'a1']], ['integrateBranches', ['p1', ['a1', 3]]], ['integrateBranches', ['p1', ['a1'], 5]], ['integrateBranches', ['p1', ['a1'], 'x\ny']],
   ['addProject', [42]], ['addProject', ['']], ['addProject', ['a\0b']], ['addProject', ['x'.repeat(1025)]],
-  ['testCliPath', ['', 'C:\\tools\\x.exe']], ['testCliPath', ['claude', 5]], ['testCliPath', ['claude', ' ']], ['testCliPath', ['claude', 'C:\\a\nb.exe']], ['testCliPath', ['claude', 'x'.repeat(1025)]]
+  ['testCliPath', ['', 'C:\\tools\\x.exe']], ['testCliPath', ['claude', 5]], ['testCliPath', ['claude', ' ']], ['testCliPath', ['claude', 'C:\\a\nb.exe']], ['testCliPath', ['claude', 'x'.repeat(1025)]],
+  ['saveCustomCli', [{ id: 'x' }]], ['saveCustomCli', [{ id: 'x' }, {}]], ['saveCustomCli', ['x', { confirmExe: 'C:\\x.exe' }]], ['saveCustomCli', [{ id: 'x' }, { confirmExe: 'C:\\x.exe', replace: 'yes' }]],
+  ['saveCustomCli', [{ big: 'x'.repeat(64_001) }, { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [[], { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [{ id: 'x' }, { confirmExe: 'a\nb' }]],
+  ['removeCustomCli', ['']], ['removeCustomCli', [7]]
 ];
 
 describe('registerIpc argument validation', () => {

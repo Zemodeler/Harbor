@@ -1,4 +1,4 @@
-import type { HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, Settings, ToolRule } from '../../shared/api';
+import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, Settings, ToolRule } from '../../shared/api';
 import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
 
@@ -14,6 +14,26 @@ const demoChanges: GitFileChange[] = [
   { path: 'src/address.tsx', status: 'added', additions: 24, deletions: 0 },
   { path: '.env.local', status: 'untracked', hidden: true }
 ];
+
+const DEMO_TEMPLATES: CliTemplate[] = [
+  { id: 'plain-text', name: 'Plain text CLI (start here)', description: 'Reads the prompt on stdin and prints its answer as plain text. Fill in the program and its print/headless flag, then run the dry run.',
+    descriptor: { id: 'mycli', name: 'My CLI', version: { args: ['--version'] }, run: { args: [], prompt: 'stdin', output: { format: 'text' } }, models: [{ id: 'default', tier: 'standard', strengths: ['chat', 'code'] }] } }
+];
+/** A few of Harbor's descriptor checks (src/main/clis/custom.ts), with the same wording, so the demo shows the error paths. */
+function demoProblems(d: CustomCliDescriptor, otherIds: string[]): string[] {
+  const out: string[] = [];
+  if (typeof d.id !== 'string' || !/^[a-z][a-z0-9-]{1,31}$/.test(d.id)) out.push('id must be 2-32 lowercase letters, digits or dashes, starting with a letter.');
+  else if (['claude', 'codex', 'gemini', 'harbor', 'fake', 'auto'].includes(d.id)) out.push(`id "${d.id}" is taken by a built-in CLI.`);
+  else if (otherIds.includes(d.id)) out.push(`id "${d.id}" is already used by another custom CLI.`);
+  if (!d.name?.trim()) out.push('name must be 1-60 characters on one line.');
+  if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(d.exe ?? '')) out.push('exe must be an absolute path.');
+  else if (!/\.(exe|cmd|bat)$/i.test(d.exe)) out.push(`exe ${d.exe} is not an existing file.`);
+  if (!d.run || !Array.isArray(d.run.args)) out.push('run must be an object with at least "args".');
+  return out;
+}
+function demoConfirm(d: CustomCliDescriptor, o: { confirmExe?: string } | undefined) {
+  if (!o?.confirmExe || o.confirmExe.trim().toLowerCase() !== d.exe.toLowerCase()) throw new Error(`Confirm that Harbor may run ${d.exe} first.`);
+}
 
 /** toolTimeoutMs = when an unanswered tool request is denied (Harbor: 5 minutes); conflictWithdrawMs = when a sample conflict becomes moot and is withdrawn. */
 export function createMockApi(options: { empty?: boolean; delay?: number; toolTimeoutMs?: number; conflictWithdrawMs?: number } = {}): HarborApi {
@@ -33,8 +53,9 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     if (agent.id === 'integrate-1') return { ...base, merges: [{ commit: demoCommits[1].hash, agentId: 'implement', integrationId: agent.id }], files: demoChanges, clean: false, conflicts: ['src/account.tsx'], laterCommits: [{ hash: demoCommits[0].hash, subject: demoCommits[0].subject, files: ['src/account.tsx'], agentTitle: 'Implement account page' }], dependents: [{ agentId: 'verify', title: 'Verify account flow', state: 'done', reason: 'spec' }, { agentId: 'queued-1', title: 'Index product titles', state: 'queued', reason: 'overlap' }] };
     return { ...base, merges: [{ commit: demoCommits[1].hash, agentId: agent.id }], files: demoChanges, clean: true, laterCommits: [], dependents: [{ agentId: 'verify', title: 'Verify account flow', state: 'done', reason: 'dependsOn' }], ...(data.agents.some(a => a.rollback?.taskId === agent.id && ['queued', 'working'].includes(a.state)) ? { blockers: ['A rollback of this task is already running.'] } : {}) };
   };
+  let customClis: CustomCliDescriptor[] = [];
   let requested = false;
-  const copy = <T,>(v: T): T => structuredClone(v);
+  const copy =<T,>(v: T): T => structuredClone(v);
   const emit = (e: HarborEvent) => {
     if (e.type === 'permission') pendingPermissions.set(e.requestId, copy(e));
     listeners.forEach(cb => cb(copy(e)));
@@ -93,6 +114,33 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       return copy({ ...cli, installed: true, version: cli.version ?? '1.0.0', note: 'Demo only: nothing was run.' });
     },
     async browseCliPath() { await pause(); return 'C:\\Tools\\demo-cli.exe'; },
+    // Custom CLIs: the same checks as Harbor for the parts the UI shows (id, program path, the explicit OK); nothing is ever run.
+    async listCustomClis() { return copy(customClis); },
+    async listCliTemplates() { return copy(DEMO_TEMPLATES); },
+    async dryRunCustomCli(d, o) {
+      const problems = demoProblems(d, customClis.map(c => c.id).filter(x => x !== d.id));
+      if (problems.length) return { ok: false, problems, steps: [] };
+      demoConfirm(d, o);
+      await pause();
+      return { ok: true, version: '1.0.0', steps: [
+        { name: 'version', command: `${d.exe} --version`, exitCode: 0, stdout: 'demo-cli 1.0.0', stderr: '', durationMs: 40 },
+        { name: 'prompt', command: [d.exe, ...d.run.args.flat()].join(' '), exitCode: 0, stdout: 'OK', stderr: '', durationMs: 900 }
+      ], parsed: { text: 'OK', chunks: 2, ok: true } };
+    },
+    async saveCustomCli(d, o) {
+      const replace = o?.replace === true;
+      const problems = demoProblems(d, customClis.map(c => c.id).filter(x => !(replace && x === d.id)));
+      if (problems.length) throw new Error(`This CLI cannot be saved:\n- ${problems.join('\n- ')}`);
+      demoConfirm(d, o);
+      const saved: CustomCliDescriptor = { ...copy(d), approvedHash: 'demo', approvedAt: Date.now() };
+      customClis = replace ? customClis.map(c => c.id === d.id ? saved : c) : [...customClis, saved];
+      const readOnly = !!d.run.permissions?.['read-only'], jsonl = d.run.output?.format === 'jsonl';
+      const cli: CliStatus = { id: d.id, name: d.name, installed: true, version: '1.0.0', signedIn: false, authState: 'unknown', models: (d.models ?? [{ id: 'default' }]).map(m => m.id), custom: true, note: 'Demo only: nothing was run.',
+        features: { images: !!d.run.image, resume: !!d.run.resume && jsonl, structuredOutput: jsonl, permissionModes: !!d.run.permissions, readOnly, mcp: false, nativeSkills: false, usageReadings: false } };
+      data.clis = [...data.clis.filter(c => c.id !== d.id), cli]; emit({ type: 'cli', cli });
+      return copy(customClis);
+    },
+    async removeCustomCli(cliId) { customClis = customClis.filter(c => c.id !== cliId); data.clis = data.clis.filter(c => c.id !== cliId || !c.custom); return copy(customClis); },
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;

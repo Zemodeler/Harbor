@@ -1,10 +1,11 @@
 import { existsSync, statSync } from 'node:fs';
 import { delimiter, join, posix, win32 } from 'node:path';
 import type { CliId, CliStatus } from '../../shared/api';
-import { runProcess, type Runner } from '../proc';
+import { quoteWinArg, runProcess, type Runner } from '../proc';
 import { CLI_DEFINITIONS, type AuthState, type CliDefinition } from './registry';
 
-export interface ResolvedCli extends CliStatus { path?: string; authState: AuthState }
+/** `blocked`: why routing must not use this CLI although it is installed (a custom CLI whose file changed since the user approved it). */
+export interface ResolvedCli extends CliStatus { path?: string; authState: AuthState; blocked?: string }
 
 export interface DiscoveryDeps {
   run: Runner;
@@ -36,6 +37,8 @@ export function cliPathProblem(p: unknown): string | undefined {
 
 /** Find an executable: the Settings path, the env override, PATH, then extra known dirs. Windows prefers .exe over .cmd. */
 export function findExecutable(def: CliDefinition, d: Pick<DiscoveryDeps, 'env' | 'platform' | 'isFile' | 'cliPaths'>): string | undefined {
+  // A custom CLI runs exactly the file the user approved: no Settings path, env var or PATH search can swap it.
+  if (def.exe !== undefined) return d.isFile(def.exe) ? def.exe : undefined;
   const chosen = d.cliPaths?.[def.id];
   if (chosen && d.isFile(chosen)) return chosen;
   const override = d.env[def.envVar];
@@ -52,18 +55,19 @@ export function findExecutable(def: CliDefinition, d: Pick<DiscoveryDeps, 'env' 
 export async function resolveCli(def: CliDefinition, deps: DiscoveryDeps = defaultDiscoveryDeps()): Promise<ResolvedCli> {
   const r = await resolveFound(def, deps);
   // A path chosen in Settings that is gone (an update moved the CLI) must not silently look like "not installed" or like the setting won.
-  const chosen = deps.cliPaths?.[def.id];
+  const chosen = def.exe === undefined ? deps.cliPaths?.[def.id] : undefined;
   if (!chosen || deps.isFile(chosen)) return r;
   const missing = `The path set in Settings is not an existing file: ${chosen}.`;
   return { ...r, note: r.installed ? `${missing} Using ${r.path} instead.${r.note ? ` ${r.note}` : ''}` : `${missing} ${r.note ?? ''}`.trim() };
 }
 
 async function resolveFound(def: CliDefinition, deps: DiscoveryDeps): Promise<ResolvedCli> {
-  const base = { id: def.id, name: def.name, models: def.models };
+  const base = { id: def.id, name: def.name, models: def.models, ...(def.features ? { features: def.features } : {}), ...(def.custom ? { custom: true } : {}) };
   const path = findExecutable(def, deps);
+  if (!path && def.exe !== undefined) return { ...base, installed: false, signedIn: false, authState: 'unknown', note: `Not found: ${def.exe} is not an existing file. Edit this CLI in Settings.` };
   if (!path) return { ...base, installed: false, signedIn: false, authState: 'unknown', note: `Not installed. Looked on PATH and in: ${def.extraDirs().slice(0, 6).join('; ') || '(no known folders)'}` };
 
-  const v = await deps.run(path, def.versionArgs, { timeoutMs: 15000 });
+  const v = await deps.run(path, def.versionArgs, { timeoutMs: 15000, ...(def.env ? { env: def.env } : {}) });
   if (v.error || v.code !== 0) {
     return { ...base, path, installed: true, signedIn: false, authState: 'unknown', note: `Found at ${path} but it failed to run: ${v.error ?? (v.stderr.trim() || `exit ${v.code}`)}` };
   }
@@ -72,7 +76,7 @@ async function resolveFound(def: CliDefinition, deps: DiscoveryDeps): Promise<Re
   let authState: AuthState = 'unknown';
   let note: string | undefined = def.noStatusNote;
   if (def.statusArgs && def.parseStatus) {
-    const s = await deps.run(path, def.statusArgs, { timeoutMs: 20000 });
+    const s = await deps.run(path, def.statusArgs, { timeoutMs: 20000, ...(def.env ? { env: def.env } : {}) });
     authState = s.error || s.timedOut ? 'unknown' : def.parseStatus(s);
     if (authState === 'unknown') note = 'Sign-in status could not be determined. Retry the check or open the CLI.';
     if (authState === 'signedOut') note = 'Installed, login required.';
@@ -86,12 +90,14 @@ export async function discoverClis(deps: DiscoveryDeps = defaultDiscoveryDeps())
 
 /** Strip main-process-only fields before sending to the renderer. */
 export function toStatus(r: ResolvedCli): CliStatus {
-  return { id: r.id, name: r.name, installed: r.installed, version: r.version, signedIn: r.signedIn, models: r.models, note: r.note, authState: r.authState };
+  return { id: r.id, name: r.name, installed: r.installed, version: r.version, signedIn: r.signedIn, models: r.models, note: r.note, authState: r.authState,
+    ...(r.features ? { features: r.features } : {}), ...(r.custom ? { custom: true } : {}) };
 }
 
 /** Open the CLI's own login flow in a visible terminal window. Never reads credentials. */
 export function loginCommand(def: CliDefinition, path: string): string {
-  const args = def.loginArgs.length ? ' ' + def.loginArgs.join(' ') : '';
+  // Custom CLIs bring their own login arguments: anything beyond plain words is quoted (and quotes or % refused) for cmd.exe.
+  const args = def.loginArgs.length ? ' ' + def.loginArgs.map((a) => (/^[\w.:/=-]+$/.test(a) ? a : quoteWinArg(a))).join(' ') : '';
   return `start "Harbor: sign in to ${def.name}" cmd /k "${path}"${args}`;
 }
 

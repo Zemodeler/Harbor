@@ -54,6 +54,8 @@ export interface OrchestratorDeps {
   adapterFor: (cli: CliId) => CliAdapter | undefined;
   enabled: (cli: CliId) => boolean;
   verified?: (cli: CliId) => boolean;
+  /** Whether a read-only run on this CLI stays read-only (a custom CLI without a read-only mode does not, unless the user accepted that). */
+  readOnlySafe?: (cli: CliId) => boolean;
   /** Capability catalog (editable data); defaults to the built-in one. */
   catalog?: CatalogEntry[];
   worktreesRoot: string;
@@ -3097,7 +3099,7 @@ export class Orchestrator {
       const input: RouterInput = {
         clis: this.d.getClis(), ledger, enabled: this.d.enabled, hasAdapter: (c) => !!this.d.adapterFor(c),
         load: (c) => store.allAgentRecords().filter((x) => x.cli === c && this.running.has(x.id) && x.id !== agent.id).length,
-        verified: this.d.verified, catalog: this.d.catalog, now: clock, ...(calibration ? { calibration } : {}),
+        verified: this.d.verified, ...(this.d.readOnlySafe ? { readOnlySafe: this.d.readOnlySafe } : {}), catalog: this.d.catalog, now: clock, ...(calibration ? { calibration } : {}),
         history: buildHistory(store.listUsage(), clock()), committed: this.committedNow(clock(), calibration),
         policy: {
           allowedModels: eff.allowedModels, effortPolicy: eff.effortPolicy, lowAllowance: eff.lowAllowancePolicy, reserve: eff.subscriptionReserve,
@@ -3107,6 +3109,9 @@ export class Orchestrator {
       const urgency = this.urgencyFor(o.conversationId, clock(), calibration);
       const requestFor = (requireCli?: CliId): RouteRequest => ({
         role: o.role, complexity: o.complexity, tier: o.tier, needs: o.needs, required: o.required, effort: o.effort, fixedEffort: o.fixedEffort, retry: o.retry,
+        // Read-only work in the project (planners, reviewers, plan mode) needs a CLI that can keep it read-only. The concierge is
+        // exempt: it runs lean in a neutral empty folder, never in the project, so read-only adds nothing there.
+        ...(o.permission === 'read-only' && !o.lean ? { readOnly: true } : {}),
         ...(o.difficulty !== undefined ? { difficulty: o.difficulty } : {}), ...(o.difficultySignals ? { difficultySignals: o.difficultySignals } : {}),
         ...(o.size ? { size: o.size } : {}), ...(o.interactive ? { interactive: true } : {}), ...(urgency > 0 ? { urgency } : {}),
         ...(o.escalateFrom ? { escalateFrom: o.escalateFrom } : {}),

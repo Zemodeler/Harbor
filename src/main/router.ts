@@ -43,6 +43,8 @@ export interface RouteRequest {
   continuity?: CliId;
   /** CLIs already tried and failed for this assignment. Hard skip. */
   exclude?: CliId[];
+  /** The run must not write (planners, reviewers, plan mode, the concierge): only CLIs that can keep it read-only are considered. */
+  readOnly?: boolean;
   /** CLI/model that failed or disappointed but may still be the best left: a soft penalty, not a skip. `model` absent = the whole CLI. */
   avoid?: { cli: CliId; model?: string }[];
   /** CLIs needed by an explicit extension request; restricts the choice when present. */
@@ -149,6 +151,8 @@ export interface RouterInput {
   load: (cli: CliId) => number;
   /** Adapters whose headless flow is verified against a real install; used only as a tie-breaker. */
   verified?: (cli: CliId) => boolean;
+  /** Whether the CLI can keep a `readOnly` run read-only (absent = every CLI can). A safety filter, not a capability claim. */
+  readOnlySafe?: (cli: CliId) => boolean;
   /** Capability catalog; defaults to the built-in one. */
   catalog?: CatalogEntry[];
   policy?: RoutingPolicy;
@@ -399,7 +403,9 @@ export function evaluate(req: RouteRequest, inp: RouterInput): Evaluation {
   // In id order, so skips and notes read the same whatever order the CLIs were listed in.
   for (const c of [...inp.clis].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0))) {
     if (!c.installed) { skip(c.id, 'not installed'); continue; }
+    if (c.blocked) { skip(c.id, c.blocked); continue; }
     if (!inp.hasAdapter(c.id)) { skip(c.id, 'no headless adapter yet'); continue; }
+    if (req.readOnly && inp.readOnlySafe && !inp.readOnlySafe(c.id)) { skip(c.id, 'has no read-only mode (allow it for read-only work in Settings)'); continue; }
     if (!inp.enabled(c.id)) { skip(c.id, 'disabled in settings'); continue; }
     if (c.authState === 'signedOut') { skip(c.id, 'login required'); continue; }
     if (req.exclude?.includes(c.id)) { skip(c.id, 'failed earlier for this task'); continue; }
