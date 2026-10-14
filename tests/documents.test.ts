@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -73,6 +73,20 @@ describe('document path guard', () => {
     writeFileSync(join(root, 'real', 'in.md'), 'inside');
     junction(join(root, 'alias'), join(root, 'real'));
     if (existsSync(join(root, 'alias'))) expect(doc(open('alias/in.md')).text).toBe('inside');
+  });
+
+  it('a project reached through a junction (or an 8.3 short name) reopens the canonical path Harbor emitted for its document', () => {
+    const { root } = project();
+    writeFileSync(join(root, 'plan.md'), 'inside');
+    const alias = join(tmp(), 'alias');
+    junction(alias, root);
+    if (!existsSync(alias)) return;
+    const canonical = realpathSync.native(join(root, 'plan.md'));
+    const r = resolveDocumentPath(canonical, alias, [{ kind: 'project', path: alias }]);
+    expect(r.ok).toBe(true);
+    // Still refused: a file outside, even by its canonical spelling.
+    const other = resolveDocumentPath(join(tmp(), 'x.md'), alias, [{ kind: 'project', path: alias }]);
+    expect(other.ok ? 'ok' : other.reason).toBe('outside');
   });
 
   it('refuses URLs, network paths, control characters, folders, missing files and credential files', () => {

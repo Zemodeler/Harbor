@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -374,7 +374,8 @@ describe('screenshots end to end', () => {
     expect(att.path!.startsWith(join(t.dataDir, 'attachments', t.conv.id))).toBe(true);
     expect(readFileSync(att.path!).equals(PNG)).toBe(true);
     expect(att.url).toMatch(new RegExp(`^harbor-file://attachments/${t.conv.id}/[A-Za-z0-9-]+\\.png$`));
-    expect(resolveHarborFile(t.dataDir, att.url!)?.path.toLowerCase()).toBe(att.path!.toLowerCase());
+    // resolveHarborFile returns the canonical path; the stored one may be a short 8.3 spelling (RUNNER~1 on CI).
+    expect(resolveHarborFile(t.dataDir, att.url!)?.path.toLowerCase()).toBe(realpathSync.native(att.path!).toLowerCase());
 
     const runs = t.leadRuns();
     expect(runs).toHaveLength(2);
