@@ -1,4 +1,5 @@
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
+import type { CustomCliDescriptor } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import type { AppearanceState } from '../hooks/useAppearance';
 import { layouts, palettes, paletteTokens } from '../appearance';
@@ -8,6 +9,7 @@ import { RoutingFields, RoutingSettings } from './RoutingSettings';
 import { UsageWindows } from './UsageWindows';
 import { ToolRules } from './ToolRules';
 import { CliPathField } from './CliPath';
+import { AddCliPanel, CliFeaturesNote, CustomCliActions } from './CustomCli';
 import { canExportDiagnostics, Diagnostics } from './Diagnostics';
 import s from '../Harbor.module.css';
 
@@ -18,6 +20,17 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
   const tabs = ['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage', 'Project', ...(canExportDiagnostics(state.api) ? ['Diagnostics'] : [])];
   const project = state.projects.find(p => p.id === state.projectId);
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
+  // Custom CLIs (plan 2.2): their descriptors, for Edit, and the open Add/Edit panel.
+  const [customs, setCustoms] = useState<CustomCliDescriptor[]>([]);
+  const [editor, setEditor] = useState<CustomCliDescriptor | 'new'>();
+  const api = state.api;
+  useEffect(() => {
+    if (tab !== 'Connections' || !api.listCustomClis) return;
+    let alive = true;
+    void api.listCustomClis().then(list => { if (alive) setCustoms(list); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [tab, api]);
+  async function afterCustomChange() { await state.refreshClis(); if (api.listCustomClis) setCustoms(await api.listCustomClis()); }
   return <section className={s.settings} aria-label="Settings">
     <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : tab === 'Project' ? 'Settings for this project.' : tab === 'Diagnostics' ? 'Help us help you.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
     <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : tab === 'Project' ? 'Override routing for one project and manage the tools it always allows.' : tab === 'Diagnostics' ? 'Export a redacted bundle for support.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
@@ -53,8 +66,13 @@ export function Settings({ state, appearanceState, workspace }: { state: HarborS
           <small>{cli.version ? `Version ${cli.version}` : 'Version unavailable'}{cli.note ? ` · ${cli.note}` : ''}</small>
           <div className={s.connectionActions}>{cli.installed && !cli.signedIn && cli.authState !== 'unknown' ? <button disabled={pending} onClick={() => void action(() => state.run(() => state.api.openLogin(cli.id)))}>Sign in to {cli.name}</button> : null}
             <label><input type="checkbox" disabled={!cli.installed || pending} checked={state.settings?.cliOverrides[cli.id]?.enabled !== false} onChange={e => void action(() => state.updateSettings({ cliOverrides: { ...state.settings!.cliOverrides, [cli.id]: { enabled: e.target.checked } } }))}/> Enable {cli.name}</label></div>
-          <CliPathField key={`${cli.id}:${state.settings?.cliPaths?.[cli.id] ?? ''}`} api={state.api} cli={cli} saved={state.settings?.cliPaths?.[cli.id]} disabled={pending} onSave={path => state.saveSettings({ cliPaths: { [cli.id]: path } })}/>
+          <CliFeaturesNote cli={cli}/>
+          {cli.custom ? <CustomCliActions api={state.api} cli={cli} descriptor={customs.find(c => c.id === cli.id)} disabled={pending} onEdit={() => setEditor(customs.find(c => c.id === cli.id))} onRemoved={afterCustomChange}/>
+            : <CliPathField key={`${cli.id}:${state.settings?.cliPaths?.[cli.id] ?? ''}`} api={state.api} cli={cli} saved={state.settings?.cliPaths?.[cli.id]} disabled={pending} onSave={path => state.saveSettings({ cliPaths: { [cli.id]: path } })}/>}
         </div>)}
+        {state.api.saveCustomCli && state.api.dryRunCustomCli ? (editor
+          ? <AddCliPanel key={editor === 'new' ? 'new' : editor.id} api={state.api} editing={editor === 'new' ? undefined : editor} onClose={() => setEditor(undefined)} onSaved={afterCustomChange}/>
+          : <div className={s.connectionActions}><button onClick={() => setEditor('new')}>Add CLI</button><span className={s.muted}>Any local CLI that takes a prompt and prints an answer.</span></div>) : null}
       </> : tab === 'Routing' ? <>
         <h3>Routing defaults</h3><p>Choose how Harbor assigns work to your enabled connections.</p>
         <label className={s.field}>Routing<select disabled={pending} value={state.settings.routing} onChange={e => void action(() => state.updateSettings({ routing: e.target.value as 'auto' | 'manual' }))}><option value="auto">Automatic</option><option value="manual">Manual</option></select></label>

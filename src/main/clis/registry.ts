@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type { CliId } from '../../shared/api';
+import type { CliFeatures, CliId } from '../../shared/api';
 
 export type AuthState = 'signedIn' | 'signedOut' | 'unknown';
 
@@ -20,7 +20,16 @@ export interface CliDefinition {
   loginArgs: string[];
   models: string[];
   noStatusNote?: string;
+  /** Custom CLIs: the one approved executable. Set = no Settings path, env var or PATH search (exeNames/envVar are unused). */
+  exe?: string;
+  /** What Harbor can use on this CLI (shown in Settings; a missing feature changes what Harbor does, it never blocks routing). */
+  features?: CliFeatures;
+  custom?: boolean;
+  /** Environment for the version and status checks (custom CLIs: the allowlist plus the user's own values); absent = Harbor's. */
+  env?: NodeJS.ProcessEnv;
 }
+
+const NO_FEATURES: CliFeatures = { images: false, resume: false, structuredOutput: false, permissionModes: false, readOnly: false, mcp: false, nativeSkills: false, usageReadings: false };
 
 const home = () => process.env['USERPROFILE'] ?? process.env['HOME'] ?? '';
 const appData = () => process.env['APPDATA'] ?? '';
@@ -58,7 +67,9 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
       return 'unknown';
     },
     loginArgs: ['auth', 'login'],
-    models: ['sonnet', 'opus', 'haiku']
+    models: ['sonnet', 'opus', 'haiku'],
+    // Images are passed but a real vision run is unverified (docs/limitations.md); MCP and skills are the CLI's own, Harbor adds none yet.
+    features: { images: true, resume: true, structuredOutput: true, permissionModes: true, readOnly: true, mcp: true, nativeSkills: true, usageReadings: true }
   },
   {
     id: 'codex', name: 'Codex', exeNames: ['codex'], envVar: 'HARBOR_CODEX_PATH',
@@ -73,7 +84,9 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
     },
     loginArgs: ['login'],
     // Codex picks its own default model; Harbor passes --model only when a name other than 'default' is chosen.
-    models: ['default']
+    models: ['default'],
+    // --image is unverified (adapters/codex.ts); a native skills folder is unverified, so it is not claimed. Limits come from its logs.
+    features: { images: true, resume: true, structuredOutput: true, permissionModes: true, readOnly: true, mcp: true, nativeSkills: false, usageReadings: true }
   },
   {
     id: 'gemini', name: 'Gemini CLI', exeNames: ['gemini'], envVar: 'HARBOR_GEMINI_PATH',
@@ -81,6 +94,7 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
     versionArgs: ['--version'],
     loginArgs: [],
     models: ['default'],
+    features: NO_FEATURES,
     noStatusNote: 'Gemini CLI has no non-interactive sign-in check; status is unknown. Terminal adapter only.'
   }
 ];

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -14,8 +14,11 @@ import { Git } from './git';
 import { GitView } from './gitView';
 import { isEditorId } from './launcher';
 import { Orchestrator, toAgent, type OrchestratorDeps } from './orchestrator';
-import type { ProcessKiller, Runner } from './proc';
-import { newId, Store } from './store';
+import { runProcess, type ProcessKiller, type Runner } from './proc';
+import { newId, normPath, Store } from './store';
+import { GenericAdapter } from './adapters/generic';
+import { CLI_TEMPLATES, CUSTOM_CLIS_FILE, MAX_CUSTOM_CLIS, catalogEntriesOf, definitionOf, fileStamp, hashFile, hasReadOnlyMode, loadCustomClis, saveCustomClis, validateDescriptor } from './clis/custom';
+import { dryRunCli } from './clis/dryRun';
 import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
@@ -172,14 +175,34 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // reported (log, journal, diagnostics) instead of silently routing on a catalog the owner did not intend.
   const loadedCatalog = loadCatalogWithWarnings(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined);
   // Codex's own model list corrects the catalog: models it stopped listing drop out, new ones join with middle priors.
+  // A fresh array that the ledger and orchestrator share: custom CLIs' entries are added and removed in place (syncCustomCatalog).
   const catalog = mergeCodexModels(opts.catalog ?? loadedCatalog.catalog, opts.codexModels?.(), namedCodexModels(store));
+  const isFile = opts.isFile ?? isFilePath;
+  const isDirectory = (p: string) => { try { return statSync(p).isDirectory(); } catch { return false; } };
+  // Custom CLIs come only from the data folder (never from a project); without one (tests) they live in memory.
+  const customFile = opts.dataDir ? join(opts.dataDir, CUSTOM_CLIS_FILE) : undefined;
+  const loadedCustom = loadCustomClis(customFile, { isFile });
+  let customs: CustomCliDescriptor[] = loadedCustom.clis;
+  const customOf = (id: CliId) => customs.find((c) => c.id === id);
+  const customEntries = new Set<CatalogEntry>();
+  const syncCustomCatalog = () => {
+    for (let i = catalog.length - 1; i >= 0; i--) if (customEntries.has(catalog[i]!)) catalog.splice(i, 1);
+    customEntries.clear();
+    // capabilities.json entries for the same cli/model win over the descriptor's.
+    for (const d of customs) for (const e of catalogEntriesOf(d)) if (!catalog.some((x) => x.cli === e.cli && x.model === e.model)) { catalog.push(e); customEntries.add(e); }
+  };
+  syncCustomCatalog();
   const ledger = new UsageLedger(store, { measurable: (id) => !!adapterFor(id), catalog, ...opts.ledger });
   const git = opts.git ?? new Git();
   const dataRoot = opts.dataDir ?? join(process.env['TEMP'] ?? '.', 'harbor-test');
   const worktreesRoot = opts.worktreesRoot ?? join(dataRoot, 'worktrees');
   let clis: ResolvedCli[] = [];
-  const isFile = opts.isFile ?? isFilePath;
   const discoveryDeps = (cliPaths?: Record<CliId, string>) => ({ ...defaultDiscoveryDeps(cliPaths), isFile, ...(opts.cliRunner ? { run: opts.cliRunner } : {}) });
+  /** Plan 2.4: running a custom executable needs the user's explicit OK naming that exact path (the renderer repeats it). */
+  const confirmRun = (exe: string, o: unknown) => {
+    const c = o && typeof o === 'object' ? (o as { confirmExe?: unknown }).confirmExe : undefined;
+    if (typeof c !== 'string' || normPath(c.trim()) !== normPath(exe)) throw new Error(`Confirm that Harbor may run ${exe} first.`);
+  };
   /** A Settings executable path as given, refused with a readable message unless it is an absolute path to an existing file. */
   const checkedCliPath = (cli: CliId, path: unknown): string => {
     const p = typeof path === 'string' ? path.trim() : path;
@@ -189,8 +212,42 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     return p as string;
   };
 
+  // ---- custom CLI approval: Harbor runs a custom executable only while its file is the one the user approved (sha256 on save).
+  // The size+mtime stamp of the last verified hash avoids re-hashing an unchanged binary on every routing decision.
+  const verifiedStamp = new Map<CliId, string>();
+  let staleCheck: Promise<unknown> | undefined;
+  const approvalOf = async (d: CustomCliDescriptor): Promise<{ ok: true } | { ok: false; why: string }> => {
+    if (!isFile(d.exe)) return { ok: true }; // discovery reports "not found"; nothing would run
+    const stamp = fileStamp(d.exe);
+    if (stamp && verifiedStamp.get(d.id) === stamp) return { ok: true };
+    const hash = await hashFile(d.exe).catch(() => undefined);
+    if (d.approvedHash && hash === d.approvedHash) { if (stamp) verifiedStamp.set(d.id, stamp); return { ok: true }; }
+    verifiedStamp.delete(d.id);
+    return { ok: false, why: d.approvedHash ? 'its file changed since you approved it' : 'it has not been approved yet' };
+  };
+  const blockedCli = (d: CustomCliDescriptor, why: string): ResolvedCli => {
+    const def = definitionOf(d);
+    return { id: d.id, name: d.name, models: def.models, features: def.features, custom: true, path: d.exe, installed: true, signedIn: false, authState: 'unknown',
+      blocked: `${why} (review it in Settings and approve it again)`, note: `Harbor will not run ${d.exe}: ${why}. Open it in Settings, check it and approve it again.` };
+  };
+  // Not an async wrapper around opts.discover: startup recovery is ordered after the first discovery, and tests rely on its timing.
+  const discoverAll = (): Promise<ResolvedCli[]> => (opts.discover ? opts.discover() : discoverWithCustoms());
+  const discoverWithCustoms = async (): Promise<ResolvedCli[]> => {
+    // The approval is checked before discovery runs anything: a changed binary is not even asked for its version.
+    const approved: CustomCliDescriptor[] = [], blocked: ResolvedCli[] = [];
+    for (const d of customs) { const a = await approvalOf(d); if (a.ok) approved.push(d); else blocked.push(blockedCli(d, a.why)); }
+    const found = await discoverClis({ ...discoveryDeps(store.getSettings().cliPaths), definitions: [...CLI_DEFINITIONS, ...approved.map(definitionOf)] });
+    return [...found, ...blocked];
+  };
+
   const defaultAdapter = (id: CliId, r?: ResolvedCli): CliAdapter | undefined => {
-    if (!r?.installed || !r.path) return undefined;
+    if (!r?.installed || !r.path || r.blocked) return undefined;
+    const custom = customOf(id);
+    if (custom) {
+      // The file changed after discovery approved it: no adapter until a refresh has re-checked it.
+      if (fileStamp(custom.exe) !== verifiedStamp.get(id)) { staleCheck ??= refresh().catch(() => []).finally(() => { staleCheck = undefined; }); return undefined; }
+      return new GenericAdapter(custom);
+    }
     if (id === 'claude') return new ClaudeAdapter(r.path);
     if (id === 'codex') return new CodexAdapter(r.path);
     return undefined; // gemini and others: detected, but no headless adapter yet
@@ -244,6 +301,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
     verified: (c) => VERIFIED.has(c),
+    // Plan 2.4: a custom CLI with no read-only mode gets no read-only work unless the user accepted that risk for it.
+    readOnlySafe: (c) => { const d = customOf(c); return !d || hasReadOnlyMode(d) || d.acceptReadOnlyRisk === true; },
     catalog,
     neutralDir: opts.dataDir ? join(opts.dataDir, 'neutral') : undefined,
     now: opts.now,
@@ -262,7 +321,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
   // running conversations instead of only in a log nobody reads. Journal entries use a project-less id (diagnostics lists them).
   for (const n of store.startupNotices) journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: n });
-  for (const w of loadedCatalog.warnings) { console.warn(`[harbor] ${w}`); journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: w }); }
+  for (const w of [...loadedCatalog.warnings, ...loadedCustom.warnings]) { console.warn(`[harbor] ${w}`); journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: w }); }
   store.onFlushError = (e) => {
     journal.add({ kind: 'triage', projectId: HARBOR_JOURNAL, text: `Harbor could not save its state (${e.message}). It keeps trying; recent changes exist only in memory until then.` });
     for (const p of store.listProjects()) for (const c of store.listConversations(p.id)) {
@@ -279,7 +338,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   // startup chain any missing CLI is re-checked, including ones that are genuinely absent (they just stay missing).
   const refresh = async (attempt = 0, startup = false): Promise<ResolvedCli[]> => {
     if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
-    clis = await (opts.discover ? opts.discover() : discoverClis(discoveryDeps(store.getSettings().cliPaths)));
+    clis = await discoverAll();
     for (const c of clis) { if (c.installed) seenInstalled.add(c.id); bus.emit({ type: 'cli', cli: toStatus(c) }); }
     const lost = clis.some((c) => !c.installed && (startup || seenInstalled.has(c.id)));
     if (lost && attempt < recheckDelays.length) {
@@ -315,9 +374,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async listClis() { await ready; return clis.map(toStatus); },
     async refreshClis() { return (await refresh()).map(toStatus); },
     async openLogin(cliId) {
-      const def = CLI_DEFINITIONS.find((d) => d.id === cliId);
+      const custom = customOf(cliId);
+      const def = custom ? definitionOf(custom) : CLI_DEFINITIONS.find((d) => d.id === cliId);
       const r = clis.find((c) => c.id === cliId);
       if (!def || !r?.path) throw new Error(`${cliId} is not installed`);
+      if (r.blocked) throw new Error(`Harbor will not run ${r.path}: ${r.blocked}.`);
       if (process.platform !== 'win32') throw new Error('Opening a login terminal is only implemented on Windows');
       // Visible terminal; Harbor never reads or stores credentials.
       spawn('cmd.exe', ['/d', '/c', loginCommand(def, r.path)], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
@@ -331,6 +392,43 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async browseCliPath() {
       if (!opts.pickFile) throw new Error('Choosing a file is available in the desktop app.');
       return (await opts.pickFile()) ?? null;
+    },
+    async listCustomClis() { return structuredClone(customs); },
+    async listCliTemplates() { return structuredClone(CLI_TEMPLATES); },
+    async dryRunCustomCli(descriptor, o) {
+      // Editing an existing CLI may keep its id, so duplicates are not a dry-run problem; saving checks them.
+      const v = validateDescriptor(descriptor, { otherIds: [], isFile, isDirectory });
+      if (!v.descriptor) return { ok: false, problems: v.problems, steps: [] };
+      confirmRun(v.descriptor.exe, o);
+      return dryRunCli(v.descriptor, { run: opts.cliRunner ?? runProcess });
+    },
+    async saveCustomCli(descriptor, o) {
+      const replace = o?.replace === true;
+      const id = descriptor && typeof descriptor === 'object' ? (descriptor as { id?: unknown }).id : undefined;
+      if (replace && !customs.some((c) => c.id === id)) throw new Error('There is no custom CLI with that id to replace.');
+      const v = validateDescriptor(descriptor, { otherIds: customs.filter((c) => !(replace && c.id === id)).map((c) => c.id), isFile, isDirectory });
+      if (!v.descriptor) throw new Error(`This CLI cannot be saved:\n- ${v.problems.join('\n- ')}`);
+      confirmRun(v.descriptor.exe, o);
+      if (!replace && customs.length >= MAX_CUSTOM_CLIS) throw new Error(`At most ${MAX_CUSTOM_CLIS} custom CLIs can be added.`);
+      // The approval: the hash of exactly the file the user named. A later change blocks the CLI until it is saved (approved) again.
+      const saved: CustomCliDescriptor = { ...v.descriptor, approvedHash: await hashFile(v.descriptor.exe), approvedAt: Date.now() };
+      const next = replace ? customs.map((c) => (c.id === saved.id ? saved : c)) : [...customs, saved];
+      if (customFile) saveCustomClis(customFile, next);
+      customs = next;
+      verifiedStamp.delete(saved.id);
+      syncCustomCatalog();
+      await refresh();
+      return structuredClone(customs);
+    },
+    async removeCustomCli(id) {
+      if (!customOf(id)) return structuredClone(customs);
+      const next = customs.filter((c) => c.id !== id);
+      if (customFile) saveCustomClis(customFile, next);
+      customs = next;
+      verifiedStamp.delete(id);
+      syncCustomCatalog();
+      await refresh();
+      return structuredClone(customs);
     },
 
     async listProjects() { return store.listProjects(); },
@@ -524,7 +622,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async setSettings(s) {
       // An executable path must exist when it is saved; the shape (absolute, no quotes) is checked by the store.
       const paths = s && typeof s === 'object' && s.cliPaths && typeof s.cliPaths === 'object' ? Object.entries(s.cliPaths) : [];
-      for (const [cli, p] of paths) if (typeof p === 'string' && p.trim()) checkedCliPath(cli, p);
+      for (const [cli, p] of paths) {
+        // A custom CLI runs only its approved file; changing that file goes through saveCustomCli (and a new approval).
+        if (customOf(cli) && typeof p === 'string' && p.trim()) throw new Error(`${cli} is a custom CLI: change its executable in its own settings.`);
+        if (typeof p === 'string' && p.trim()) checkedCliPath(cli, p);
+      }
       const next = store.setSettings(s);
       // A raised concurrency limit should start waiting work now, not at the next unrelated event.
       for (const p of store.listProjects()) orchestrator.pump(p.id);
@@ -551,7 +653,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
         counts: { projects: projects.length, conversations: projects.reduce((n, p) => n + store.listConversations(p.id).length, 0), agents: agents.length, agentsByState: byState },
         journal: [...projects.flatMap((p) => journal.list(p.id)), ...journal.list(HARBOR_JOURNAL)].sort((a, b) => a.time - b.time).slice(-40),
         logTail: opts.dataDir ? readLogTail(join(opts.dataDir, 'logs'), 100) : '',
-        notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings,
+        notices: [...startupNotices(opts.dataDir), ...store.startupNotices.filter((n) => !startupNotices(opts.dataDir).includes(n)), ...loadedCatalog.warnings, ...loadedCustom.warnings,
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
     },
