@@ -192,7 +192,7 @@ describe('the reason shows the calculation', () => {
     expect(d.reason).toMatch(new RegExp(`^claude/${d.model} \\(\\w+\\) at ${d.effort} effort for implementer work of difficulty ${sig.difficulty}`));
     expect(d.reason).toMatch(/difficulty from: hint medium = 5; -1 1 file/);
     expect(d.reason).toMatch(/price: claude\/.* \(estimate\); runner-up claude\/.* \(estimate\)/);
-    expect(d.reason).toMatch(/pools: claude:all weekly: .* -> \w+ .*claude:all 5h: /);
+    expect(d.reason).toMatch(/quota claude:all weekly: .* → \w+[\s\S]*quota claude:all 5h: /);
     expect(d.reason).toMatch(/helper work: the reserve stays free for interactive work/);
     expect(d.reason).toMatch(/no deadline \(urgency 0\)/);
   });

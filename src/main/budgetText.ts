@@ -13,43 +13,44 @@ const hours = (h: number) => (h >= 10 ? `${Math.round(h)}h` : h >= 1 ? `${Math.r
 const num = (n: number) => (n >= 100 ? String(Math.round(n)) : String(Math.round(n * 100) / 100));
 
 /**
- * One window, e.g. "claude:opus weekly: 31% unspent beyond the 20% reserve, 18h to reset, burning 0.9%/h -> spend (rho 1.6)".
+ * One window, e.g. "claude:opus weekly: 31% free (20% kept in reserve), resets in 18h, burning 0.9%/h → spend".
  * Estimates, old readings and windows with no reading say so.
  */
 export function describeBudget(w: PoolWindowState): string {
   const name = `${w.pool} ${w.period === 'session' ? '5h' : 'weekly'}`;
-  if (w.source === 'unknown') return `${name}: no reading -> neutral`;
+  if (w.source === 'unknown') return `${name}: no reading → neutral`;
   const label = w.source === 'estimated' ? ' (estimate from Harbor runs only, not the provider\'s quota)' : '';
   const bits = [
-    w.exhausted ? `${pct(w.remainingPct)} left, at or below the ${pct(w.reservePct)} reserve: held for interactive work` : `${pct(w.usablePct)} unspent beyond the ${pct(w.reservePct)} reserve`,
-    `${hours(w.hoursToReset)} to reset${w.resetsAt === undefined ? ' (rolling, reset time unknown)' : ''}`,
+    w.exhausted ? `${pct(w.remainingPct)} left, at or below the ${pct(w.reservePct)} reserve: held for interactive work` : `${pct(w.usablePct)} free${w.reservePct > 0 ? ` (${pct(w.reservePct)} kept in reserve)` : ''}`,
+    `${w.resetsAt === undefined ? 'rolling window, reset time unknown' : `resets in ${hours(w.hoursToReset)}`}`,
     w.burnSource === 'none' ? 'no burn measured'
       : w.burnSource === 'pace' ? `burning ${rate(w.burnPctPerHour)} (average since the window began)`
         : w.burnSource === 'estimated' ? `burning ~${rate(w.burnPctPerHour)} (Harbor runs only)` : `burning ${rate(w.burnPctPerHour)}`
   ];
-  const rho = w.rho === Infinity ? 'nothing burning' : `rho ${num(w.rho)}`;
   const trust = w.stale && w.ageMs !== undefined ? `; reading ${hours(w.ageMs / 3_600_000)} old, trusted ${pct(w.trust * 100)}, treated as neutral (raw ${w.rawState})` : '';
-  return `${name}${label}: ${bits.join(', ')} -> ${w.state} (${rho}${trust})`;
+  return `${name}${label}: ${bits.join(', ')} → ${w.state}${trust ? ` (${trust.slice(2)})` : ''}`;
 }
 
-/** Every window of a pool, plus why it is unavailable when it is. */
-export function describePool(p: PoolState): string {
+/** Every window of a pool, one line each, plus why the pool is unavailable when it is. */
+export function describePoolLines(p: PoolState): string[] {
   const head = p.exhausted
-    ? `${p.pool} unavailable for automatic work${p.unavailableUntil !== undefined ? ` until ${new Date(p.unavailableUntil).toISOString()}` : ''}; `
-    : '';
-  return head + (p.windows.length ? p.windows.map(describeBudget).join('; ') : `${p.pool}: no reading -> neutral`);
+    ? [`${p.pool} unavailable for automatic work${p.unavailableUntil !== undefined ? ` until ${new Date(p.unavailableUntil).toISOString()}` : ''}`]
+    : [];
+  return [...head, ...(p.windows.length ? p.windows.map(describeBudget) : [`${p.pool}: no reading → neutral`])];
 }
+
+export const describePool = (p: PoolState): string => describePoolLines(p).join('; ');
 
 /**
  * One option as routing priced it: describePrice plus the use-it-or-lose-it credit and the automatic review, e.g.
- * "claude/claude-opus-5-5 low: ~2.4% of claude:opus weekly - 2.4% that would expire unused x scarcity 0.4 x risk 1.07 (failure 1%) = 0 (estimate)".
+ * "claude/claude-opus-5-5 low: ~2.4% of claude:opus weekly, 2.4% of it would expire unused anyway (failure risk 1%) → score 0 (estimate)".
  */
 export function describeRoutePrice(b: RoutePrice): string {
-  const credit = b.wasteCreditPct > 0 ? ` - ${num(b.wasteCreditPct)}% that would expire unused` : '';
+  const credit = b.wasteCreditPct > 0 ? `, ${num(b.wasteCreditPct)}% of it would expire unused anyway` : '';
   const time = b.timeCost > 0 ? ` + time ${num(b.timeCost)} (${num(b.minutes)} min)` : '';
   const review = b.reviewPrice > 0 ? ` + review ${num(b.reviewPrice)}` : '';
   const flags = [!b.clears ? 'below the capability floor' : '', !b.available ? 'unavailable now' : ''].filter(Boolean);
-  return `${b.cli}/${b.model} ${b.effort}: ~${num(b.expectedCostPct)}% of ${b.bindingPool} weekly${credit} x scarcity ${num(b.scarcity)} x risk ${num(b.failureFactor)} (failure ${pct(b.failureRisk * 100)})${time}${review} = ${num(b.routeTotal)} (estimate)${flags.length ? ` [${flags.join(', ')}]` : ''}`;
+  return `${b.cli}/${b.model} ${b.effort}: ~${num(b.expectedCostPct)}% of ${b.bindingPool} weekly${credit} (failure risk ${pct(b.failureRisk * 100)})${time}${review} → score ${num(b.routeTotal)} (estimate)${flags.length ? ` [${flags.join(', ')}]` : ''}`;
 }
 
 /** One priced option, e.g. "claude/claude-opus-5-5 low: ~1.2% of claude:opus weekly x scarcity 0.4 x risk 1.02 + time 0 = 0.49 (estimate)". */

@@ -223,7 +223,7 @@ describe('describeBudget', () => {
     const p = weeklyPool('claude:opus', 1.6, { used: 49, h: 18 });
     const text = describeBudget(poolWindowState('claude:opus', p.windows[0]!, NOW));
     // Phase 5: the reserve 18h before the reset is 15% * 18/72 (was 20% * 18/24 = 15%).
-    expect(text).toMatch(/^claude:opus weekly: \d+% unspent beyond the 4% reserve, 18h to reset, burning [\d.]+%\/h -> spend \(rho 1\.6\)$/);
+    expect(text).toMatch(/^claude:opus weekly: \d+% free \(4% kept in reserve\), resets in 18h, burning [\d.]+%\/h → spend$/);
     expect(Math.round(reserveFor(0, 18))).toBe(4);
     const stale = describeBudget(poolWindowState('claude:all', { period: 'weekly', readings: readings(30, 48, 0.5, { ageH: 6 }) }, NOW));
     expect(stale).toContain('old, trusted');

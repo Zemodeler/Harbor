@@ -3172,7 +3172,7 @@ export class Orchestrator {
       let streamId: Id | undefined;
       let parsed = 0, exitedClean = false; // parsed = chunks of real output (text, tool calls, usage); a bare session id is not output
       const details = detailsOf(decision);
-      if (o.complexityNote) details.reason = `${details.reason} · ${o.complexityNote}`;
+      if (o.complexityNote) details.reason = `${details.reason}\n• ${o.complexityNote}`;
       const t0 = Date.now();
       // The provider's readings just before the run: with those it prints during the run they give a quota-per-token sample.
       const readingsBefore = ledger.readings(decision.cli);
