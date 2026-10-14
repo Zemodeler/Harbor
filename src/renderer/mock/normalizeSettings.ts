@@ -5,6 +5,7 @@ import type { AgentRole, CliId, EffortPolicy, Id, LowAllowancePolicy, ProjectSet
  * and clamps exactly what Harbor does. Keep the messages identical: the UI shows them as they are.
  */
 const CONCURRENCY_RANGE = [1, 8] as const, RESERVE_RANGE = [0, 50] as const;
+const HELPERS_PER_TURN_RANGE = [1, 12] as const, PLANNERS_PER_TURN_RANGE = [1, 4] as const;
 const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;
 const EFFORT_POLICIES: readonly EffortPolicy[] = ['adaptive', 'conserve', 'quality'];
 const LOW_ALLOWANCE_POLICIES: readonly LowAllowancePolicy[] = ['reduceEffort', 'switch'];
@@ -64,6 +65,8 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
   const out: Partial<Settings> = { ...patch, ...scoped(patch as Record<string, unknown>) };
   if ('keepRunningInBackground' in patch && patch.keepRunningInBackground !== undefined && typeof patch.keepRunningInBackground !== 'boolean') throw new Error('keepRunningInBackground must be a boolean.');
   if ('editor' in patch && patch.editor !== undefined && !['code', 'code-insiders', 'cursor', 'windsurf'].includes(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
+  if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
+  if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {
     const po: unknown = patch.projectOverrides;
     if (po === undefined) out.projectOverrides = undefined;
@@ -89,7 +92,7 @@ export function applySettingsPatch(cur: Settings, patch: Partial<Settings>): Set
     for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
     next.projectOverrides = merged;
   }
-  for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
+  for (const k of [...SCOPED_KEYS, 'maxHelpersPerTurn', 'maxPlannersPerTurn', 'projectOverrides'] as const) {
     if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
   }
   return next;
