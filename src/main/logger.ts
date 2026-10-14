@@ -17,6 +17,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}/g, '[redacted]'],
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[redacted]'],
   [/\bAKIA[0-9A-Z]{16}\b/g, '[redacted]'],
+  [/\bhbt_[A-Za-z0-9_-]{16,}/g, '[redacted]'],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [redacted]'],
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted jwt]'],
   // key=value / "key": "value" for secret-looking names

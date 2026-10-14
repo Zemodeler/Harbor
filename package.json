@@ -13,6 +13,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "smoke": "tsx scripts/smoke.ts",
+    "headless": "tsx src/main/headlessMain.ts",
+    "harbor": "tsx scripts/harbor.ts",
     "dist": "node build/dist.mjs",
     "dist:watch": "node scripts/dist-watch.mjs",
     "dev:renderer": "npm --prefix src/renderer run dev:renderer",
