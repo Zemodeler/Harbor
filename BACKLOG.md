@@ -110,7 +110,7 @@ Next (core):
 - Missing settings: routing and per-project settings (contract 0.1.12) are not in `Settings.tsx:50-56`.
 - Messages: peer system messages are not rendered distinctly; attached images show only the filename and the CSP blocks `file://` (show thumbnails through a main-side read or a Harbor-served URL); an empty assistant text shows "Working..." forever (`Conversation.tsx:98`).
 - Errors and gating: send is not gated while loading; the error banner has no dismiss; there is a single global error string (use per-area errors).
-- Accessibility gaps (labels, focus handling in dialogs, keyboard navigation); run an audit.
+- Accessibility gaps (labels, focus handling in dialogs, keyboard navigation); run an audit. (Partly done on `harbor/ui-navigation-polish`: skip link, labelled main landmark, combobox/listbox palette with `aria-activedescendant`, arrow keys in the conversation list, slash menu, polite toast region, app-wide reduced motion, high-contrast mode and forced-colors focus. Not done: a screen-reader pass in the real app.)
 - Markdown: fence parsing is fragile; italic and blockquote are not supported.
 - Mock and CSP: the mock API is installed unconditionally in production (`main.tsx:7`); mock `setSettings` does not validate; the CSP allows `connect-src ws://127.0.0.1:*` in production (`index.html:6`), restrict it to dev.
 - Diagnostics: add an "Export diagnostics" action in Settings calling `exportDiagnostics()` (contract 0.1.21; optional, so check it exists) and let the user save or copy the text.
@@ -170,6 +170,15 @@ Behavior the core already provides that the UI should surface or respect:
 - Provide conversation overrides/manual CLI selection, extensions discovery, project history/archiving, task status/verification, changed files and exact diffs, workspace panels, and queue controls before exposing those actions. The first UI implements the supplied contract and does not fabricate these capabilities.
 - Usage source, freshness, unknown readings, and entitlement details need typed fields. The UI shows each supplied window separately; absent windows/reset times stay unknown.
 - Main-process integration: set `app.setAppUserModelId('com.harbor.desktop')` on Windows; set the BrowserWindow icon from `build/icon.ico` during development and `process.resourcesPath/icon.ico` after packaging. Retain native window controls. Do not change the renderer to implement desktop window controls.
+
+### Core requests (from UI navigation polish, branch `harbor/ui-navigation-polish`)
+
+- **Conversation tags**: add optional `Conversation.tags?: string[]`, accept `tags` in `updateConversation(id, patch)`, and let `searchConversations` match them. The renderer keeps tags in local storage today (`conversationMeta.ts`, key `harbor.conversationMeta.v1`, normalized lower-case, max 8 per conversation); they do not sync and are lost with the browser profile. When the field exists the UI should migrate the local tags once.
+- **Fork a conversation**: `forkConversation?(id: Id, opts?: { fromMessageId?: Id; title?: string }): Promise<Conversation>`, a new main conversation that starts with a handoff of the source up to that message (no shared native session). Not offered in the UI until it exists.
+- **Search results**: `SearchHit` could carry the matching `messageId` (to scroll to it), a match count, and search more than the first matching message; whole-word or multi-word queries (all words, any order) would also help. Results are capped at 100 in `service.ts`; a `limit` option would let the palette ask for fewer.
+- **Richer attachments**: `send` accepts images only. PDFs need text extraction (or a pass-through to CLIs that read PDFs) in main; until then the composer refuses PDFs with an explanation and quotes text, log and source files (up to 200 KB each, 400 KB per message) into the message body. Persisted image thumbnails: `Attachment.path` is a `file://` path the CSP (`img-src 'self' data:`) blocks; please add a main-side read (`readAttachment?(path): Promise<string>` returning a small data: URL, restricted to Harbor's attachment folder) or a Harbor protocol. The renderer did not widen the CSP.
+- **Notifications with actions**: main's desktop notification (index.ts, `desktopNotifications`) only focuses the window. Clicking it should open the conversation (send the conversation id to the renderer, e.g. a `focusConversation` event), and Windows toast buttons ("Answer", "Open") need `toastXml` in main. The renderer now offers its own click-to-open Windows notification from the window (Notification API, local preference) and turns it off while `desktopNotifications` is on so nothing arrives twice; it cannot notify while the window is hidden to the tray.
+- **Onboarding flag** (optional): the first-run guide stores `harbor.onboarding.v1` in local storage; a `Settings.onboardingDone?: boolean` would survive a renderer profile reset.
 
 ## Integration notes (from UI)
 
