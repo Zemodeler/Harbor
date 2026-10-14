@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -40,7 +40,8 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus'> & {
+  getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
   previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
   exportBundle(token: string, opts?: { keepSecrets?: boolean; redactSecrets?: boolean }): Promise<BundleExportResult | null>;
   browseImportFile(kind: 'bundle' | 'chatExport'): Promise<string | null>;
@@ -152,6 +153,9 @@ export interface ServiceOptions {
   mcpFetch?: McpFetch;
   /** How long testMcpServer waits for a server (tests shorten it); default 20 s (mcp/probe.ts). */
   mcpTestTimeoutMs?: number;
+  /** How often runs in flight are measured against the spend ceilings, and its timer (tests); defaults in spend.ts. */
+  spendCheckMs?: number;
+  spendTimer?: (fn: () => void, ms: number) => () => void;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -408,7 +412,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     stall: opts.stall,
     questionTimeoutMs: opts.questionTimeoutMs,
     maxAutoTurns: opts.maxAutoTurns,
-    autoApproveChecks: opts.autoApproveChecks
+    autoApproveChecks: opts.autoApproveChecks,
+    spendCheckMs: opts.spendCheckMs,
+    spendTimer: opts.spendTimer
   });
 
   // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
@@ -911,6 +917,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async previewImport(source, o) { return transfer.previewImport(source, o && typeof o === 'object' ? o : {}); },
     async importConversation(projectId, token, entryIds) { return transfer.importConversations(projectId, token, entryIds); },
     async continueImported(conversationId, o) { await ready; return transfer.continueImported(conversationId, o); },
+    async getSpendStatus(projectId, conversationId) {
+      if (projectId) needProject(projectId);
+      return orchestrator.spendStatus(projectId ?? undefined, conversationId ?? undefined);
+    },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },

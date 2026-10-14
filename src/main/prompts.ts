@@ -8,6 +8,7 @@ import type { AgentRecord } from './types';
 import { MAX_TASK_MINUTES } from './sizeGate';
 import type { Delivery } from './skills/delivery';
 import { toScreenshotLine, type ScreenshotLine } from './screenshots';
+import { describeFindings } from './secretScan';
 
 /** A question that pops up on the user's screen. The asking agent ends its turn; the answer comes back as a chat message. */
 export interface AskPart { question: string; options: string[]; allowText: boolean; multi?: boolean }
@@ -322,6 +323,11 @@ export function evidenceText(a: AgentRecord): string {
   const lines: string[] = [];
   if (a.checks?.length) {
     lines.push(`Checks Harbor ran on ${a.testedCommit?.slice(0, 10) ?? 'the branch'}: ${a.checks.map((c) => `${c.cmd} ${c.ok ? 'PASS' : `FAIL${c.timedOut ? ' (timed out)' : ` (exit ${c.exitCode})`}`}`).join('; ')}`);
+  }
+  const s = a.secretScan;
+  if (s && !s.failed) {
+    // Types and locations only: the scan never keeps a value, so none can reach a prompt.
+    lines.push(`Secret scan Harbor ran on ${s.commit.slice(0, 10)}: ${s.total ? `${s.total} possible secret${s.total === 1 ? '' : 's'} (${describeFindings(s.findings, s.total, 5)})${s.overridden ? ', integration allowed by the user' : ', blocks integration until removed, allowlisted or allowed by the user'}` : 'nothing found'}${s.allowed ? `; ${s.allowed} allowlisted` : ''}`);
   }
   if (a.result) {
     const self = a.result.checks.length ? `; self-reported checks: ${a.result.checks.map((c) => `${c.cmd} ${c.ok ? 'pass' : 'fail'}`).join(', ')}` : '';
