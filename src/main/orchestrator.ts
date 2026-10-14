@@ -15,7 +15,7 @@ import { breakCycles } from './graph';
 import { Journal, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT, needsLock } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, newProtocolNonce, noVisionNote, nonceInstruction, parseConcierge, parseProtocol, requestedCli, screenshotAnswerText, stripProtocol, subagentPrompt, systemFor,
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, isReadOnlyQuestion, leadPrompt, proseAsk, needsWorkspace, newProtocolNonce, noVisionNote, nonceInstruction, parseConcierge, parseProtocol, requestedCli, screenshotAnswerText, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type Protocol, type ReplyRequest, type SessionPeer
 } from './prompts';
 import { buildHandoff, type HandoffEvidence } from './handoff';
@@ -171,7 +171,7 @@ const SPAWN_FAILURE_RE = /\bENOENT\b|\bEACCES\b|\bEPERM\b|spawn .*(?:failed|erro
  * A tool call waiting for the user's answer. In memory only: a restart ends the run that asked. The deadline is a wall-clock
  * time, not a timer's promise: after the machine slept the timer may have stalled, so `rearm` starts it again for what is left.
  */
-interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; event: PendingPermission; deadline: number; settle(d: ToolPermissionDecision): void; rearm(): void }
+interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; noRules?: boolean; event: PendingPermission; deadline: number; settle(d: ToolPermissionDecision): void; rearm(): void }
 
 const MAX_SNAPSHOTS = 5;
 
@@ -802,7 +802,20 @@ export class Orchestrator {
         ? `Plan mode: ${running} running helper(s) continue with the permissions they started with. Helpers that start from now on are read-only, and queued edit helpers wait until you leave plan mode.`
         : 'Plan mode: helpers that start from now on are read-only, and queued edit helpers wait until you leave plan mode.');
     } else if (to === 'auto') {
-      this.post(conversationId, 'system', 'Auto mode applies to runs that start from now on; helpers already running keep their current permissions.');
+      // Auto mode takes effect in the running conversation too: requests already waiting are allowed, and later ones from running agents are.
+      let allowed = 0;
+      for (const [id, p] of [...this.toolAsks]) {
+        const ag = this.d.store.getAgent(p.agentId);
+        if (p.conversationId === conversationId && !p.noRules && ag && (ag.role === 'main' || this.canEdit(ag)) && this.finishToolAsk(id, { allow: true }, 'allowed: auto mode was turned on', `Allowed ${p.tool}: auto mode is on.`)) allowed++;
+      }
+      const restart = !!this.leads.get(conversationId) && !this.leads.get(conversationId)!.ctl.signal.aborted && from !== 'plan';
+      this.post(conversationId, 'system', `Auto mode is on for this conversation now${allowed ? `; ${allowed} waiting request(s) were allowed` : ''}. Running agents no longer ask before tools that need your permission.${restart ? ' The lead is restarting its turn so the sandbox lifts too.' : ' A running helper keeps its sandbox until its next run starts.'}`);
+      // A running lead turn keeps the permissions it started with, so it is restarted once (its native session resumes) to run in full.
+      if (restart) {
+        this.leadAsked.add(conversationId); // the restart message continues the lead's own work: no front-desk triage
+        this.interruptLead(conversationId);
+        this.enqueueMain(conv.projectId, { kind: 'user', text: 'Auto mode was just turned on, so you now run without permission prompts. Continue exactly where you stopped; do not redo finished steps.' }, conversationId);
+      }
     }
     if (from === 'plan') this.planHeldNoted.clear();
     if (to === 'goal') this.d.store.setGoalPaused(conversationId, false);
@@ -956,7 +969,10 @@ export class Orchestrator {
       plan = { ...plan, needs: withCodeNeed(plan.needs) };
       this.warnTwoLeads(project, conversationId);
       // One lead turn per project edits the folder at a time; plan-mode leads are read-only and never wait.
-      const edits = (this.d.store.getConversation(conversationId)?.mode ?? 'default') !== 'plan';
+      // A plain question ("what is happening in the latest run?") is read-only too: it must not sit behind a long editing session.
+      const lookOnly = trigger.kind === 'user' && this.editSlots.get(projectId)?.holder !== undefined && isReadOnlyQuestion(trigger.text);
+      if (lookOnly) this.addNote(conversationId, 'Another session of this project is editing the folder right now. This turn is only a question: read and report, and do not edit, commit or run anything that changes files. If the user wants changes, say so and ask them to send that as a separate request.');
+      const edits = (this.d.store.getConversation(conversationId)?.mode ?? 'default') !== 'plan' && !lookOnly;
       const release = edits ? await this.acquireEditSlot(projectId, conversationId, ctl.signal) : undefined;
       try {
         if (ctl.signal.aborted) return;
@@ -1273,6 +1289,9 @@ export class Orchestrator {
     } else if (/\?\s*$/.test(shown)) {
       // A question in prose: the user's next message answers it, so it goes to the lead, not the front desk.
       this.leadQuestion.add(conversationId);
+      // With options listed in the text it also gets buttons (the text is already in the chat, so it is not posted again).
+      const prose = !signal.aborted ? proseAsk(shown) : undefined;
+      if (prose) this.askUser(main.id, conversationId, prose);
     }
     // A screenshot request ends the turn like a question: the user decides in a card, and the answer (image or refusal) resumes the lead.
     const shot = proto.screenshot[0];
@@ -2930,7 +2949,9 @@ export class Orchestrator {
     const requestId = newId();
     this.questions.set(requestId, { agentId, conversationId });
     this.sessionState(conversationId, 'waiting', ask.question);
-    this.emit({ type: 'question', requestId, conversationId, agentId, prompt: ask.question, options: ask.options.length ? ask.options : undefined, allowText: ask.allowText });
+    this.emit({ type: 'question', requestId, conversationId, agentId, prompt: ask.question, options: ask.options.length ? ask.options : undefined, allowText: ask.allowText,
+      ...(ask.multi ? { multiSelect: true } : {}),
+      ...(ask.more?.length ? { questions: ask.more.map((m) => ({ prompt: m.question, options: m.options.length ? m.options : undefined, allowText: m.allowText, ...(m.multi ? { multiSelect: true } : {}) })) } : {}) });
   }
 
   /**
@@ -3095,6 +3116,12 @@ export class Orchestrator {
       journal('allowed by a project rule');
       return Promise.resolve({ allow: true });
     }
+    // Auto mode switched on while this run was already going: its later asks are answered without the user (edit-capable agents only;
+    // sensitive asks, which skip rules, still go to the user).
+    if (!opts.noRules && this.autoApplies(agent, conversationId)) {
+      journal('allowed: auto mode is on');
+      return Promise.resolve({ allow: true });
+    }
     if (signal.aborted) {
       journal('denied: the run had already stopped');
       return Promise.resolve({ allow: false, message: 'Harbor denied this tool call because the run was stopping.' });
@@ -3119,7 +3146,7 @@ export class Orchestrator {
       const arm = (ms: number): void => { cancelTimer(); cancelTimer = (this.d.setTimer ?? defaultTimer)(timedOut, ms); };
       const event: PendingPermission = { type: 'permission', requestId, kind: 'tool', prompt, agentId: agent.id, conversationId, tool, alwaysAllow: !!rule, expiresAt: deadline };
       this.toolAsks.set(requestId, {
-        agentId: agent.id, projectId, conversationId, run, tool, rule, event, deadline,
+        agentId: agent.id, projectId, conversationId, run, tool, rule, noRules: opts.noRules, event, deadline,
         settle: (d) => { cancelTimer(); signal.removeEventListener('abort', onAbort); resolve(d); },
         // After the machine slept the timer may have stalled: the wall-clock deadline decides what is left.
         rearm: () => { const left = deadline - Date.now(); if (left <= 0) timedOut(); else arm(left); }
@@ -3131,6 +3158,10 @@ export class Orchestrator {
       journal('asked the user');
       this.emit(event);
     });
+  }
+
+  private autoApplies(agent: AgentRecord, conversationId: Id): boolean {
+    return this.d.store.getConversation(conversationId)?.mode === 'auto' && (agent.role === 'main' || this.canEdit(agent));
   }
 
   /** The user's answer to a tool permission request; false when the id is not a pending tool request. */

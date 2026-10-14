@@ -155,7 +155,7 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
   // The queue is held until Harbor shows the previous follow-up started (a conversation or agent event, or new activity),
   // because the state may still read "idle" for a moment after a send resolved and the next one would burst out.
   useEffect(() => {
-    if (!queue.length || busy || state.messagesLoading || state.permissions.length || status === 'waiting' || ((status === 'failed' || status === 'stopped') && resumed !== c.id) || c.archived || queueSending.current || queue[0].paused) return;
+    if (!queue.length || busy || state.messagesLoading || state.permissions.length || ((status === 'failed' || status === 'stopped') && resumed !== c.id) || c.archived || queueSending.current || queue[0].paused) return;
     const held = lock.current;
     if (held) {
       if (state.conversation === held.conversation && state.agents === held.agents && state.lastActivity?.[c.id] === held.activity) return;
@@ -195,8 +195,11 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
     if ((!draft.trim() && !images.length) || c.archived || state.messagesLoading) return;
     const body = draft, sentImages = images;
     setSendError('');
-    if (busy && sentImages.length) { setAttachmentError('Images can be sent when the session is idle. Remove them to queue this text.'); return; }
-    if (busy) { workspace.setQueue(id, [...queue, { id: crypto.randomUUID(), text: body }]); edit('', true); return; }
+    // A pending question is waiting for exactly this text: send it now instead of queueing behind the helpers that still run.
+    const answering = state.questions?.some(q => q.conversationId === c.id);
+    const hold = busy && !answering;
+    if (hold && sentImages.length) { setAttachmentError('Images can be sent when the session is idle. Remove them to queue this text.'); return; }
+    if (hold) { workspace.setQueue(id, [...queue, { id: crypto.randomUUID(), text: body }]); edit('', true); return; }
     edit('', true); setImages([]); setAttachmentError('');
     if (sentImages.length) rememberImages(id, sentImages);
     void state.send(body, sentImages.map(({ name, mime, dataBase64 }) => ({ name, mime, dataBase64 }))).then(ok => {
@@ -235,5 +238,5 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
       {templatesOpen ? <div className={s.templatePicker}>{workspace.preferences.templates.length ? workspace.preferences.templates.map(t => <button key={t.id} onClick={() => { const before = latest.current; edit(`${before}${before ? '\n\n' : ''}${t.text}`, true); setTemplatesOpen(false); textarea.current?.focus(); }}>{t.title}</button>) : <p className={s.muted}>Save reusable prompts in Settings → Workspace.</p>}</div> : null}
       {sendError ? <div className={s.sendRecovery} role="status">{sendError}<button disabled={busy || !text.trim()} onClick={send}>Retry message</button><button onClick={() => void state.refreshClis()}>Check connections</button></div> : null}
       {attachmentError ? <p className={s.error} role="alert">{attachmentError}</p> : null}
-    </div><p className={s.composeHint}>{workspace.saveError ? 'Draft saving is unavailable. Keep a copy of your message.' : busy ? 'Enter to queue · “Send now” interrupts the current step · Draft saved on this device' : 'Enter to send · Shift + Enter for a new line · Draft saved'}</p></div>;
+    </div><p className={s.composeHint}>{workspace.saveError ? 'Draft saving is unavailable. Keep a copy of your message.' : state.questions?.some(q => q.conversationId === c.id) ? 'A question is waiting: type here or use its buttons, and your answer is sent now, not queued · Draft saved on this device' : busy ? 'Enter to queue · “Send now” interrupts the current step · Draft saved on this device' : 'Enter to send · Shift + Enter for a new line · Draft saved'}</p></div>;
 }
