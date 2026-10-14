@@ -7,7 +7,7 @@ import type { WorkspaceState } from '../hooks/useWorkspace';
 import { sessionStatus } from '../session';
 import { groupMessages, ToolActivity } from './ToolActivity';
 import { AttachIcon, CloseIcon, ImageIcon, TemplateIcon } from './Icons';
-import { ComplexityBadge } from './SessionStatus';
+import { RoutingDetails } from './RoutingDetails';
 import { ModePicker } from './ModePicker';
 import { HelperDetails } from './HelperDetails';
 import { acceptImages, IMAGE_TYPES, readImage, type PendingImage } from '../attachments';
@@ -34,7 +34,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
     <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? (subAgentId ? <button className={s.agentName} title="Open this agent" onClick={() => openAgent(subAgentId)}>{agentTitle}</button> : agentTitle || 'Harbor') : peer ? 'Between sessions' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
     {m.text ? <Markdown text={m.text}/> : working ? <p>Working…</p> : null}
     {m.attachments?.length ? <ul className={s.messageImages} aria-label="Attached images">{m.attachments.map((a, i) => <li key={i} className={previews?.[i] ? s.hqImageItem : undefined}>{previews?.[i] ? <img src={previews[i]} alt=""/> : null}<span>{a.name}</span></li>)}</ul> : null}
-    {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{complexity ? <> · <ComplexityBadge complexity={complexity}/></> : null}</p><p>{m.details.reason}</p></details> : null}
+    {m.details ? <details className={s.execution}><summary>Execution details · why this model</summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
   </article>;
 });
 
