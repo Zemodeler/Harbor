@@ -8,7 +8,7 @@ import { CappedText } from '../proc';
 import { writeMcpConfig } from '../mcp/materialize';
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
-import { streamLines, type StreamedLine } from './stream';
+import { streamLines, type AdapterProcessOptions, type StreamedLine, type StreamResult } from './stream';
 
 /**
  * One adapter for any CLI described by a CustomCliDescriptor (clis/custom.ts). It knows no CLI: every flag comes from the
@@ -22,13 +22,12 @@ import { streamLines, type StreamedLine } from './stream';
  * MCP: with `run.mcp` the run's servers are written to a per-run JSON file (Claude Code's shape) passed as {mcpConfigFile}, removed
  * when the run ends however it ends. A custom CLI cannot ask Harbor about tool calls, so it only gets servers allowed without asking.
  */
-export interface GenericAdapterOptions {
+/** `onLine` sees every raw output line (the dry run shows them); `launcher` lets tests drive fake processes. */
+export interface GenericAdapterOptions extends AdapterProcessOptions {
   /** Base environment (default process.env); only the allowlist reaches the CLI. */
   env?: NodeJS.ProcessEnv;
   /** Folder for prompt files (default the OS temp folder). */
   tmpDir?: string;
-  /** Sees every raw output line (the dry run shows them). */
-  onLine?: (l: StreamedLine) => void;
 }
 
 /** Most text kept for the final answer of a text-mode run. */
@@ -102,7 +101,8 @@ export class GenericAdapter implements CliAdapter {
   private async *stream(full: string, o: RunOptions, promptFile: string | undefined, mcpFile: string | undefined): AsyncGenerator<Chunk> {
     const d = this.d, jsonl = d.run.output?.format === 'jsonl';
     const gen = streamLines(d.exe, genericArgs(d, o, promptFile, mcpFile), {
-      cwd: o.cwd, input: d.run.prompt === 'file' ? '' : full, signal: o.signal, env: customEnv(this.opts.env ?? process.env, d.run.env)
+      cwd: o.cwd, input: d.run.prompt === 'file' ? '' : full, signal: o.signal, env: customEnv(this.opts.env ?? process.env, d.run.env),
+      launcher: this.opts.launcher, forceResolveMs: this.opts.forceResolveMs
     });
     const answer = new CappedText(MAX_ANSWER);
     const texts: string[] = [];
@@ -113,26 +113,33 @@ export class GenericAdapter implements CliAdapter {
       paragraph = [];
       return t ? [{ kind: 'text', text: t }] : [];
     };
-    let res = await gen.next();
-    while (!res.done) {
-      const l = res.value;
-      this.opts.onLine?.(l);
-      if (l.stream === 'stdout') {
-        if (!jsonl) {
-          answer.push(`${l.line}\n`);
-          if (l.line.trim()) paragraph.push(l.line); else yield* flush();
-        } else {
-          const p = parseGenericLine(d, l.line);
-          if (p.error) mappedError = p.error;
-          if (p.done) sawDone = true;
-          for (const c of p.chunks) {
-            if (c.kind === 'session') { if (c.id === sessionId) continue; sessionId = c.id; }
-            if (c.kind === 'text') texts.push(c.text);
-            yield c;
+    let res: IteratorResult<StreamedLine, StreamResult>;
+    try {
+      res = await gen.next();
+      while (!res.done) {
+        const l = res.value;
+        this.opts.onLine?.(l);
+        if (l.stream === 'stdout') {
+          if (!jsonl) {
+            answer.push(`${l.line}\n`);
+            if (l.line.trim()) paragraph.push(l.line); else yield* flush();
+          } else if (!sawDone) {
+            // The final event ends the run, as for Claude and Codex: what a CLI prints after it (a second result, a late error) is ignored.
+            const p = parseGenericLine(d, l.line);
+            if (p.error) mappedError = p.error;
+            if (p.done) sawDone = true;
+            for (const c of p.chunks) {
+              if (c.kind === 'session') { if (c.id === sessionId) continue; sessionId = c.id; }
+              if (c.kind === 'text') texts.push(c.text);
+              yield c;
+            }
           }
         }
+        res = await gen.next();
       }
-      res = await gen.next();
+    } finally {
+      // A consumer that stops iterating early must not leave the CLI running: returning the line stream kills its process.
+      await gen.return(undefined as never).catch(() => undefined);
     }
     if (!jsonl) yield* flush();
     const r = res.value;
