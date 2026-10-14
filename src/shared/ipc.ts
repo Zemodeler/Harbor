@@ -21,7 +21,8 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listToolRules', 'removeToolRule', 'exportDiagnostics',
   'previewBundleExport', 'exportBundle', 'browseImportFile', 'previewBundle', 'importBundle',
   'listImportSources', 'previewImport', 'importConversation', 'continueImported',
-  'getSpendStatus'
+  'getSpendStatus',
+  'getTaskReport', 'rateResult', 'listRatings', 'getRatingSummary', 'replayRouting'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;
