@@ -77,7 +77,16 @@ Next (core):
 - Settings are injected only (`ServiceOptions.stall.loopGuard`: `enabled`, `limits`, `probe`, `probeIntervalMs`); a user-facing setting needs a Settings field (contract change, not done).
 - Unverified: real tool-line shapes beyond Claude's `<Tool> <path|command>` and Codex's command text; the week simulator does not model run durations, so it shows nothing about the quota the guard saves.
 
+## Measurement, Phase 1 (contract 0.1.29) — what is left
+
+- Eval harness (`npm run eval`, `scripts/eval/`, scoring in `src/main/evalScore.ts`): only fake mode has run. Real mode (`--real --yes`) is written but never run; first real run by the owner (it spends quota), then grow the task set beyond the three sample tasks (fake mode scripts every run, so its numbers say nothing about model quality). The baseline has no reviewer; the Harbor arm merges finished edit helpers itself unless the lead made an integrator.
+- Ratings are evidence only: nothing reads them into routing yet. A later step could propose catalog edits from them, with the owner's yes. "Redo stronger" does not start a redo.
+- Replay judges both sides under neutral pools (recorded decisions do not store the quota state); session holds (keep, escalateFrom, exclude) are not replayed.
+- Phase 1's recorded-transcript fixtures belong to `harbor/adapter-conformance`.
+
 ## UI requests (src/renderer — owned by the UI engineer)
+
+- Measurement (contract 0.1.29, all optional methods; add them to `mockApi.ts`). (1) A "Cost and time" panel per conversation from `getTaskReport(conversationId)`: totals (runs, failed/partial, tokens, `wallMinutes` and `agentMinutes`), a table per agent (title, role, state, CLI/models used, runs, minutes, tokens) and per CLI/model (with the roles it served), and `quota` per pool and window. Label every quota figure "estimate" and show `notes` (they say what the figures are and what is missing); a run with `noTokens` shows "unknown", never 0. Never add pools of different providers together. (2) Thumbs up / thumbs down / "Redo stronger" on helper cards and on assistant messages that have `details`, calling `rateResult(agentOrMessageId, 'up'|'down'|'redo-stronger', note?)` with an optional short note; rating again replaces the earlier one. "Redo stronger" only records the rating today (it does not start a redo). A small ratings view from `getRatingSummary({ by: 'model'|'cli'|'need', projectId? })` and `listRatings()`. (3) A routing what-if in Settings from `replayRouting({ projectId?, conversationId?, catalog?, settings? })`: edit a copy of the routing settings (or paste a capabilities.json) and show `summary` (changed, unroutable, `moves`, `priceDelta`), the per-decision rows, `assumption` and `notes`. It is read-only: say nothing is saved. Decisions with `approximate: true` predate recorded requests.
 
 - Loop guard (Phase 6): show a helper with `stopKind: 'loop'` as "stopped: looping" (distinct from the user's Stop and the time limit), with its error text (what repeated, how often); later, a setting to tune or turn off the guard once core exposes one.
 

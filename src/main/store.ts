@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
+import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, ResultRating, RolePreference, Settings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
+import { withRating } from './ratings';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
@@ -11,7 +12,7 @@ import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionL
  * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
  * report delivery (`AgentRecord.reportDelivery`); its absence means a file written before that existed.
  */
-type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive; calibration?: Calibration };
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive; calibration?: Calibration; ratings?: ResultRating[] };
 
 /** Totals of usage events pruned from `usage`, so lifetime cost figures survive pruning. */
 export interface UsageTotals { runs: number; inputTokens: number; outputTokens: number; costUsd: number }
@@ -451,6 +452,10 @@ export class Store {
     return c && c.version === 1 && typeof c.throughTime === 'number' && c.pctPerKTok && c.tokensK && c.minutes ? c : undefined;
   }
   setCalibration(c: Calibration): void { this.state.calibration = c; this.dirty(); }
+
+  /** Quality ratings of results (ratings.ts), oldest first; local evidence only. */
+  listRatings(projectId?: Id): ResultRating[] { return (this.state.ratings ?? []).filter((r) => !projectId || r.projectId === projectId); }
+  addRating(r: ResultRating): ResultRating { this.state.ratings = withRating(this.state.ratings ?? [], r); this.dirty(); return r; }
   addResetApproval(r: State['resetApprovals'][number]): void { this.state.resetApprovals.push(r); this.dirty(); }
   listResetApprovals(): State['resetApprovals'] { return this.state.resetApprovals; }
 
@@ -507,21 +512,25 @@ export class Store {
   getSettings(): Settings { return this.state.settings; }
   /** Validates first (throws on malformed values, so nothing is half-applied); `undefined` on a routing key resets it. */
   setSettings(patch: Partial<Settings>): Settings {
-    const p = normalizeSettingsPatch(patch);
-    const cur = this.state.settings;
-    const next: Settings = { ...cur, ...p, cliOverrides: { ...cur.cliOverrides, ...(p.cliOverrides ?? {}) } };
-    if ('projectOverrides' in p && p.projectOverrides) {
-      // Per project: an entry replaces that project's overrides; an empty or undefined entry removes them.
-      const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
-      for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
-      next.projectOverrides = merged;
-    }
-    for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
-      if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
-    }
-    this.state.settings = next;
+    this.state.settings = mergeSettings(this.state.settings, patch);
     this.dirty(); return this.state.settings;
   }
+}
+
+/** `cur` with a validated patch applied, as setSettings stores it (PURE; also the what-if settings of replayRouting). */
+export function mergeSettings(cur: Settings, patch: Partial<Settings>): Settings {
+  const p = normalizeSettingsPatch(patch);
+  const next: Settings = { ...cur, ...p, cliOverrides: { ...cur.cliOverrides, ...(p.cliOverrides ?? {}) } };
+  if ('projectOverrides' in p && p.projectOverrides) {
+    // Per project: an entry replaces that project's overrides; an empty or undefined entry removes them.
+    const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
+    for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
+    next.projectOverrides = merged;
+  }
+  for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
+    if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
+  }
+  return next;
 }
 
 /**

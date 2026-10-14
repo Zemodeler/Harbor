@@ -1,5 +1,6 @@
 node_modules/
 out/
+eval-out/
 dist/
 *.log
 .env
