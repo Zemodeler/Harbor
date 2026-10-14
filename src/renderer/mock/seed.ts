@@ -43,20 +43,30 @@ export function seed(empty = false) {
         { commit: 'f0e1d2c3b4a5968778695a4b3c2d1e0f9a8b7c6d', agentId: 'implement', integrationId: 'integrate-1', state: 'reverted', revert: '9e8d7c6b5a4938271605f4e3d2c1b0a998877665' },
         { commit: '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d', agentId: 'implement', state: 'pending' }] },
       checks: [{ cmd: 'npm test', ok: true, exitCode: 0, durationMs: 19000 }] },
-    { id: 'queued-1', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'implementer', title: 'Index product titles', state: 'queued', cli: 'codex', model: 'default', effort: 'medium', priority: 1, summary: 'Waiting for a free slot.' },
-    { id: 'queued-2', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'planner', title: 'Plan faceted filters', state: 'queued', cli: 'codex', model: 'default', effort: 'high', paused: true, summary: 'Waiting for “Index product titles” to finish.' }
+    { id: 'queued-1', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'implementer', title: 'Index product titles', state: 'queued', cli: 'codex', model: 'default', effort: 'medium', priority: 1, summary: 'Waiting for a free slot.', estimatedMinutes: 18 },
+    { id: 'queued-2', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'planner', title: 'Plan faceted filters', state: 'queued', cli: 'codex', model: 'default', effort: 'high', paused: true, summary: 'Waiting for “Index product titles” to finish.', estimatedMinutes: 7 },
+    { id: 'ask-lead', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'implementer', title: 'Tune search ranking', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium', summary: "Waiting for the lead's answer.", estimatedMinutes: 25 },
+    { id: 'looping', projectId: 'store', parentId: 'main-store', conversationId: 'search', role: 'implementer', title: 'Fix flaky search test', state: 'stopped', cli: 'codex', model: 'default', effort: 'medium', summary: 'Harbor stopped this run again because it was going in circles: ran "npm test -- search" 7 times in 4 minutes with the same failure (after one automatic resume with a different instruction). Its worktree is preserved. The lead decides: re-scope it, split it, or take it over.' }
   );
   const messages: Message[] = empty ? [] : [
     { id: 'user-intro', conversationId: 'account', role: 'user', time: now - 60000, text: 'Build an account page where customers can update their profile and manage their addresses. Keep it consistent with the storefront.' },
     { id: 'tool-read', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 59000, text: 'Read src/account.tsx\nSample file inspection; no local files read.' },
     { id: 'tool-search', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 58000, text: 'Grep address validation\nSample search activity.' },
     { id: 'tool-command', conversationId: 'account', role: 'tool', agentId: 'main-store', time: now - 57000, text: 'Bash npm test\nSample command activity; no command was executed.' },
-    { id: 'intro', conversationId: 'account', role: 'assistant', agentId: 'main-store', time: now - 55000, text: "I've assigned the account page to an implementation agent using the completed plan. The verification agent has checked the profile and address flows.\n\n### Ready for a first look\nThe implementation agent reports that the profile form and address list are ready. It’s finishing the empty address state before the final review.\n\nThis is sample activity. No project files have been changed.", details: { cli: 'codex', model: 'default', effort: 'medium', reason: 'A ready connection with useful project context.' } }
+    { id: 'intro', conversationId: 'account', role: 'assistant', agentId: 'main-store', time: now - 55000, text: "I've assigned the account page to an implementation agent using the completed plan. The verification agent has checked the profile and address flows.\n\n### Ready for a first look\nThe implementation agent reports that the profile form and address list are ready. It’s finishing the empty address state before the final review.\n\nThis is sample activity. No project files have been changed.", details: { cli: 'codex', model: 'default', effort: 'medium', difficulty: 6, needsReview: true, reviewReason: 'Touches a form that stores customer addresses.', margin: 4.2,
+      reason: 'A ready connection with useful project context. Sample reasoning: difficulty 6/10 (multi-file UI change, validation, accessibility). Pools: codex:all neutral (weekly 21% used, on pace), claude:all conserve (weekly 73% used, over pace). Reserve 10% kept. Codex default prices 0.8% of weekly quota against 1.9% for Claude sonnet, so Codex takes it with medium effort. No deadline set.',
+      scored: [
+        { cli: 'codex', model: 'default', score: 71.4, effort: 'medium', price: 0.8, terms: { tierFit: 22, needFit: 18, continuity: 12, load: 8, pacing: 6.4, price: 5 }, headroom: { remainingPct: 62, windows: [{ period: 'session', remainingPct: 62, resetsAt: now + 7200000, projectedPct: 64, source: 'estimated' }, { period: 'weekly', remainingPct: 79, resetsAt: now + 345600000, source: 'reported' }] } },
+        { cli: 'claude', model: 'sonnet', score: 67.2, effort: 'medium', price: 1.9, terms: { tierFit: 24, needFit: 20, continuity: 0, load: 8, pacing: -4.8, price: 2 } },
+        { cli: 'claude', model: 'opus', score: 52, effort: 'high', price: 4.6, terms: { tierFit: 26, needFit: 22, load: 8, pacing: -4.8, price: -9.2 } }
+      ],
+      skipped: [{ cli: 'gemini', why: 'not installed' }, { cli: 'claude', model: 'haiku', why: 'too little quota left above the reserve for this run', until: now + 5400000, transient: true }] } }
   ];
   const windows: UsageWindow[] = [
     { cli: 'codex', label: 'Sample 5-hour window', usedPct: 38, resetsAt: now + 7200000, period: 'session', source: 'estimated', projectedPct: 64 },
     { cli: 'claude', label: 'Sample weekly window', usedPct: 73, resetsAt: now + 172800000, freeResetAvailable: true, period: 'weekly', source: 'reported' },
-    { cli: 'codex', label: 'Sample weekly window', usedPct: 21, resetsAt: now + 345600000, period: 'weekly', source: 'reported', model: 'default' }
+    { cli: 'codex', label: 'Sample weekly window', usedPct: 21, resetsAt: now + 345600000, period: 'weekly', source: 'reported', model: 'default', projectedPct: 58 },
+    { cli: 'claude', label: 'Sample 5-hour window', usedPct: 12, resetsAt: now + 10800000, period: 'session', source: 'estimated', calibrated: false }
   ];
   return { projects, clis, conversations, agents, messages, windows };
 }

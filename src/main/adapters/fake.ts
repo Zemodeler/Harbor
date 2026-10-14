@@ -4,7 +4,7 @@ export interface FakeCall { prompt: string; opts: RunOptions }
 export type FakeScript = (prompt: string, opts: RunOptions, callIndex: number) => Chunk[] | Promise<Chunk[]>;
 
 const NONCE_IN_PROMPT = /HARBOR_DELEGATE\[([A-Za-z0-9_-]{1,64})\]/;
-const BARE_PROTOCOL = /^(\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)):/gm;
+const BARE_PROTOCOL = /^(\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|NOTE|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)):/gm;
 
 /**
  * Deterministic adapter for tests. `script` returns the chunks for each call;
@@ -30,13 +30,13 @@ export class FakeAdapter implements CliAdapter {
     const idx = this.calls.push({ prompt, opts }) - 1;
     const chunks = (await this.script(prompt, opts, idx)).map((c) => this.tag(prompt, c));
     yield { kind: 'session', id: opts.resumeId ?? `${this.id}-session-${idx}` };
-    let done = false;
     for (const c of chunks) {
       if (opts.signal?.aborted) { yield { kind: 'done', ok: false, error: 'stopped' }; return; }
-      if (c.kind === 'done') done = true;
       yield c;
+      // Like every adapter: exactly one done, and nothing after it (a script that lists more is cut here).
+      if (c.kind === 'done') return;
       await Promise.resolve();
     }
-    if (!done) yield { kind: 'done', ok: true, text: chunks.filter((c) => c.kind === 'text').map((c) => (c as any).text).join('\n') };
+    yield { kind: 'done', ok: true, text: chunks.filter((c) => c.kind === 'text').map((c) => (c as any).text).join('\n') };
   }
 }

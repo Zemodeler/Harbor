@@ -4,21 +4,29 @@
  *   npm run smoke                 # adapter check on the first ready CLI
  *   npm run smoke -- codex        # pick a CLI
  *   npm run smoke -- claude --full  # also run the concierge -> lead flow in a temp git repo
+ *   npm run smoke -- claude --record  # also save both adapter runs as transcripts in tests/fixtures/transcripts
+ *                                     # (format: tests/conformance/transcript.ts; home folder and user name scrubbed; review before committing)
  *
  * Override executables with HARBOR_CLAUDE_PATH / HARBOR_CODEX_PATH.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { join, resolve } from 'node:path';
 import { ClaudeAdapter } from '../src/main/adapters/claude';
 import { CodexAdapter } from '../src/main/adapters/codex';
 import type { CliAdapter, Chunk } from '../src/main/adapters/types';
 import { discoverClis } from '../src/main/clis/discovery';
 import { createHarborService } from '../src/main/service';
+import type { StreamedLine } from '../src/main/adapters/stream';
+import { scrubTranscriptLine, serializeTranscript, type TranscriptRecord } from '../tests/conformance/transcript';
 
 const args = process.argv.slice(2);
 const full = args.includes('--full');
+const record = args.includes('--record');
+/** Raw lines of the run in progress (only with --record). */
+let recording: TranscriptRecord[] = [];
+const onLine = (l: StreamedLine) => { if (record) recording.push(l.stream === 'stdout' ? { o: l.line } : { e: l.line }); };
 const want = args.find((a) => !a.startsWith('--'));
 
 const ok = (m: string) => console.log(`  ok   ${m}`);
@@ -46,7 +54,26 @@ if (target.authState === 'signedOut') bad(`${target.id} is signed out; run "${ta
 
 const dir = mkdtempSync(join(tmpdir(), 'harbor-smoke-'));
 console.log(`\nAdapter check: ${target.id} in ${dir}`);
-const adapter: CliAdapter = target.id === 'claude' ? new ClaudeAdapter(target.path!) : new CodexAdapter(target.path!);
+const adapter: CliAdapter = target.id === 'claude' ? new ClaudeAdapter(target.path!, { onLine }) : new CodexAdapter(target.path!, { onLine });
+/** Saves the run just made as a recorded transcript (scrubbed), with what Harbor made of it as the expectation. */
+const save = (scenario: string, r: { chunks: Chunk[] }) => {
+  if (!record) return;
+  const who = { home: homedir(), user: userInfo().username };
+  const done = r.chunks.at(-1) as Extract<Chunk, { kind: 'done' }>;
+  const captured = new Date().toISOString().slice(0, 10);
+  const dir = resolve(__dirname, '..', 'tests', 'fixtures', 'transcripts');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${target.id}-recorded-smoke-${scenario}-${captured}.jsonl`);
+  const records = recording.map((x) => ('o' in x ? { o: scrubTranscriptLine(x.o, who) } : 'e' in x ? { e: scrubTranscriptLine(x.e, who) } : x));
+  writeFileSync(file, serializeTranscript({
+    header: { harborTranscript: 1, cli: target.id as 'claude' | 'codex', source: 'recorded', scenario: `npm run smoke: ${scenario}`, cliVersion: target.version ?? 'unknown', captured,
+      expect: { done: { ok: done.ok }, kinds: r.chunks.map((c) => c.kind) } },
+    // The exit code is only known when the CLI ended without its own terminal event; otherwise a clean exit is assumed.
+    records: [...records, { exit: done.exitCode ?? 0 }]
+  }));
+  recording = [];
+  ok(`transcript saved: ${file} (review it before committing)`);
+};
 
 const r1 = await collect(adapter, 'Reply with exactly the single word HARBOR_SMOKE_OK and nothing else. Do not use tools.', dir);
 const done1 = r1.chunks.find((c) => c.kind === 'done') as Extract<Chunk, { kind: 'done' }> | undefined;
@@ -55,10 +82,12 @@ else if (!done1.ok) bad(`run failed: ${done1.error}`);
 ok(`run completed: ${JSON.stringify(r1.text.slice(0, 60))}`);
 if (!/HARBOR_SMOKE_OK/.test(r1.text + (done1?.text ?? ''))) bad('expected marker missing from output');
 ok('output contains marker');
+save('reply', r1);
 if (!r1.session) bad('no session id captured'); else ok(`session id captured: ${r1.session}`);
 
 const r2 = await collect(adapter, 'What single word did I ask you to reply with earlier? Answer with just that word.', dir, r1.session);
 if (!/HARBOR_SMOKE_OK/.test(r2.text)) bad(`resume did not recall earlier turn (got ${JSON.stringify(r2.text.slice(0, 80))})`);
+save('resume', r2);
 ok('resume continued the same session');
 
 if (full) {

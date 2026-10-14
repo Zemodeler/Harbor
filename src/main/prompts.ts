@@ -5,9 +5,12 @@ import { CLI_DEFINITIONS } from './clis/registry';
 import type { Effort } from './adapters/types';
 import type { Complexity } from './router';
 import type { AgentRecord } from './types';
+import type { ProjectNoteTopic } from '../shared/api';
+import { MAX_NOTES_PER_TURN, asTopic } from './knowledge';
 import { MAX_TASK_MINUTES } from './sizeGate';
 import type { Delivery } from './skills/delivery';
 import { toScreenshotLine, type ScreenshotLine } from './screenshots';
+import { describeFindings } from './secretScan';
 
 /** A question that pops up on the user's screen. The asking agent ends its turn; the answer comes back as a chat message. */
 export interface AskPart { question: string; options: string[]; allowText: boolean; multi?: boolean }
@@ -193,6 +196,9 @@ HARBOR_PEER: {"to":"<session id or exact title>","text":"<one or two sentences>"
 Decisions: when the user settles something that must survive a lost session (a constraint, a choice, something not to touch), end with one line (at most 3 per turn, one self-contained sentence each, never secrets, only what is settled):
 HARBOR_DECISION: {"text":"<the decision or constraint>"}
 
+Project notes: a fact about this project that would save a later session or helper real time (a convention, a pitfall, how to run or test something): end with one line (at most 3 per turn, one fact each; never secrets, instructions, or what the repo already says plainly):
+HARBOR_NOTE: {"text":"<the fact>","topic":"convention|pitfall|howto|other"}
+
 Never use native Task/Agent tools or plugins to spawn agents; use HARBOR_DELEGATE.`;
 
 export type LeadTrigger =
@@ -229,7 +235,7 @@ export function peerMessagesText(ms: PeerMessage[]): string {
   return ms.map((m) => `- from session "${clip(m.fromTitle, 60)}" (id=${m.fromId})${m.urgent ? ' [urgent]' : ''}: ${m.text}`).join('\n');
 }
 
-export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[]; mode?: ConversationMode; goal?: string; peers?: SessionPeer[]; inbox?: PeerMessage[]; held?: HeldReports; /** false when the project has no Harbor checks: helper claims cannot be verified. */ checksConfigured?: boolean } = {}): string {
+export function leadPrompt(projectName: string, agents: AgentRecord[], t: LeadTrigger, o: { notes?: string[]; history?: Message[]; mode?: ConversationMode; goal?: string; peers?: SessionPeer[]; inbox?: PeerMessage[]; held?: HeldReports; /** Project notes section (knowledge.ts notesText), already budgeted. */ knowledge?: string; /** false when the project has no Harbor checks: helper claims cannot be verified. */ checksConfigured?: boolean } = {}): string {
   const parts = [`Project: ${projectName}`];
   if (o.checksConfigured === false) parts.push('No Harbor checks are configured for this project: helper claims are unverified.');
   if (o.mode === 'plan') parts.push('PLAN MODE: you are read-only. Investigate as needed, then answer with a numbered plan (steps, files, risks) and stop. Do NOT edit files and do NOT delegate edit-capable helpers (read-only helpers are fine). The user will approve before anything is changed.');
@@ -240,6 +246,7 @@ ${peersText(o.peers)}`);
 ${peerMessagesText(o.inbox)}`);
   if (o.history?.length) parts.push(`Conversation so far (your earlier session is not available):\n${historyText(o.history)}`);
   if (agents.length) parts.push(`Helpers you started (authoritative; persisted by Harbor):\n${registerText(agents)}`);
+  if (o.knowledge) parts.push(o.knowledge);
   if (o.notes?.length) parts.push(`Recent notes:\n${o.notes.map((e) => `- ${e}`).join('\n')}`);
   if (o.held?.items.length || o.held?.omitted.count) parts.push(heldText(o.held, t.kind !== 'reports'));
   if (t.kind === 'user') {
@@ -323,6 +330,11 @@ export function evidenceText(a: AgentRecord): string {
   if (a.checks?.length) {
     lines.push(`Checks Harbor ran on ${a.testedCommit?.slice(0, 10) ?? 'the branch'}: ${a.checks.map((c) => `${c.cmd} ${c.ok ? 'PASS' : `FAIL${c.timedOut ? ' (timed out)' : ` (exit ${c.exitCode})`}`}`).join('; ')}`);
   }
+  const s = a.secretScan;
+  if (s && !s.failed) {
+    // Types and locations only: the scan never keeps a value, so none can reach a prompt.
+    lines.push(`Secret scan Harbor ran on ${s.commit.slice(0, 10)}: ${s.total ? `${s.total} possible secret${s.total === 1 ? '' : 's'} (${describeFindings(s.findings, s.total, 5)})${s.overridden ? ', integration allowed by the user' : ', blocks integration until removed, allowlisted or allowed by the user'}` : 'nothing found'}${s.allowed ? `; ${s.allowed} allowlisted` : ''}`);
+  }
   if (a.result) {
     const self = a.result.checks.length ? `; self-reported checks: ${a.result.checks.map((c) => `${c.cmd} ${c.ok ? 'pass' : 'fail'}`).join(', ')}` : '';
     lines.push(`Result: outcome=${a.result.outcome}${a.result.verdict ? `, verdict=${a.result.verdict}` : ''}${self}`);
@@ -373,6 +385,10 @@ export interface SubagentContext {
   baseCommit?: string;
   /** How to check the work (from the project's checks), printed as "Verify with: <hint>". */
   verifyHint?: string;
+  /** Project notes section (knowledge.ts notesText), already budgeted. */
+  knowledge?: string;
+  /** Repository map section (repoMap.ts repoMapText), already capped. */
+  repoMap?: string;
 }
 
 export function subagentPrompt(a: AgentRecord, ctx: SubagentContext): string {
@@ -382,6 +398,8 @@ export function subagentPrompt(a: AgentRecord, ctx: SubagentContext): string {
   if (a.files?.length) p.push(`Files you own for this assignment: ${a.files.join(', ')}. Do not edit other files; ask for help instead.`);
   if (ctx.worktreeNote) p.push(ctx.worktreeNote);
   if (ctx.verifyHint) p.push(`Verify with: ${ctx.verifyHint}`);
+  if (ctx.knowledge) p.push(ctx.knowledge);
+  if (ctx.repoMap) p.push(ctx.repoMap);
   if (a.role === 'reviewer') {
     const base = ctx.baseCommit ?? a.baseCommit ?? ctx.upstream.find((u) => u.baseCommit)?.baseCommit;
     if (base) p.push(`Base commit: ${base}. Review \`git diff ${base}..HEAD\` in the worktree listed below.`);
@@ -557,7 +575,7 @@ export const MAX_SCREENSHOTS_PER_TURN = 1;
 export const MAX_SHOWN_IMAGES_PER_TURN = 3;
 /** Documents an agent may open in the viewer per turn (plan section 4b). */
 export const MAX_OPEN_DOCUMENTS_PER_TURN = 3;
-const KINDS = 'REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT';
+const KINDS = 'REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|NOTE|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT';
 // Optional per-turn nonce: `HARBOR_DELEGATE[abc123]: {...}`. Without a nonce option only the bare form is accepted.
 const LINE = new RegExp(`^\\s*HARBOR_(${KINDS})(?:\\[([A-Za-z0-9_-]{1,64})\\])?:\\s*(\\{.*\\})\\s*$`);
 const PREFIX = new RegExp(`^\\s*HARBOR_(${KINDS})(?:\\[([A-Za-z0-9_-]{1,64})\\])?:`);
@@ -565,7 +583,7 @@ const PREFIX = new RegExp(`^\\s*HARBOR_(${KINDS})(?:\\[([A-Za-z0-9_-]{1,64})\\])
 /** A lead's request to message another session; `to` is an id or title that Harbor resolves. */
 export interface PeerRequest { to: string; text: string; urgent: boolean }
 
-export interface Protocol { help: HelpRequest[]; ask: AskRequest[]; delegate: PlannedTask[]; image: ImageBrief[]; peer: PeerRequest[]; reply: ReplyRequest[]; /** Durable decisions or constraints the lead wants remembered across sessions. */ decision: string[]; result?: HelperResult; goalDone?: { summary: string };
+export interface Protocol { help: HelpRequest[]; ask: AskRequest[]; delegate: PlannedTask[]; image: ImageBrief[]; peer: PeerRequest[]; reply: ReplyRequest[]; /** Durable decisions or constraints the lead wants remembered across sessions. */ decision: string[]; /** Project knowledge the lead wants later sessions and helpers to have (knowledge.ts). */ note: Array<{ text: string; topic: ProjectNoteTopic }>; result?: HelperResult; goalDone?: { summary: string };
   /** HARBOR_SCREENSHOT requests (at most one per turn): the user decides, and picks what is captured. */ screenshot: ScreenshotLine[];
   /** HARBOR_SHOW_IMAGE paths, as written (checked against the project and worktree before anything is copied). */ showImage: string[];
   /** HARBOR_OPEN_DOCUMENT requests, as written (documents.ts checks the path before the viewer is told). */ openDocument: Array<{ path: string; title?: string }>;
@@ -605,7 +623,7 @@ function protocolLines(lines: string[], opts?: ProtocolOptions): Set<number> {
 
 /** Scan agent output for protocol lines. Malformed lines are hidden by stripProtocol and returned so they can be reported. */
 export function parseProtocol(text: string, opts?: ProtocolOptions): Protocol {
-  const out: Protocol = { help: [], ask: [], delegate: [], image: [], peer: [], reply: [], decision: [], screenshot: [], showImage: [], openDocument: [], malformed: [] };
+  const out: Protocol = { help: [], ask: [], delegate: [], image: [], peer: [], reply: [], decision: [], note: [], screenshot: [], showImage: [], openDocument: [], malformed: [] };
   const seen = new Set<string>();
   const lines = text.split(/\r?\n/);
   const eligible = protocolLines(lines, opts);
@@ -632,6 +650,10 @@ export function parseProtocol(text: string, opts?: ProtocolOptions): Protocol {
     else if (m[1] === 'DECISION') {
       const t = str(j['text']).trim();
       if (t && out.decision.length < MAX_DECISIONS_PER_TURN) out.decision.push(t.slice(0, 300)); else ok = false;
+    }
+    else if (m[1] === 'NOTE') {
+      const t = str(j['text']).trim();
+      if (t && out.note.length < MAX_NOTES_PER_TURN) out.note.push({ text: t.slice(0, 600), topic: asTopic(j['topic']) }); else ok = false;
     }
     else if (m[1] === 'REPLY') {
       const to = str(j['to']).trim(), text = str(j['text']).trim();

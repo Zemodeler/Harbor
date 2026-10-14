@@ -20,7 +20,10 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'openDocument', 'pickDocument', 'documentAction',
   'listToolRules', 'removeToolRule', 'exportDiagnostics',
   'previewBundleExport', 'exportBundle', 'browseImportFile', 'previewBundle', 'importBundle',
-  'listImportSources', 'previewImport', 'importConversation', 'continueImported'
+  'listImportSources', 'previewImport', 'importConversation', 'continueImported',
+  'getSpendStatus', 'listProjectNotes', 'removeProjectNote',
+  'createRemoteToken', 'listRemoteTokens', 'revokeRemoteToken',
+  'getTaskReport', 'rateResult', 'listRatings', 'getRatingSummary', 'replayRouting'
 ];
 
 export const channel = (m: InvokeMethod): string => `harbor:${m}`;

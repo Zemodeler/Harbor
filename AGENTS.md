@@ -27,6 +27,7 @@ npm test               # vitest, no network, no real CLIs
 npm run typecheck      # tsc --noEmit (excludes src/renderer)
 npm run smoke          # REAL CLI check; uses a little quota (see scripts/smoke.ts)
 npm run smoke -- claude --full   # also runs the whole main-agent -> subagent flow in a temp repo
+npm run eval           # eval harness, Harbor vs single agent, FAKE adapters (scripts/eval); `--real --yes` spends quota
 ```
 
 A change is done only when `npm test`, `npm run typecheck` and `npm run build` pass.

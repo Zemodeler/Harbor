@@ -5,6 +5,7 @@ import type { AgentRole, CliId, EffortPolicy, Id, LowAllowancePolicy, ProjectSet
  * and clamps exactly what Harbor does. Keep the messages identical: the UI shows them as they are.
  */
 const CONCURRENCY_RANGE = [1, 8] as const, RESERVE_RANGE = [0, 50] as const;
+const HELPERS_PER_TURN_RANGE = [1, 12] as const, PLANNERS_PER_TURN_RANGE = [1, 4] as const;
 const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;
 const EFFORT_POLICIES: readonly EffortPolicy[] = ['adaptive', 'conserve', 'quality'];
 const LOW_ALLOWANCE_POLICIES: readonly LowAllowancePolicy[] = ['reduceEffort', 'switch'];
@@ -78,6 +79,8 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
     }
     out.cliPaths = map;
   }
+  if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
+  if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {
     const po: unknown = patch.projectOverrides;
     if (po === undefined) out.projectOverrides = undefined;
@@ -108,7 +111,7 @@ export function applySettingsPatch(cur: Settings, patch: Partial<Settings>): Set
     for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
     if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
   }
-  for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
+  for (const k of [...SCOPED_KEYS, 'maxHelpersPerTurn', 'maxPlannersPerTurn', 'projectOverrides'] as const) {
     if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
   }
   return next;

@@ -91,7 +91,7 @@ export function RoutingFields({ state, projectId }: { state: HarborState; projec
       {err('rolePreferences')}</div>
     <div className={s.fxSettingsGroup}><h4>Effort and allowance</h4>
       <label className={s.fxField}>Effort policy<select disabled={off} value={own.effortPolicy ?? ''} onChange={e => void change('effortPolicy', (e.target.value || undefined) as EffortPolicy | undefined)}><option value="">{unset} ({EFFORT.find(([v]) => v === (inherit ? global.effortPolicy ?? 'adaptive' : 'adaptive'))![1]})</option>{EFFORT.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>{err('effortPolicy')}
-      <label className={s.fxField}>When allowance runs low<select disabled={off} value={own.lowAllowancePolicy ?? ''} onChange={e => void change('lowAllowancePolicy', (e.target.value || undefined) as LowAllowancePolicy | undefined)}><option value="">{unset} ({inherit && global.lowAllowancePolicy ? LOW.find(([v]) => v === global.lowAllowancePolicy)![1] : 'use the CLI with more allowance left'})</option>{LOW.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>{err('lowAllowancePolicy')}
+      <label className={s.fxField}>When allowance runs low<select disabled={off} value={own.lowAllowancePolicy ?? ''} onChange={e => void change('lowAllowancePolicy', (e.target.value || undefined) as LowAllowancePolicy | undefined)}><option value="">{inherit && global.lowAllowancePolicy ? `${unset} (${LOW.find(([v]) => v === global.lowAllowancePolicy)![1]})` : inherit ? `${unset} (Headroom: use the CLI with more room)` : 'Headroom: use the CLI with more room (default)'}</option>{LOW.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>{err('lowAllowancePolicy')}
       <div className={s.fxField}><span>Subscription reserve</span><NumberField label={inherit ? 'Project subscription reserve' : 'Subscription reserve'} value={own.subscriptionReserve} min={0} max={50} placeholder={inherit ? `global: ${global.subscriptionReserve ?? 0}` : '0'} suffix="% kept for you (0–50)" disabled={off} onCommit={v => void change('subscriptionReserve', v)}/></div>{err('subscriptionReserve')}
     </div>
   </>;
@@ -104,6 +104,13 @@ export function RoutingSettings({ state }: { state: HarborState }) {
   if (!st) return null;
   return <>
     <RoutingFields state={state}/>
+    <div className={s.fxSettingsGroup}><h4>Helpers per lead turn</h4>
+      <p className={s.fxNote}>A brake on fan-out: when a lead asks for more, Harbor holds the rest back and says so in the conversation.</p>
+      <div className={s.fxField}><span>Helpers</span><NumberField label="Helpers per lead turn" value={st.maxHelpersPerTurn} min={1} max={12} placeholder="default 4" suffix="per turn (1–12)" disabled={saving !== ''} onCommit={v => void save('maxHelpers', { maxHelpersPerTurn: v })}/></div>
+      {errors.maxHelpers ? <p className={s.fxError} role="alert">{errors.maxHelpers}</p> : null}
+      <div className={s.fxField}><span>Planners</span><NumberField label="Planners per lead turn" value={st.maxPlannersPerTurn} min={1} max={4} placeholder="default 1" suffix="per turn (1–4)" disabled={saving !== ''} onCommit={v => void save('maxPlanners', { maxPlannersPerTurn: v })}/></div>
+      {errors.maxPlanners ? <p className={s.fxError} role="alert">{errors.maxPlanners}</p> : null}
+    </div>
     <div className={s.fxSettingsGroup}><h4>Background</h4>
       <label className={h.checkboxRow}><input type="checkbox" disabled={saving === 'keep'} checked={st.keepRunningInBackground === true} onChange={e => void save('keep', { keepRunningInBackground: e.target.checked })}/> Keep Harbor running in the background when the window is closed</label>
       <p className={s.fxNote}>Closing the window hides Harbor to the tray and running agents keep working. “Quit” in the tray menu really stops Harbor and everything it runs.</p>

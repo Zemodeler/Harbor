@@ -1,4 +1,4 @@
-import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, RollbackPreview, ScreenshotSource, Settings, ToolRule } from '../../shared/api';
+import type { CliStatus, CliTemplate, CustomCliDescriptor, HarborApi, HarborEvent, Agent, GitCommit, GitFileChange, Message, PendingPermission, ProjectNote, RatingSummaryRow, RemoteTokenInfo, ResultRating, RollbackPreview, ScreenshotSource, Settings, ToolRule } from '../../shared/api';
 import { applySettingsPatch } from './normalizeSettings';
 import { seed } from './seed';
 import { createMockSkills } from './mockSkills';
@@ -68,6 +68,10 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
   let customClis: CustomCliDescriptor[] = [];
   let requested = false;
   const copy =<T,>(v: T): T => structuredClone(v);
+  let ratings: ResultRating[] = [];
+  let remoteTokens: RemoteTokenInfo[] = [];
+  const notes = new Map<string, ProjectNote[]>([['store', [{ id: 'note-tests', text: 'Run npm test from the repository root; the checkout tests need the dev server stopped first.', topic: 'howto', created: Date.now() - 86400000, author: 'lead' }]]]);
+  const requireProject = (projectId: string) => { if (!data.projects.some(p => p.id === projectId)) throw new Error('This project is no longer available.'); };
   const emit = (e: HarborEvent) => {
     if (e.type === 'permission') pendingPermissions.set(e.requestId, copy(e));
     listeners.forEach(cb => cb(copy(e)));
@@ -110,6 +114,15 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       screenshot: { target: 'window', title: 'Storefront', why: 'check the new account page layout', agentRole: 'main', agentTitle: 'Main agent', projectName: 'Storefront' } },
     allow => system(conversationId, allow ? 'Sample screenshot approved. Demo only: nothing was captured.' : 'You declined the screenshot request from the lead. Nothing was captured.'),
     { ms: timeout, ended: () => system(conversationId, 'No answer to the screenshot request: declined, nothing was captured.') });
+  };
+  /** "run the checks" in a message: Harbor's checks-trust request (a tool request named 'Harbor checks', remembered per file content). */
+  const askSampleChecks = (conversationId: string, projectId: string) => {
+    const helper = data.agents.find(a => a.projectId === projectId && a.role === 'implementer');
+    const cmds = ['npm test', 'npm run typecheck'], timeout = options.toolTimeoutMs ?? 300000, requestId = id();
+    const prompt = `The project's checks (.harbor/checks.json) have not been approved yet. Harbor would run these commands in a helper's worktree, with your user permissions:\n${cmds.map(c => `  ${c}`).join('\n')}\nAllow them? This approves exactly these commands for this project; if the file changes, Harbor asks again.`;
+    ask({ type: 'permission', requestId, kind: 'tool', tool: 'Harbor checks', prompt, agentId: helper?.id, conversationId, alwaysAllow: false, expiresAt: Date.now() + timeout },
+      allow => system(conversationId, allow ? 'Checks approved for this project (demo only; nothing runs).' : 'Checks not approved; helper claims stay unverified.', helper?.id),
+      { ms: timeout, ended: () => system(conversationId, 'No answer: the checks were not approved.', helper?.id) });
   };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
@@ -206,7 +219,10 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     },
     async searchConversations(query, projectId) {
       const term = query.trim().toLowerCase();
-      return copy(data.conversations.filter(c => (!projectId || c.projectId === projectId) && (c.title.toLowerCase().includes(term) || data.messages.some(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)))).map(c => ({ conversation: c, projectName: data.projects.find(p => p.id === c.projectId)?.name || '', excerpt: data.messages.find(m => m.conversationId === c.id && m.text.toLowerCase().includes(term))?.text.slice(0, 180) })));
+      if (!term) return [];
+      // Like main (service.ts): the excerpt is a window around the first matching message's match.
+      const excerpt = (c: { id: string }) => { const m = data.messages.find(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)); if (!m) return undefined; const at = m.text.toLowerCase().indexOf(term); return m.text.slice(Math.max(0, at - 50), at + 150); };
+      return copy(data.conversations.filter(c => (!projectId || c.projectId === projectId) && (c.title.toLowerCase().includes(term) || data.messages.some(m => m.conversationId === c.id && m.text.toLowerCase().includes(term)))).map(c => ({ conversation: c, projectName: data.projects.find(p => p.id === c.projectId)?.name || '', excerpt: excerpt(c) })));
     },
     async stopConversation(conversationId) {
       const c = requireConversation(conversationId);
@@ -250,6 +266,12 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       if (mode === 'goal') c.goal = goal!.trim(); else delete c.goal;
       emit({ type: 'conversation', conversation: c }); return copy(c);
     },
+    async setConversationDeadline(conversationId, deadline) {
+      const c = requireConversation(conversationId);
+      if (deadline !== null && !(typeof deadline === 'number' && Number.isFinite(deadline) && deadline > 0)) throw new Error('The deadline must be a time (epoch milliseconds), or null to clear it.');
+      if (deadline === null) delete c.deadline; else c.deadline = Math.round(deadline);
+      emit({ type: 'conversation', conversation: c }); return copy(c);
+    },
     async send(conversationId, text, attachments) {
       const c = requireConversation(conversationId);
       if (c.archived) throw new Error('Restore this conversation before sending a message.');
@@ -266,6 +288,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
       if (/ask for permission/i.test(text)) { askSamplePermissions(conversationId, c.projectId); return; }
       if (/take a screenshot/i.test(text)) { askSampleScreenshot(conversationId, c.agentId); return; }
+      if (/run the checks/i.test(text)) { askSampleChecks(conversationId, c.projectId); return; }
       if (/ask me a question/i.test(text)) {
         const requestId = id(); questions.set(requestId, conversationId);
         c.activity = { state: 'waiting', updated: Date.now(), detail: 'Waiting for your design preference.' };
@@ -417,6 +440,50 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       data.messages.push(m); emit({ type: 'message', message: m });
       c.activity = { state: 'done', updated: Date.now(), detail: 'Sample answer received.' }; emit({ type: 'conversation', conversation: c });
     },
+    // Roadmap wave 1 (CHANGELOG 0.1.38-0.1.41): small demo versions so the mock keeps every optional method Harbor offers.
+    async getSpendStatus() {
+      const ceilings = settings.spendCeilings || {};
+      const entries = (['task', 'day', 'week'] as const).filter(scope => ceilings[scope]).map(scope => ({ scope, limit: copy(ceilings[scope]!), threshold: copy(ceilings[scope]!), spent: { kTokens: 0, minutes: 0, runs: 0, partial: false }, hit: false, extensions: 0 }));
+      return { estimate: true as const, entries };
+    },
+    async getTaskReport(conversationId) {
+      const c = requireConversation(conversationId);
+      const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, billableKTok: 0 };
+      return { conversationId: c.id, projectId: c.projectId, generatedAt: Date.now(), totals: { ...zero, runs: 0, failedRuns: 0, partialRuns: 0, runsWithoutTokens: 0, agentMinutes: 0, wallMinutes: 0, quota: [] }, agents: [], byModel: [], runs: [], decisions: [], notes: ['Demo: no runs are recorded, so every figure is 0.'] };
+    },
+    async rateResult(targetId, rating, note) {
+      const agent = data.agents.find(a => a.id === targetId), message = agent ? undefined : data.messages.find(m => m.id === targetId && m.details);
+      if (!agent && !message) throw new Error('Rate a helper or a routed reply.');
+      const conversationId = agent ? agent.conversationId : message!.conversationId;
+      const projectId = agent ? agent.projectId : data.conversations.find(c => c.id === conversationId)?.projectId || '';
+      const r: ResultRating = { id: id(), time: Date.now(), rating, ...(note?.trim() ? { note: note.trim().slice(0, 1000) } : {}), target: agent ? 'agent' : 'message', targetId, projectId, ...(conversationId ? { conversationId } : {}), ...(agent ? { agentId: agent.id, role: agent.role } : {}), cli: agent ? agent.cli : message!.details!.cli, model: agent ? agent.model : message!.details!.model };
+      ratings = [...ratings.filter(x => x.targetId !== targetId), r];
+      return copy(r);
+    },
+    async listRatings(o) { return copy(ratings.filter(r => !o?.projectId || r.projectId === o.projectId).reverse()); },
+    async getRatingSummary(o) {
+      const rows = new Map<string, RatingSummaryRow>();
+      for (const r of ratings.filter(x => !o?.projectId || x.projectId === o.projectId)) {
+        const key = o?.by === 'cli' ? r.cli : `${r.cli}/${r.model}`;
+        const row = rows.get(key) || { cli: r.cli, ...(o?.by === 'cli' ? {} : { model: r.model }), up: 0, down: 0, redoStronger: 0, total: 0, approval: 0 };
+        if (r.rating === 'up') row.up++; else if (r.rating === 'down') row.down++; else row.redoStronger++;
+        row.total++; row.approval = row.up / row.total; rows.set(key, row);
+      }
+      return copy([...rows.values()]);
+    },
+    async replayRouting() {
+      return { generatedAt: Date.now(), assumption: 'Demo: no recorded decisions are replayed.', decisions: [], summary: { decisions: 0, changed: 0, unroutable: 0, baselineMatchesRecorded: 0, priceDelta: 0, costPctDelta: 0, moves: [] }, notes: ['Demo only: nothing is routed.'] };
+    },
+    async listProjectNotes(projectId) { requireProject(projectId); return copy(notes.get(projectId) || []); },
+    async removeProjectNote(projectId, noteId) { requireProject(projectId); const rest = (notes.get(projectId) || []).filter(n => n.id !== noteId); notes.set(projectId, rest); return copy(rest); },
+    async createRemoteToken(name, scope) {
+      if (scope === 'full' && settings.remote?.allowFullScope !== true) throw new Error('Full remote access is off. Turn on remote.allowFullScope in settings first, or create a read-only or answer-permissions token.');
+      const info: RemoteTokenInfo = { id: id(), name: name.trim().slice(0, 80), scope, created: Date.now() };
+      remoteTokens.push(info);
+      return { token: `hbt_demo_${info.id.replace(/-/g, '')}`, info: copy(info) };
+    },
+    async listRemoteTokens() { return copy(remoteTokens); },
+    async revokeRemoteToken(tokenId) { remoteTokens = remoteTokens.filter(t => t.id !== tokenId); },
     onEvent(cb) { listeners.add(cb); return () => { listeners.delete(cb); }; }
   };
   return api;

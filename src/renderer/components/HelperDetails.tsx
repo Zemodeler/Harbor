@@ -1,6 +1,7 @@
 import type { HarborState } from '../hooks/useHarbor';
 import type { Agent } from '../../shared/api';
 import { AgentOutcome } from './AgentOutcome';
+import { HelperStatus } from './HelperStatus';
 import { ChangedFiles, IntegrationCard } from './IntegrationPanel';
 import { QueueControls, ResumeControl } from './QueueControls';
 import { RollbackAction, RollbackCard } from './RollbackDialog';
@@ -14,6 +15,7 @@ export function HelperDetails({ state, agent }: { state: HarborState; agent: Age
   const { api, agents } = state;
   const branch = !!agent.worktree || !!agent.integration?.branch;
   return <div className={s.fxWrap} style={{ flex: '0 0 100%' }} data-helper-details={agent.id}>
+    <HelperStatus agent={agent}/>
     {agent.integration ? <IntegrationCard api={api} agent={agent} agents={agents}/>
       : agent.rollback ? <RollbackCard api={api} agent={agent} agents={agents}/>
       : <AgentOutcome agent={agent}/>}
