@@ -46,6 +46,7 @@ import { isModelSpecific } from './adapters/types';
 import type { EventBus } from './events';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { resolveShownImage } from './images';
+import { resolveDocumentPath, type DocumentRoot } from './documents';
 import type { ScreenshotBroker, ScreenshotLine, ShotOutcome } from './screenshots';
 
 export interface OrchestratorDeps {
@@ -1232,6 +1233,7 @@ export class Orchestrator {
     const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty });
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     this.showImages(main, conversationId, proto.showImage, project.path, [project.path]);
+    this.openDocuments(main, conversationId, proto.openDocument, project.path, [{ kind: 'project', path: project.path }]);
     for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
     const replied = new Set(proto.reply.map((r) => this.deliverReply(project.id, conversationId, r)).filter((x): x is Id => !!x));
     const started = created.filter((c) => c.state !== 'failed');
@@ -2116,6 +2118,11 @@ export class Orchestrator {
       const cwd = a.worktree && existsSync(a.worktree) ? await this.cwdIn(project, a.worktree) : project.path;
       this.showImages(a, this.convFor(a), proto.showImage, cwd, [project.path, ...(a.worktree ? [a.worktree] : [])]);
     }
+    if (res.ok && proto.openDocument.length) {
+      const project = this.project(a.projectId);
+      const cwd = a.worktree && existsSync(a.worktree) ? await this.cwdIn(project, a.worktree) : project.path;
+      this.openDocuments(a, this.convFor(a), proto.openDocument, cwd, [{ kind: 'project', path: project.path }, ...(a.worktree ? [{ kind: 'worktree' as const, path: a.worktree, agentId: a.id }] : [])]);
+    }
     const summary = own?.summary || firstLine(report);
     if (stopped) {
       const where = `Its work so far is committed${a.branch ? ` on ${a.branch}` : ''}${a.headCommit ? ` at ${a.headCommit.slice(0, 10)}` : ''}.`;
@@ -2983,6 +2990,27 @@ export class Orchestrator {
   }
 
   /**
+   * HARBOR_OPEN_DOCUMENT: files the agent wants the user to read in Harbor's viewer. Only the path checks run here (inside the
+   * project or the agent's worktree, no link leaving them, no credential file); the renderer then calls openDocument, which checks
+   * again and reads the file. Nothing is copied. The chat gets the path either way, so the user can reopen it with a click.
+   */
+  private openDocuments(a: AgentRecord, conversationId: Id, docs: Array<{ path: string; title?: string }>, cwd: string, roots: DocumentRoot[]): void {
+    const who = a.role === 'main' ? 'the lead' : `"${a.title}"`;
+    for (const d of docs) {
+      const r = resolveDocumentPath(d.path, cwd, roots);
+      if (!r.ok) {
+        this.post(conversationId, 'system', `Harbor did not open a document from ${who}: ${r.message} (${clip(d.path, 120)})`, { agentId: a.id });
+        // The journal gets the reason only: the path is the agent's text and may name anything on the machine.
+        this.log({ kind: 'protocol', projectId: a.projectId, conversationId: a.role === 'main' ? conversationId : a.parentConversationId, agentId: a.id, text: `${a.role === 'main' ? 'lead' : `${a.role} "${a.title}"`}: document not opened: ${r.reason}` });
+        continue;
+      }
+      const shown = '`' + r.relPath.replace(/`/g, '') + '`';
+      this.post(conversationId, 'system', `Opened ${d.title ? `${d.title} (${shown})` : shown} from ${who} in the document viewer.`, { agentId: a.id });
+      this.emit({ type: 'document', projectId: a.projectId, conversationId, path: r.path, ...(d.title ? { title: d.title } : {}), ...(r.root.agentId ? { agentId: r.root.agentId } : {}) });
+    }
+  }
+
+  /**
    * An agent's HARBOR_SCREENSHOT line: the user is asked in a card with a live preview (screenshots.ts), and the answer (the image,
    * or why there is none) resumes the agent. `conversationId` is where it shows; `sessionId` is the lead conversation it belongs to.
    */
@@ -3602,7 +3630,7 @@ export function commandPrefixes(cmds: string[]): string[] {
   return cmds.map((c) => c.trim()).filter((c) => c && !/[;&|<>`$()\r\n]/.test(c));
 }
 
-const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE)\s*:/;
+const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE|OPEN_DOCUMENT)\s*:/;
 
 /**
  * Protocol lines Harbor did not act on: lines that were malformed, and (when a tag was required) lines written without it,

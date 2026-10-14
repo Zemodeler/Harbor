@@ -5,6 +5,7 @@ import { layoutGraph, type GraphRow } from '../gitGraph';
 import { Clipped } from './Clipped';
 import { SessionStatus } from './SessionStatus';
 import { BranchIcon, RefreshIcon } from './Icons';
+import { OpenFileButton } from '../documents/DocumentLinks';
 import s from '../Harbor.module.css';
 
 const PAGE = 300, WINDOW = 100, LANE = 14, ROW = 40;
@@ -136,6 +137,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
           <span className={s.gitPath}>{f.oldPath ? `${f.oldPath} → ` : ''}{f.path}</span>
           {f.additions !== undefined ? <small><span className={s.gitAdd}>+{f.additions}</span> <span className={s.gitDel}>−{f.deletions}</span></small> : null}
         </button>
+        {file === f.path && !f.hidden && f.status !== 'deleted' ? <p className={s.gitTarget}><OpenFileButton path={f.path} agentId={selection.kind === 'branch' && chosen?.agentId && chosen.worktree ? chosen.agentId : undefined}>Open {selection.kind === 'branch' && chosen?.worktree ? 'the helper’s copy' : 'the file on disk'} in the viewer</OpenFileButton></p> : null}
         {file === f.path ? f.hidden ? <p className={s.reviewNote}>Credential file: Harbor never shows its contents.</p>
           : diff.error ? <p className={s.reviewNote} role="alert">{diff.error}</p>
           : diff.data === undefined ? <p role="status" className={s.muted}>Reading diff…</p>

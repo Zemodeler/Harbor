@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { Agent, GitFileChange, HarborApi } from '../../shared/api';
 import { useAction } from '../hooks/useAgentActions';
 import { AgentOutcome, shortHash } from './AgentOutcome';
+import { OpenFileButton } from '../documents/DocumentLinks';
 import s from './Features.module.css';
 
 const SOURCE_STATE = { merged: 'merged', conflict: 'conflict', pending: 'not merged' } as const;
@@ -44,7 +45,7 @@ export function ChangedFiles({ api, agent }: { api: HarborApi; agent: Agent }) {
     <button disabled={busy} aria-expanded={files !== undefined} onClick={() => files ? setFiles(undefined) : void load()}>{busy ? 'Loading…' : files ? 'Hide changed files' : 'Show changed files'}</button>
     {error ? <p className={s.fxError} role="alert">{error}</p> : null}
     {files ? files.length ? <ul className={`${s.fxList} ${s.fxScroll}`} aria-label={`Files changed by ${agent.title}`}>{files.map(f => <li key={f.path}>
-      <span className={s.fxBadge}>{f.status}</span><span className={s.fxMono}>{f.hidden ? `${f.path} (hidden: credentials)` : f.path}</span>
+      <span className={s.fxBadge}>{f.status}</span><span className={s.fxMono}>{f.hidden ? `${f.path} (hidden: credentials)` : <OpenFileButton path={f.path} agentId={agent.worktree ? agent.id : undefined} disabled={f.status === 'deleted'}>{f.path}</OpenFileButton>}</span>
       {f.additions !== undefined || f.deletions !== undefined ? <span className={s.fxMuted}>+{f.additions ?? 0} −{f.deletions ?? 0}</span> : null}
     </li>)}</ul> : <p className={s.fxNote}>No committed changes.</p> : null}
   </div>;

@@ -4,7 +4,7 @@ import type { HarborState } from '../hooks/useHarbor';
 import { SearchIcon } from './Icons';
 import s from '../Harbor.module.css';
 
-export function CommandMenu({ state, history, close, settings, add, review, activity, git }: { state: HarborState; history?: boolean; close: () => void; settings: () => void; add: () => void; review: () => void; activity: () => void; git?: () => void }) {
+export function CommandMenu({ state, history, close, settings, add, review, activity, git, openFile, openPath }: { state: HarborState; history?: boolean; close: () => void; settings: () => void; add: () => void; review: () => void; activity: () => void; git?: () => void; openFile?: () => void; openPath?: (path: string) => void }) {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [loading, setLoading] = useState(false);
@@ -23,6 +23,8 @@ export function CommandMenu({ state, history, close, settings, add, review, acti
   const projects = state.projects.filter(p => p.name.toLowerCase().includes(query.toLowerCase()));
   const conversations: SearchHit[] = query.trim() ? hits : history ? state.conversations.map(c => ({ conversation: c, projectName: state.projects.find(p => p.id === c.projectId)?.name || '' })) : [];
   const execute = (action: () => void) => { close(); action(); };
+  // A typed path (with a folder separator or a file extension) can be opened directly; main checks it like any other path.
+  const typedPath = openPath && /^\S.*(?:[\\/].*|\.[A-Za-z0-9]{1,8})$/.test(query.trim()) && query.trim().length <= 400 ? query.trim() : undefined;
   return <div ref={results} onKeyDown={e => {
     if (!['ArrowDown', 'ArrowUp'].includes(e.key)) return;
     const buttons = Array.from(results.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled):not([hidden])') || []);
@@ -35,6 +37,8 @@ export function CommandMenu({ state, history, close, settings, add, review, acti
     {!history ? <div className={s.commandActions}>
       <button hidden={!'new conversation'.includes(query.toLowerCase())} disabled={!state.projectId} onClick={() => execute(() => void state.newConversation())}>New conversation <kbd>Ctrl N</kbd></button>
       <button hidden={!'open a project'.includes(query.toLowerCase())} onClick={() => execute(add)}>Open a project</button>
+      {openFile ? <button hidden={!'open file in viewer'.includes(query.toLowerCase())} onClick={() => execute(openFile)}>Open file…</button> : null}
+      {typedPath ? <button onClick={() => execute(() => openPath!(typedPath))}>Open “{typedPath}” in the viewer</button> : null}
       <button hidden={!'open settings'.includes(query.toLowerCase())} onClick={() => execute(settings)}>Open Settings</button>
       <button hidden={!'session information'.includes(query.toLowerCase())} disabled={!state.conversation} onClick={() => execute(activity)}>Session information</button>
       <button hidden={!'review changes'.includes(query.toLowerCase())} disabled={!state.conversation} onClick={() => execute(review)}>Review changes</button>

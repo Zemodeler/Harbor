@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -30,10 +30,14 @@ import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
-import { attachmentDir, attachmentUrl, copyShownImage, savePng, urlForStoredPath } from './images';
+import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStoredPath } from './images';
 import { ScreenshotBroker, type Capturer } from './screenshots';
+import { canOpenExternally, openDocumentAt, resolveDocumentPath, type DocumentRoot } from './documents';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile'> & {
+  openDocument(projectId: Id, path: string, opts?: { agentId?: Id; since?: number }): Promise<DocumentResult>;
+  pickDocument(projectId: Id): Promise<DocumentResult | null>;
+  documentAction(projectId: Id, path: string, action: 'openExternal' | 'reveal', opts?: { agentId?: Id }): Promise<void>;
   previewScreenshot(requestId: Id, opts?: { sourceId?: string }): Promise<ScreenshotSource[]>;
   answerScreenshot(requestId: Id, answer: { allow: boolean; sourceId?: string; forConversation?: boolean }): Promise<void>;
   setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
@@ -119,6 +123,10 @@ export interface ServiceOptions {
   foreground?: () => boolean;
   /** How long a screenshot request waits for the user (tests); default 5 minutes (screenshots.ts). */
   screenshotTimeoutMs?: number;
+  /** File picker for pickDocument(): any file the user chooses may then be viewed this session. Injected so this module never imports electron. */
+  pickDocument?: () => Promise<string | undefined>;
+  /** Selects a file in Explorer (documentAction 'reveal'); index.ts passes shell.showItemInFolder. */
+  revealPath?: (path: string) => void | Promise<void>;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -392,6 +400,24 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     const p = store.getProject(id);
     if (!p) throw new Error(`Unknown project ${id}`);
     return p;
+  };
+  // ---- document viewer (plan section 4b): files the user picked in the dialog this session (exact files, never their folders).
+  const pickedDocuments = new Set<string>();
+  /** Where a document of this project may come from, and the folder relative paths resolve against (the helper's worktree, else the project). */
+  const documentScope = (projectId: Id, agentId: Id | undefined): { cwd: string; roots: DocumentRoot[] } => {
+    const project = needProject(projectId);
+    let cwd = project.path;
+    if (agentId !== undefined) {
+      const a = store.getAgent(agentId);
+      if (!a || a.projectId !== projectId) throw new Error('That agent does not belong to this project.');
+      if (a.worktree && existsSync(a.worktree)) cwd = a.worktree;
+    }
+    const roots: DocumentRoot[] = [{ kind: 'project', path: project.path }];
+    for (const a of store.listAgentRecords(projectId)) if (a.worktree) roots.push({ kind: 'worktree', path: a.worktree, agentId: a.id });
+    for (const c of store.listConversations(projectId)) { try { roots.push({ kind: 'attachments', path: attachmentDir(dataRoot, c.id) }); } catch { /* not a plain id: no folder */ } }
+    if (opts.dataDir) roots.push({ kind: 'skills', path: join(opts.dataDir, 'skills') });
+    for (const p of pickedDocuments) roots.push({ kind: 'picked', path: p, file: true });
+    return { cwd, roots };
   };
   const gitViewOf = async (projectId: Id): Promise<GitView> => {
     const view = await GitView.open(needProject(projectId).path);
@@ -727,6 +753,39 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!answer || typeof answer !== 'object' || typeof answer.allow !== 'boolean') throw new Error('Answer with allow true or false.');
       if (answer.sourceId !== undefined && typeof answer.sourceId !== 'string') throw new Error('Choose a window or screen from the preview.');
       await screenshots.answer(requestId, { allow: answer.allow, ...(answer.sourceId !== undefined ? { sourceId: answer.sourceId } : {}), forConversation: answer.forConversation === true });
+    },
+    async openDocument(projectId, path, o) {
+      const agentId = o && typeof o === 'object' ? o.agentId : undefined;
+      const since = o && typeof o === 'object' && typeof o.since === 'number' && Number.isFinite(o.since) ? o.since : undefined;
+      const { cwd, roots } = documentScope(projectId, agentId);
+      return openDocumentAt(path, cwd, roots, since !== undefined ? { since } : {});
+    },
+    async pickDocument(projectId) {
+      const project = needProject(projectId);
+      if (!opts.pickDocument) throw new Error('Choosing a file is available in the desktop app.');
+      const chosen = await opts.pickDocument();
+      if (!chosen) return null;
+      // The user's own choice in a native dialog: that one file (never its folder) may be viewed, refreshed and acted on this session.
+      pickedDocuments.add(resolve(chosen));
+      const target = real(resolve(chosen));
+      if (target) pickedDocuments.add(target); // the viewer refreshes by the real path
+      const { roots } = documentScope(projectId, undefined);
+      return openDocumentAt(resolve(chosen), project.path, roots);
+    },
+    async documentAction(projectId, path, action, o) {
+      if (action !== 'openExternal' && action !== 'reveal') throw new Error('Unknown document action.');
+      const { cwd, roots } = documentScope(projectId, o && typeof o === 'object' ? o.agentId : undefined);
+      const r = resolveDocumentPath(path, cwd, roots);
+      if (!r.ok) throw new Error(r.message);
+      if (action === 'reveal') {
+        if (!opts.revealPath) throw new Error('Showing files in Explorer is available in the desktop app.');
+        await opts.revealPath(r.path);
+        return;
+      }
+      // The default app of a script or program would run it: only documents and images are handed over.
+      if (!canOpenExternally(r.path)) throw new Error('Harbor opens only documents and images in their default app. Use "Show in Explorer" for this file.');
+      if (!opts.openFolder) throw new Error('Opening files is available in the desktop app.');
+      await opts.openFolder(r.path);
     },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },

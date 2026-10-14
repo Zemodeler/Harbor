@@ -1,13 +1,14 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from 'react';
 import s from '../Harbor.module.css';
+import { LinkAgent, PathCode, PathText } from '../documents/DocumentLinks';
 
-// Text nodes only: no HTML and no links are ever produced, whatever the model writes. `_x_` needs word boundaries so
-// snake_case stays plain.
+// Text nodes only: no HTML and no web links are ever produced, whatever the model writes. `_x_` needs word boundaries so
+// snake_case stays plain. File paths become buttons that open Harbor's viewer, only where App provides one (DocumentLinks).
 const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s](?:[^*]*[^*\s])?\*|(?<![\w])_[^_\s](?:[^_]*[^_\s])?_(?![\w]))/g;
 function inline(text: string) {
   return text.split(INLINE).map((part, i) =>
-    i % 2 === 0 ? part
-      : part.startsWith('`') ? <code key={i}>{part.slice(1, -1)}</code>
+    i % 2 === 0 ? (part ? <PathText key={i} text={part}/> : part)
+      : part.startsWith('`') ? <PathCode key={i} text={part.slice(1, -1)}/>
       : part.startsWith('**') ? <strong key={i}>{part.slice(2, -2)}</strong>
       : <em key={i}>{part.slice(1, -1)}</em>);
 }
@@ -55,7 +56,7 @@ export function splitRow(line: string): string[] {
   if (framedEnd && !/(^|[^\\])(\\\\)*\\\|$/.test(body) && cells.length) cells.pop();
   return cells.map(c => c.trim());
 }
-type Align = 'left' | 'center' | 'right' | undefined;
+export type Align = 'left' | 'center' | 'right' | undefined;
 function alignments(line: string): Align[] | null {
   // Only a piped separator counts: a bare `---` after prose is a rule, not a table.
   if (!line.includes('|')) return null;
@@ -67,11 +68,11 @@ function alignments(line: string): Align[] | null {
 // Markers may be indented: an item indented two or more columns past its list's own marker is nested inside it.
 const ORDERED = /^(\s*)(\d{1,9})[.)] (.*)$/;
 const BULLET = /^(\s*)[-*] (.*)$/;
-const HEADING = /^#{1,6} (.*)$/;
+const HEADING = /^(#{1,6}) (.*)$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const indentOf = (line: string) => line.length - line.trimStart().length;
-type Item = { text: string; children: Block[] };
-type Block = { kind: 'p' | 'h'; text: string } | { kind: 'ul'; items: Item[] } | { kind: 'ol'; start: number; items: Item[] }
+export type Item = { text: string; children: Block[] };
+export type Block = { kind: 'p'; text: string } | { kind: 'h'; text: string; level: number } | { kind: 'ul'; items: Item[] } | { kind: 'ol'; start: number; items: Item[] }
   | { kind: 'quote'; blocks: Block[] } | { kind: 'table'; head: string[]; align: Align[]; rows: string[][] };
 
 // Fences are recognised per line (up to 3 spaces of indent, a run of 3+ backticks or tildes alone with an info string),
@@ -111,7 +112,7 @@ export function parseBlocks(text: string): Block[] {
     const line = lines[i];
     if (!line.trim()) { flush(); continue; }
     const heading = line.match(HEADING);
-    if (heading) { flush(); blocks.push({ kind: 'h', text: heading[1] }); continue; }
+    if (heading) { flush(); blocks.push({ kind: 'h', text: heading[2], level: heading[1].length }); continue; }
     if (QUOTE.test(line)) {
       flush();
       const inner: string[] = [];
@@ -198,10 +199,10 @@ function render(b: Block, key: number): ReactNode {
 }
 
 /** Memoised on the text: a message is parsed once per change, not on every parent render (typing, scrolling). */
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({ text, agentId }: { text: string; agentId?: string }) {
   // Render text nodes only: raw HTML and executable/link schemes are never interpreted.
   const content = useMemo(() => splitFences(text).map((part, i) => part.kind === 'code'
     ? <Code key={i} language={part.language} text={part.text}/>
     : <Fragment key={i}>{parseBlocks(part.text).map(render)}</Fragment>), [text]);
-  return <>{content}</>;
+  return <LinkAgent.Provider value={agentId}>{content}</LinkAgent.Provider>;
 });

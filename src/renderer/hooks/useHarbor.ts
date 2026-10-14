@@ -19,6 +19,8 @@ export function useHarbor() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  /** The latest agent request to open a document (HARBOR_OPEN_DOCUMENT); useDocuments decides whether to show it. seq makes repeats distinct. */
+  const [documentRequest, setDocumentRequest] = useState<{ seq: number; event: Extract<HarborEvent, { type: 'document' }> }>();
   const [usage, setUsage] = useState<UsageWindow[]>([]);
   const [settings, setSettings] = useState<Settings>();
   const [projectId, setProjectId] = useState('');
@@ -223,6 +225,7 @@ export function useHarbor() {
     if (e.type === 'cli') setClis(cs => upsertById(cs, e.cli));
     if (e.type === 'question') setQuestions(qs => qs.some(q => q.requestId === e.requestId) ? qs : [...qs.filter(q => q.agentId !== e.agentId || !e.agentId), e]);
     if (e.type === 'permission') receivePermission(e);
+    if (e.type === 'document') setDocumentRequest(r => ({ seq: (r?.seq ?? 0) + 1, event: e }));
   }
   // Harbor has no resolution event: poll while requests are shown so withdrawn ones disappear. Stops when none remain.
   const hasPermissions = permissions.length > 0;
@@ -389,7 +392,7 @@ export function useHarbor() {
     await selectConversation(c);
   }
   return { api, projects, clis, conversations, agents, messages, usage, settings, projectId, conversation,
-    lastActivity, updateConversation, openConversation,
+    lastActivity, updateConversation, openConversation, documentRequest,
     permissions, permissionAnswering, permissionErrors, permissionSyncError, permissionNotice, dismissPermissionNotice: () => setPermissionNotice(''), refreshPermissions,
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),

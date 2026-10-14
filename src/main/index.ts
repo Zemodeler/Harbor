@@ -149,7 +149,13 @@ if (startupAction === 'start') app.whenReady().then(() => {
     // Screenshots: only ever after the user's yes in the card (screenshots.ts); a window allowed for a conversation is captured
     // only while Harbor's window is visible, never in the background.
     capturer: desktopCapturerAdapter,
-    foreground: () => !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized()
+    foreground: () => !!win && !win.isDestroyed() && win.isVisible() && !win.isMinimized(),
+    // Document viewer: a file outside the project is viewable only when the user picks it here; reveal never opens the file.
+    pickDocument: async () => {
+      const r = win ? await dialog.showOpenDialog(win, { properties: ['openFile'], title: 'Open a file in Harbor\'s viewer' }) : await dialog.showOpenDialog({ properties: ['openFile'], title: 'Open a file in Harbor\'s viewer' });
+      return r.canceled ? undefined : r.filePaths[0];
+    },
+    revealPath: (path) => shell.showItemInFolder(path)
   });
   // Only files Harbor wrote under <data>\attachments are served, and only to Harbor's own document (images.ts has the guards).
   protocol.handle(HARBOR_FILE_SCHEME, async (request) => {
