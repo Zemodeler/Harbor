@@ -1,4 +1,5 @@
 import type { CliId } from '../../shared/api';
+import type { McpRun } from '../mcp/materialize';
 
 export type Effort = 'low' | 'medium' | 'high';
 
@@ -47,6 +48,12 @@ export interface RunOptions {
    * Absent: `effort` is used as is.
    */
   nativeEffort?: string;
+  /**
+   * MCP servers from Harbor's registry for this run, already filtered by mcp/materialize.ts planMcpRun (permission, CLI support,
+   * allowUnattended). Claude: a per-run --mcp-config file (and --strict-mcp-config when `strict`); Codex: -c mcp_servers overrides;
+   * custom CLIs: run.mcp with {mcpConfigFile}. Holds env and header values: never log it.
+   */
+  mcp?: McpRun;
 }
 
 /** A CLI asking the host whether it may run one tool call. */

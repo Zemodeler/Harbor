@@ -146,6 +146,8 @@ if (startupAction === 'start') app.whenReady().then(() => {
     skillHomes: { claude: join(app.getPath('home'), '.claude'), codex: process.env['CODEX_HOME'] || join(app.getPath('home'), '.codex') },
     // GitHub skill import only, and only after the user's explicit click (skills/github.ts).
     fetch: (url, init) => fetch(url, init),
+    // Testing an http/sse MCP server, only when the user clicks Test in Settings > MCP servers (mcp/probe.ts).
+    mcpFetch: (url, init) => fetch(url, init),
     // Screenshots: only ever after the user's yes in the card (screenshots.ts); a window allowed for a conversation is captured
     // only while Harbor's window is visible, never in the background.
     capturer: desktopCapturerAdapter,

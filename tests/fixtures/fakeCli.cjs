@@ -16,7 +16,7 @@ function run() {
     case 'version': return console.log('fakecli 1.2.3');
     case 'status-out': console.log('Error: not logged in'); return process.exit(1);
     case 'text': return process.stdout.write(`para one\nline two\n\npara two: ${input.length}\n`);
-    case 'echo': return out({ argv: args, input, env: Object.keys(process.env) });
+    case 'echo': return out({ argv: args, input, env: Object.keys(process.env), ...(opt('--mcp-config') ? { mcp: JSON.parse(readFileSync(opt('--mcp-config'), 'utf8')) } : {}) });
     case 'file': return out({ file: readFileSync(opt('--prompt-file'), 'utf8'), path: opt('--prompt-file'), stdin: input });
     case 'answer': return out({ answer: 'Hi from fakecli' });
     case 'jsonl':

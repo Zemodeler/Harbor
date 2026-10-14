@@ -682,6 +682,7 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
     throw new Error('keepRunningInBackground must be a boolean.');
   }
   if ('editor' in patch && patch.editor !== undefined && !isEditorId(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
+  if ('claudeOwnMcp' in patch && patch.claudeOwnMcp !== undefined && typeof patch.claudeOwnMcp !== 'boolean') throw new Error('claudeOwnMcp must be a boolean.');
   if ('cliPaths' in patch) {
     const cp: unknown = patch.cliPaths;
     if (cp !== undefined && !isObj(cp)) throw new Error('cliPaths must map a CLI id to an executable path.');

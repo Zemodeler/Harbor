@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import type { Chunk, CliAdapter, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines, type StdinSink, type StreamedLine, type StreamResult } from './stream';
+import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
 
 /**
  * Claude Code headless adapter. Flags verified against `claude --help` (2.1.293):
@@ -44,6 +45,12 @@ import { streamLines, type StdinSink, type StreamedLine, type StreamResult } fro
  * `{subtype:'error',request_id,error}`; the user turn line `{type:'user',message:{role:'user',content}}`; that a cancelled
  * request needs no reply; and that --disallowedTools deny rules are evaluated before the host is asked. Because of the
  * last one, lead runs (`denyGitWrites`) also auto-deny git merge/rebase/cherry-pick/reset/push here, without asking.
+ *
+ * MCP (`mcp`, mcp/materialize.ts): Harbor's servers go in a per-run `--mcp-config <file>` (deleted in `finally`), and
+ * `--strict-mcp-config` keeps Claude Code's own MCP configuration (user and project config, plugins, connectors) out of the run
+ * unless the user allowed it. Both flags verified in claude.exe 2.1.295 --help. MCP tools are not on the allowlist, so in a
+ * controlled run each call reaches the host through `can_use_tool` like any other tool (tool name `mcp__<server>__<tool>`); a server
+ * the user allows without asking is added to --allowedTools as `mcp__<server>` (documented rule form; NOT verified live).
  */
 /** Both `Bash(prefix)` and `Bash(prefix *)`: the second form may not match a bare command with no arguments. */
 const bashRules = (prefixes: string[]): string[] => prefixes.flatMap((p) => [`Bash(${p})`, `Bash(${p} *)`]);
@@ -83,7 +90,7 @@ const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join
 /** Whether this run answers permission prompts through the host instead of silently denying. */
 export const isControlled = (o: RunOptions): boolean => !!o.onToolPermission && o.permission === 'edit';
 
-export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
+export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
   if (o.model && o.model !== 'default') a.push('--model', o.model);
   a.push('--effort', o.effort);
@@ -94,12 +101,15 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string): string[] {
     if (systemPromptFile) a.push('--system-prompt-file', systemPromptFile);
     return a;
   }
+  // Variadic: always followed by another flag below (--strict-mcp-config, --resume or --permission-mode).
+  if (mcpConfigFile) a.push('--mcp-config', mcpConfigFile);
+  if (o.mcp?.strict) a.push('--strict-mcp-config');
   if (o.resumeId) a.push('--resume', o.resumeId);
   if (o.permission === 'full') {
     a.push('--permission-mode', 'bypassPermissions');
   } else if (o.permission === 'edit') {
     const extra = (o.allowedCommands ?? []).filter((c) => c.trim() && !/[\r\n]/.test(c)).flatMap((c) => bashRules([c.trim()]));
-    a.push('--permission-mode', 'acceptEdits', '--allowedTools', ...(o.denyGitWrites ? LEAD_BASH_ALLOW : HELPER_BASH_ALLOW), ...extra);
+    a.push('--permission-mode', 'acceptEdits', '--allowedTools', ...(o.denyGitWrites ? LEAD_BASH_ALLOW : HELPER_BASH_ALLOW), ...extra, ...unattendedRules(o.mcp));
   } else {
     a.push('--permission-mode', 'plan');
   }
@@ -313,12 +323,16 @@ export class ClaudeAdapter implements CliAdapter {
       spFile = join(tmpdir(), `harbor-sp-${randomUUID()}.txt`);
       writeFileSync(spFile, o.systemPrompt);
     }
+    // The concierge (lean) never gets MCP servers. The file is removed in `finally`: after success, failure and abort alike.
+    let mcpFile: { file: string; cleanup: () => void } | undefined;
     let res: IteratorResult<StreamedLine, StreamResult>;
     const ctl = isControlled(o) ? new PermissionChannel(o) : undefined;
-    const gen = ctl
-      ? streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: userMessageLine(prompt), signal: o.signal, interactive: (s) => ctl.attach(s) })
-      : streamLines(this.exe, claudeArgs(o, spFile), { cwd: o.cwd, input: prompt, signal: o.signal });
     try {
+      if (o.mcp?.servers.length && !o.lean) mcpFile = writeMcpConfig(o.mcp.servers);
+      const args = claudeArgs(o, spFile, mcpFile?.file);
+      const gen = ctl
+        ? streamLines(this.exe, args, { cwd: o.cwd, input: userMessageLine(prompt), signal: o.signal, interactive: (s) => ctl.attach(s) })
+        : streamLines(this.exe, args, { cwd: o.cwd, input: prompt, signal: o.signal });
       res = await gen.next();
       while (!res.done) {
         if (res.value.stream === 'stdout') {
@@ -330,8 +344,14 @@ export class ClaudeAdapter implements CliAdapter {
         }
         res = await gen.next();
       }
+    } catch (e) {
+      // Only setup can throw here (the temp file could not be written): end like any failed run, with exactly one done.
+      ctl?.finish();
+      if (!done) yield { kind: 'done', ok: false, error: `Harbor could not start Claude Code: ${String((e as Error).message ?? e)}`, exitCode: null };
+      return;
     } finally {
       ctl?.finish();
+      mcpFile?.cleanup();
       if (spFile) try { unlinkSync(spFile); } catch { /* already gone */ }
     }
     if (!done) {

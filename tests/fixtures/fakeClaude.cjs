@@ -34,6 +34,14 @@ async function run() {
       ask('req_h', 'Bash', { command: 'sleep 1000' });
       setInterval(() => {}, 1000);
       return;
+    case 'mcp': {
+      // Reads the MCP config Harbor passed (proving the file exists during the run), then asks about an MCP tool.
+      const i = process.argv.indexOf('--mcp-config');
+      const mcp = i >= 0 ? JSON.parse(require('node:fs').readFileSync(process.argv[i + 1], 'utf8')) : null;
+      ask('req_m', 'mcp__docs__search', { q: 'harbor' });
+      await nextResponse();
+      return result({ mcp });
+    }
     case 'noresult':
       ask('req_n', 'Bash', { command: 'ls' });
       await nextResponse();

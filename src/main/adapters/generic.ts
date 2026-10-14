@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { CustomCliDescriptor } from '../../shared/api';
 import { customEnv, expandArgs, matchesDone, parseDoneTest, parseJsonPath, readJsonPath, type SlotValues } from '../clis/custom';
 import { CappedText } from '../proc';
+import { writeMcpConfig } from '../mcp/materialize';
 import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines, type StreamedLine } from './stream';
@@ -18,6 +19,8 @@ import { streamLines, type StreamedLine } from './stream';
  * JSONL output: each line is matched against the descriptor's paths; lines that are not JSON are ignored.
  * Not supported for custom CLIs (the options are ignored): host tool-permission prompts, lean concierge runs, writable extra dirs,
  * allowed-command lists and git-write denial. Harbor's worktrees and the post-turn git check remain the containment.
+ * MCP: with `run.mcp` the run's servers are written to a per-run JSON file (Claude Code's shape) passed as {mcpConfigFile}, removed
+ * when the run ends however it ends. A custom CLI cannot ask Harbor about tool calls, so it only gets servers allowed without asking.
  */
 export interface GenericAdapterOptions {
   /** Base environment (default process.env); only the allowlist reaches the CLI. */
@@ -31,7 +34,7 @@ export interface GenericAdapterOptions {
 /** Most text kept for the final answer of a text-mode run. */
 const MAX_ANSWER = 4 * 1024 * 1024;
 
-export function genericArgs(d: CustomCliDescriptor, o: RunOptions, promptFile?: string): string[] {
+export function genericArgs(d: CustomCliDescriptor, o: RunOptions, promptFile?: string, mcpConfigFile?: string): string[] {
   const vars = { model: o.model === 'default' ? '' : o.model, effort: o.nativeEffort ?? o.effort, cwd: o.cwd, promptFile };
   const slots: SlotValues = {
     resumeArgs: o.resumeId && d.run.resume ? expandArgs(d.run.resume.args, { ...vars, sessionId: o.resumeId }) : [],
@@ -39,7 +42,8 @@ export function genericArgs(d: CustomCliDescriptor, o: RunOptions, promptFile?: 
     permissionArgs: d.run.permissions?.[o.permission] ?? [],
     imageArgs: d.run.image ? (o.images ?? []).flatMap((p) => d.run.image!.args.map((a) => a.split('{path}').join(p))) : [],
     // Folders of enabled skills outside the working folder (skills/delivery.ts); without run.readDir small skills are inlined instead.
-    readDirArgs: d.run.readDir ? (o.readableDirs ?? []).flatMap((p) => d.run.readDir!.args.map((a) => a.split('{path}').join(p))) : []
+    readDirArgs: d.run.readDir ? (o.readableDirs ?? []).flatMap((p) => d.run.readDir!.args.map((a) => a.split('{path}').join(p))) : [],
+    mcpArgs: d.run.mcp && mcpConfigFile ? d.run.mcp.args.map((a) => a.split('{mcpConfigFile}').join(mcpConfigFile)) : []
   };
   return expandArgs(d.run.args, vars, slots);
 }
@@ -75,12 +79,14 @@ export class GenericAdapter implements CliAdapter {
     // No system-prompt flag is assumed: role instructions are prepended on a session's first run (as for Codex).
     const full = o.systemPrompt && !o.resumeId ? `${o.systemPrompt}\n\n---\n\n${prompt}` : prompt;
     let promptFile: string | undefined, ended = false;
+    let mcpFile: { file: string; cleanup: () => void } | undefined;
     try {
       if (d.run.prompt === 'file') {
         promptFile = join(this.opts.tmpDir ?? tmpdir(), `harbor-prompt-${randomUUID()}.txt`);
         writeFileSync(promptFile, full, { mode: 0o600 });
       }
-      for await (const c of this.stream(full, o, promptFile)) {
+      if (d.run.mcp && o.mcp?.servers.length) mcpFile = writeMcpConfig(o.mcp.servers, this.opts.tmpDir ?? tmpdir());
+      for await (const c of this.stream(full, o, promptFile, mcpFile?.file)) {
         if (ended) continue; // exactly one terminal chunk
         if (c.kind === 'done') ended = true;
         yield c;
@@ -88,13 +94,14 @@ export class GenericAdapter implements CliAdapter {
     } catch (e) {
       if (!ended) yield { kind: 'done', ok: false, error: `Harbor could not run ${d.name}: ${String((e as Error).message ?? e)}`, exitCode: null };
     } finally {
+      mcpFile?.cleanup();
       if (promptFile) try { rmSync(promptFile, { force: true }); } catch { /* best effort */ }
     }
   }
 
-  private async *stream(full: string, o: RunOptions, promptFile: string | undefined): AsyncGenerator<Chunk> {
+  private async *stream(full: string, o: RunOptions, promptFile: string | undefined, mcpFile: string | undefined): AsyncGenerator<Chunk> {
     const d = this.d, jsonl = d.run.output?.format === 'jsonl';
-    const gen = streamLines(d.exe, genericArgs(d, o, promptFile), {
+    const gen = streamLines(d.exe, genericArgs(d, o, promptFile, mcpFile), {
       cwd: o.cwd, input: d.run.prompt === 'file' ? '' : full, signal: o.signal, env: customEnv(this.opts.env ?? process.env, d.run.env)
     });
     const answer = new CappedText(MAX_ANSWER);

@@ -2,6 +2,7 @@ import type { Chunk, CliAdapter, RunOptions } from './types';
 import { RATE_LIMIT_RE } from './types';
 import { streamLines } from './stream';
 import { isEmittableEffort } from '../clis/effort';
+import { codexMcpArgs } from '../mcp/materialize';
 
 /**
  * Codex headless adapter (`codex exec --json`, JSONL events on stdout).
@@ -19,6 +20,9 @@ import { isEmittableEffort } from '../clis/effort';
  * on purpose: it turns on automatic task delegation, and helpers never spawn agents.
  * Mid-run token counts: `codex exec --json` was not seen to emit usage before `turn.completed`, so a stopped Codex run records
  * duration and model but no tokens (marked partial). Not verified against a long run.
+ * MCP (`mcp`): Harbor's servers are added as `-c mcp_servers.<name>...` overrides (mcp/materialize.ts has what was verified). Codex
+ * cannot ask Harbor about a tool call, so planMcpRun gives it only servers the user allowed without asking. Servers in the user's
+ * own ~/.codex/config.toml still load: Codex has no flag like Claude's --strict-mcp-config (none found in `codex exec --help`).
  */
 export function codexArgs(o: RunOptions): string[] {
   const a = ['exec'];
@@ -32,6 +36,7 @@ export function codexArgs(o: RunOptions): string[] {
   if (roots.length && o.permission === 'edit') a.push('-c', `sandbox_workspace_write.writable_roots=[${roots.map((d) => `'${d}'`).join(',')}]`);
   if (o.model && o.model !== 'default') a.push('-m', o.model);
   a.push('-c', `model_reasoning_effort=${isEmittableEffort(o.nativeEffort) ? o.nativeEffort : o.effort}`);
+  if (o.mcp?.servers.length) a.push(...codexMcpArgs(o.mcp.servers));
   a.push('-');
   return a;
 }
