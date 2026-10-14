@@ -83,6 +83,16 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       if (!cli?.installed) throw new Error('Install this CLI before signing in.');
       await pause(); cli.signedIn = true; emit({ type: 'cli', cli });
     },
+    // Demo: nothing is run. A path ending in .exe/.cmd/.bat counts as an existing executable.
+    async testCliPath(cliId, path) {
+      const cli = data.clis.find(c => c.id === cliId);
+      if (!cli) throw new Error(`Unknown CLI ${cliId}.`);
+      if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(path.trim())) throw new Error(`The path for ${cliId} must be an absolute path.`);
+      if (!/\.(exe|cmd|bat)$/i.test(path.trim())) throw new Error(`${path.trim()} is not an existing file. Choose the CLI's executable (.exe, .cmd or .bat).`);
+      await pause();
+      return copy({ ...cli, installed: true, version: cli.version ?? '1.0.0', note: 'Demo only: nothing was run.' });
+    },
+    async browseCliPath() { await pause(); return 'C:\\Tools\\demo-cli.exe'; },
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;

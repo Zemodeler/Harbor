@@ -368,6 +368,8 @@ export function useHarbor() {
     finally { answeringQuestions.current.delete(requestId); setQuestionPending(p => without(p, requestId)); }
   }
   async function updateSettings(s: Partial<Settings>) { await run(async () => setSettings(await api.setSettings(s))); }
+  /** Like updateSettings, but a rejection reaches the caller (a field that shows its own error) instead of the page banner. */
+  async function saveSettings(s: Partial<Settings>) { setSettings(await api.setSettings(s)); }
   async function updateConversation(c: Conversation, patch: { title?: string; pinned?: boolean; archived?: boolean }, area?: string) {
     return run(async () => {
       const updated = await api.updateConversation(c.id, patch);
@@ -388,7 +390,7 @@ export function useHarbor() {
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),
     sending, run, reload, selectProject, selectConversation, clearProject, retryMessages: () => conversation ? selectConversation(conversation) : Promise.resolve(),
-    newConversation, deleteConversation, openAgent, addProject, removeProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings,
+    newConversation, deleteConversation, openAgent, addProject, removeProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

@@ -4,7 +4,7 @@ import type { HarborApi } from './api';
 export type InvokeMethod = Exclude<keyof HarborApi, 'onEvent'>;
 
 export const INVOKE_METHODS: InvokeMethod[] = [
-  'listClis', 'refreshClis', 'openLogin',
+  'listClis', 'refreshClis', 'openLogin', 'testCliPath', 'browseCliPath',
   'listProjects', 'addProject', 'removeProject', 'setProjectImage',
   'listConversations', 'newConversation', 'deleteConversation',
   'updateConversation', 'searchConversations', 'stopConversation', 'getReview', 'openProjectFolder', 'openWorkspace',

@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFil
 import { dirname, join } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
+import { cliPathProblem } from './clis/discovery';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
@@ -516,6 +517,11 @@ export class Store {
       for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
       next.projectOverrides = merged;
     }
+    if ('cliPaths' in p) {
+      const merged: Record<CliId, string> = { ...(cur.cliPaths ?? {}) };
+      for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
+      if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
+    }
     for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
       if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
     }
@@ -622,6 +628,20 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
     throw new Error('keepRunningInBackground must be a boolean.');
   }
   if ('editor' in patch && patch.editor !== undefined && !isEditorId(patch.editor)) throw new Error('editor must be one of code, code-insiders, cursor, windsurf.');
+  if ('cliPaths' in patch) {
+    const cp: unknown = patch.cliPaths;
+    if (cp !== undefined && !isObj(cp)) throw new Error('cliPaths must map a CLI id to an executable path.');
+    // '' marks a removal for setSettings, which merges per CLI like cliOverrides.
+    const map: Record<CliId, string> = {};
+    for (const [cli, v] of Object.entries(cp ?? {})) {
+      const p = typeof v === 'string' ? v.trim() : v;
+      if (p === undefined || p === '') { map[cli] = ''; continue; }
+      const problem = cliPathProblem(p);
+      if (problem) throw new Error(`cliPaths.${cli} ${problem}.`);
+      map[cli] = p as string;
+    }
+    out.cliPaths = map;
+  }
   if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
   if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {

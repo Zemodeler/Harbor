@@ -29,7 +29,8 @@ const rejected: Array<[string, unknown[]]> = [
   ['answerQuestion', ['', 'yes']], ['answerQuestion', ['r1', { a: 1 }]], ['answerQuestion', ['r1', 'x'.repeat(20_001)]],
   ['setAgentPriority', ['a1', '5']], ['setAgentPriority', ['a1', 1.5]], ['setAgentPriority', ['a1', Number.NaN]], ['setAgentPriority', [{}, 1]],
   ['integrateBranches', ['p1', []]], ['integrateBranches', ['p1', 'a1']], ['integrateBranches', ['p1', ['a1', 3]]], ['integrateBranches', ['p1', ['a1'], 5]], ['integrateBranches', ['p1', ['a1'], 'x\ny']],
-  ['addProject', [42]], ['addProject', ['']], ['addProject', ['a\0b']], ['addProject', ['x'.repeat(1025)]]
+  ['addProject', [42]], ['addProject', ['']], ['addProject', ['a\0b']], ['addProject', ['x'.repeat(1025)]],
+  ['testCliPath', ['', 'C:\\tools\\x.exe']], ['testCliPath', ['claude', 5]], ['testCliPath', ['claude', ' ']], ['testCliPath', ['claude', 'C:\\a\nb.exe']], ['testCliPath', ['claude', 'x'.repeat(1025)]]
 ];
 
 describe('registerIpc argument validation', () => {
