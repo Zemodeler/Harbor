@@ -19,6 +19,10 @@ import { newId, normPath, Store } from './store';
 import { GenericAdapter } from './adapters/generic';
 import { CLI_TEMPLATES, CUSTOM_CLIS_FILE, MAX_CUSTOM_CLIS, catalogEntriesOf, definitionOf, fileStamp, hashFile, hasReadOnlyMode, loadCustomClis, saveCustomClis, validateDescriptor } from './clis/custom';
 import { dryRunCli } from './clis/dryRun';
+import { skillsSection } from './prompts';
+import { SkillManager, type SkillHomes } from './skills/library';
+import type { SkillAccess } from './skills/delivery';
+import type { FetchLike } from './skills/github';
 import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
@@ -99,6 +103,12 @@ export interface ServiceOptions {
   codexModels?: () => CodexModel[] | undefined;
   /** Shown by exportDiagnostics (index.ts passes app.getVersion(); this module never imports electron). */
   appVersion?: string;
+  /** The CLIs' own folders whose skills are listed read-only (index.ts passes ~/.claude and CODEX_HOME). Absent = none (tests). */
+  skillHomes?: SkillHomes;
+  /** Network access for GitHub skill imports (index.ts passes fetch). Absent = GitHub import unavailable; tests inject a fake. */
+  fetch?: FetchLike;
+  /** Folder or .zip picker for browseSkillSource(); injected so this module never imports electron. */
+  pickSkillSource?: (kind: 'folder' | 'zip') => Promise<string | undefined>;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -295,6 +305,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
   // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
   const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
+
+  // ---- skills (plan section 3): the library lives in the data folder; without one (tests) nothing can be imported.
+  const skills = new SkillManager({ libraryDir: opts.dataDir ? join(opts.dataDir, 'skills') : undefined, homes: opts.skillHomes, state: store, fetch: opts.fetch, now: opts.now });
+  /** How a run on this CLI can reach a skill folder outside its working folder (skills/delivery.ts). */
+  const skillAccess = (cli: CliId): SkillAccess => (cli === 'claude' ? 'readDirs' : cli === 'codex' ? 'readable' : customOf(cli)?.run.readDir ? 'readDirs' : 'inline');
+  const nativeSkills = (cli: CliId): boolean => (clis.find((c) => c.id === cli)?.features ?? CLI_DEFINITIONS.find((d) => d.id === cli)?.features)?.nativeSkills === true;
+  const projectRef = (id: Id | undefined) => { if (id === undefined || id === null) return undefined; const p = needProject(id); return { id: p.id, path: p.path }; };
   const orchestrator = new Orchestrator({
     store, bus, ledger, git, worktreesRoot, ask, freeReset, journal,
     getClis: () => clis,
@@ -303,6 +320,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     verified: (c) => VERIFIED.has(c),
     // Plan 2.4: a custom CLI with no read-only mode gets no read-only work unless the user accepted that risk for it.
     readOnlySafe: (c) => { const d = customOf(c); return !d || hasReadOnlyMode(d) || d.acceptReadOnlyRisk === true; },
+    skillsFor: (projectId, cli, cwd) => {
+      const p = store.getProject(projectId);
+      const r = p && skills.forRun({ id: p.id, path: p.path }, cli, cwd, skillAccess(cli), nativeSkills(cli));
+      return r ? { system: skillsSection(r.delivery), readableDirs: r.delivery.readDirs } : undefined;
+    },
     catalog,
     neutralDir: opts.dataDir ? join(opts.dataDir, 'neutral') : undefined,
     now: opts.now,
@@ -429,6 +451,23 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       syncCustomCatalog();
       await refresh();
       return structuredClone(customs);
+    },
+
+    // Skills: listing and reading only read files; nothing in a skill is ever run.
+    async listSkills(projectId) { return skills.list(projectRef(projectId)); },
+    async readSkill(skillId, projectId) { return skills.read(skillId, projectRef(projectId)); },
+    async setSkillEnabled(skillId, enabled, projectId) { return skills.setEnabled(skillId, enabled, projectRef(projectId)); },
+    async previewSkillImport(source, o) {
+      const confirm = o && typeof o === 'object' ? o.confirmDownload : undefined;
+      if (confirm !== undefined && typeof confirm !== 'string') throw new Error('confirmDownload must be the token of a GitHub listing.');
+      return skills.preview(source, confirm !== undefined ? { confirmDownload: confirm } : {});
+    },
+    async importSkills(token, o) { return skills.importStaged(token, o?.names); },
+    async removeSkill(skillId) { return skills.remove(skillId); },
+    async browseSkillSource(kind) {
+      if (kind !== 'folder' && kind !== 'zip') throw new Error('Choose a folder or a .zip file.');
+      if (!opts.pickSkillSource) throw new Error('Choosing a file is available in the desktop app.');
+      return (await opts.pickSkillSource(kind)) ?? null;
     },
 
     async listProjects() { return store.listProjects(); },

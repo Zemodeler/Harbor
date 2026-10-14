@@ -17,6 +17,7 @@ export interface CustomCliDescriptor {   // a user-described CLI (Settings > Con
   effort?: Partial<Record<'low' | 'medium' | 'high', string[]>>;
   permissions?: Partial<Record<'read-only' | 'edit' | 'full', string[]>>;   // no read-only entry = no read-only work unless acceptReadOnlyRisk
   image?: { args: string[] };   // per image, {path} = the image file; absent = not vision-capable
+  readDir?: { args: string[] };   // per extra folder the run may read (enabled skills outside its working folder), {path} = the folder; slot {readDirArgs}; absent = small skills are inlined in the prompt instead (CHANGELOG 0.1.32)
  };
  models?: Array<{ id: string; tier?: 'cheap' | 'standard' | 'strong'; strengths?: string[] }>;   // catalog entries (capabilities.json entries for the same cli/model win); default one 'default' model with no strengths
  acceptReadOnlyRisk?: boolean;   // the user accepted that this CLI may write during read-only roles (planners, reviewers, plan mode)
@@ -25,6 +26,27 @@ export interface CustomCliDescriptor {   // a user-described CLI (Settings > Con
 export interface CliTemplate { id: string; name: string; description: string; verified?: string; descriptor: Omit<CustomCliDescriptor, 'exe'> & { exe?: string } }   // verified = which CLI version the flags were checked against with --help
 export interface CliDryRunStep { name: 'version' | 'status' | 'prompt'; command: string; exitCode: number | null; stdout: string; stderr: string; error?: string; durationMs: number }   // stdout/stderr clipped for display
 export interface CliDryRun { ok: boolean; problems?: string[]; version?: string; authState?: 'signedIn' | 'signedOut' | 'unknown'; steps: CliDryRunStep[]; parsed?: { text?: string; sessionId?: string; inputTokens?: number; outputTokens?: number; chunks: number; ok?: boolean; error?: string } }   // problems = descriptor errors (nothing was run when present); parsed = what Harbor understood from the prompt run
+export type SkillSource = 'library' | 'project' | 'claude' | 'codex';   // library = %APPDATA%\Harbor\skills; project = <project>\.harbor\skills; claude/codex = found in that CLI's own skills folder (read-only)
+export interface Skill {   // a folder with a SKILL.md (frontmatter name + description, body = instructions) and optional resources (CHANGELOG 0.1.32)
+ id: string; name: string; description: string; source: SkillSource;   // id = "<source>:<folder>" (stable; claude/codex ids also say user/ or project/)
+ path: string; readOnly: boolean;   // path = absolute folder; readOnly = Harbor never changes it (everything but the library)
+ enabled: boolean; defaultEnabled: boolean;   // enabled = used for the project asked about (or the global default without one); defaultEnabled = the global default
+ files: number; bytes: number; hasScripts: boolean;   // hasScripts = contains scripts or programs; Harbor never runs them, agents only through their normal tool permissions
+ hash?: string; importedFrom?: string; importedAt?: number;   // library: sha256 of the files recorded at import, and where they came from
+ problems?: string[];   // why it cannot be used (e.g. no description); such a skill is never given to an agent
+}
+export interface SkillFile { path: string; bytes: number; script?: boolean }   // path relative to the skill folder, forward slashes
+export interface SkillDetail extends Skill { text: string; truncated?: boolean; fileList: SkillFile[]; currentHash?: string; modified?: boolean }   // text = SKILL.md as written; modified = library files no longer match the hash recorded at import
+export type SkillImportSource = { kind: 'folder'; path: string } | { kind: 'zip'; path: string } | { kind: 'github'; ref: string };   // github: https://github.com/owner/repo[/tree/<ref>/<path>] or owner/repo[/path]
+export interface SkillImportCandidate { name: string; description: string; dir: string; targetName: string; files: SkillFile[]; bytes: number; hasScripts: boolean; text?: string; hash?: string; problems?: string[] }   // dir = folder inside the source ('' = its root); targetName = library folder it would get (suffixed when the name is taken); text = SKILL.md
+export interface SkillImportPreview {
+ token?: string;   // pass to importSkills (or, for a GitHub listing, back as confirmDownload); absent when nothing can be imported
+ source: string;   // exactly what is read: a folder or .zip path, or github.com/owner/repo@<commit>/<path>
+ needsDownload?: boolean;   // GitHub listing: only names and sizes are known; nothing was downloaded yet
+ fileCount: number; totalBytes: number;
+ skills: SkillImportCandidate[];
+ problems?: string[]; warnings?: string[];   // problems = refused (traversal, symlink, too large, ...); warnings = e.g. "contains scripts"
+}
 export interface Project { id: Id; name: string; path: string; lastOpened: number; image?: string }   // image = small data: URL chosen by the user
 export interface Conversation { id: Id; projectId: Id; title: string; updated: number; agentId: Id; pinned?: boolean; archived?: boolean; customTitle?: boolean; activity?: SessionActivity; reviewBase?: string; mode?: ConversationMode; goal?: string; deadline?: number }   // agentId = main agent, or a subagent for direct chats; deadline = epoch ms the owner needs this conversation's work by (setConversationDeadline; CHANGELOG 0.1.27)
 export type EditorId = 'code' | 'code-insiders' | 'cursor' | 'windsurf';   // editors Harbor can open a folder or file in (CHANGELOG 0.1.25)
@@ -78,6 +100,13 @@ export interface HarborApi {
  dryRunCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string }): Promise<CliDryRun>;   // validates, then runs version, status and one "reply OK" prompt in a temp folder; confirmExe must repeat descriptor.exe (the user's explicit OK to run that file). Saves nothing
  saveCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string; replace?: boolean }): Promise<CustomCliDescriptor[]>;   // replace = update the custom CLI with the same id (otherwise a used id is refused); validates, records the executable's hash (approval), stores and re-runs discovery; also re-approves a changed file. Rejects invalid descriptors with every problem listed
  removeCustomCli?(id: CliId): Promise<CustomCliDescriptor[]>;   // returns the remaining custom CLIs
+ listSkills?(projectId?: Id): Promise<Skill[]>;   // library and user-level skills; with a project also its .harbor\skills and .claude\skills. enabled is for that project (CHANGELOG 0.1.32)
+ readSkill?(skillId: string, projectId?: Id): Promise<SkillDetail>;   // SKILL.md text and the file list; never runs anything
+ setSkillEnabled?(skillId: string, enabled: boolean | null, projectId?: Id): Promise<Skill[]>;   // with projectId: that project's choice; without: the global default; null = back to the default
+ previewSkillImport?(source: SkillImportSource, opts?: { confirmDownload?: string }): Promise<SkillImportPreview>;   // folder/zip: reads and checks, writes nothing. github: first call lists files and sizes only (network, no file content); confirmDownload = that listing's token downloads exactly those files
+ importSkills?(token: string, opts?: { names?: string[] }): Promise<Skill[]>;   // copies a checked preview into the library (names = which candidates; default all usable); returns the new library skills
+ removeSkill?(skillId: string): Promise<Skill[]>;   // library skills only; returns the remaining library and user-level skills
+ browseSkillSource?(kind: 'folder' | 'zip'): Promise<string | null>;   // folder or .zip picker; null when cancelled
  listProjects(): Promise<Project[]>; addProject(path?: string): Promise<Project|null>; removeProject(id: Id): Promise<void>; setProjectImage(id: Id, image: string | null): Promise<Project>;
  listConversations(projectId: Id): Promise<Conversation[]>; newConversation(projectId: Id): Promise<Conversation>; deleteConversation(id: Id): Promise<void>;
  updateConversation(id: Id, patch: { title?: string; pinned?: boolean; archived?: boolean }): Promise<Conversation>;

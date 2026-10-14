@@ -68,7 +68,8 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
     },
     loginArgs: ['auth', 'login'],
     models: ['sonnet', 'opus', 'haiku'],
-    // Images are passed but a real vision run is unverified (docs/limitations.md); MCP and skills are the CLI's own, Harbor adds none yet.
+    // Images are passed but a real vision run is unverified (docs/limitations.md); MCP is the CLI's own. Native skills: ~/.claude/skills
+    // and <cwd>/.claude/skills, which Harbor then does not list again (skills/library.ts).
     features: { images: true, resume: true, structuredOutput: true, permissionModes: true, readOnly: true, mcp: true, nativeSkills: true, usageReadings: true }
   },
   {
@@ -85,8 +86,10 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
     loginArgs: ['login'],
     // Codex picks its own default model; Harbor passes --model only when a name other than 'default' is chosen.
     models: ['default'],
-    // --image is unverified (adapters/codex.ts); a native skills folder is unverified, so it is not claimed. Limits come from its logs.
-    features: { images: true, resume: true, structuredOutput: true, permissionModes: true, readOnly: true, mcp: true, nativeSkills: false, usageReadings: true }
+    // --image is unverified (adapters/codex.ts). Native skills: $CODEX_HOME/skills (default ~/.codex/skills), seen in codex-cli
+    // 0.162.0-alpha.17.2's own strings and as a real folder of SKILL.md skills (skills/library.ts); Harbor then does not list those
+    // skills to Codex again. Not verified by a model run. Limits come from its logs.
+    features: { images: true, resume: true, structuredOutput: true, permissionModes: true, readOnly: true, mcp: true, nativeSkills: true, usageReadings: true }
   },
   {
     id: 'gemini', name: 'Gemini CLI', exeNames: ['gemini'], envVar: 'HARBOR_GEMINI_PATH',

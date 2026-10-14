@@ -33,7 +33,10 @@ const rejected: Array<[string, unknown[]]> = [
   ['testCliPath', ['', 'C:\\tools\\x.exe']], ['testCliPath', ['claude', 5]], ['testCliPath', ['claude', ' ']], ['testCliPath', ['claude', 'C:\\a\nb.exe']], ['testCliPath', ['claude', 'x'.repeat(1025)]],
   ['saveCustomCli', [{ id: 'x' }]], ['saveCustomCli', [{ id: 'x' }, {}]], ['saveCustomCli', ['x', { confirmExe: 'C:\\x.exe' }]], ['saveCustomCli', [{ id: 'x' }, { confirmExe: 'C:\\x.exe', replace: 'yes' }]],
   ['saveCustomCli', [{ big: 'x'.repeat(64_001) }, { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [[], { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [{ id: 'x' }, { confirmExe: 'a\nb' }]],
-  ['removeCustomCli', ['']], ['removeCustomCli', [7]]
+  ['removeCustomCli', ['']], ['removeCustomCli', [7]],
+  ['listSkills', [5]], ['readSkill', ['']], ['readSkill', ['library:x', 7]], ['setSkillEnabled', ['library:x', 'yes']], ['setSkillEnabled', ['library:x', true, {}]], ['removeSkill', [['library:x']]],
+  ['previewSkillImport', [null]], ['previewSkillImport', [{ kind: 'ftp', path: 'x' }]], ['previewSkillImport', [{ kind: 'folder', path: 'a\0b' }]], ['previewSkillImport', [{ kind: 'github', ref: '' }]],
+  ['previewSkillImport', [{ kind: 'github', ref: 'o/r' }, { confirmDownload: 5 }]], ['importSkills', ['']], ['importSkills', ['t', { names: 'x' }]], ['browseSkillSource', ['exe']]
 ];
 
 describe('registerIpc argument validation', () => {
@@ -51,6 +54,11 @@ describe('registerIpc argument validation', () => {
     await expect(s.invoke('setAgentPriority', 'a1', -3)).resolves.toBeTruthy();
     await expect(s.invoke('integrateBranches', 'p1', ['a1', 'a2'], 'main')).resolves.toBeTruthy();
     await expect(s.invoke('answerQuestion', 'r1', 'yes')).resolves.toBeTruthy();
+    await expect(s.invoke('listSkills')).resolves.toBeTruthy();
+    await expect(s.invoke('setSkillEnabled', 'claude:user/pdf', null, 'p1')).resolves.toBeTruthy();
+    await expect(s.invoke('previewSkillImport', { kind: 'github', ref: 'owner/repo/skills/x' }, { confirmDownload: 'tok' })).resolves.toBeTruthy();
+    await expect(s.invoke('importSkills', 'tok', { names: ['pdf'] })).resolves.toBeTruthy();
+    await expect(s.invoke('browseSkillSource', 'zip')).resolves.toBeTruthy();
   });
 
   it('still checks the sender first', () => {

@@ -21,6 +21,12 @@ export interface RunOptions {
    * without which `git add/commit` fails inside a sandboxed worktree). Codex: sandbox_workspace_write.writable_roots; Claude: --add-dir.
    */
   writableDirs?: string[];
+  /**
+   * Extra directories the run must be able to READ (enabled skills outside its working folder, skills/delivery.ts). Claude: --add-dir
+   * (which also lets acceptEdits runs edit there: Harbor shows a library skill as modified when its files stop matching the hash
+   * recorded at import). Custom CLIs: run.readDir. Codex: ignored, its sandboxes restrict writes and not reads (NOT verified on Windows).
+   */
+  readableDirs?: string[];
   /** Extra Bash command prefixes a Claude edit run may run unasked (the project's own test commands, e.g. `pnpm test`). */
   allowedCommands?: string[];
   /**

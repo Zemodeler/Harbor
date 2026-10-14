@@ -265,6 +265,7 @@ export class Store {
     this.state.locks = this.state.locks.filter((l) => l.projectId !== id);
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
     if (this.state.checksApproved?.[id]) { const { [id]: _gone, ...rest } = this.state.checksApproved; this.state.checksApproved = rest; }
+    if (this.state.skills?.projects?.[id]) { const { [id]: _gone, ...rest } = this.state.skills.projects; this.state.skills = { ...this.state.skills, projects: rest }; }
     this.dirty();
   }
 
@@ -484,6 +485,36 @@ export class Store {
   setChecksApproval(projectId: Id, hash: string): void {
     this.state.checksApproved = { ...(this.state.checksApproved ?? {}), [projectId]: hash };
     this.flush(); // an approval must survive a crash right after it
+  }
+
+  // ---- skills: enable/disable choices and library import records (skills/library.ts)
+  skillPrefs(): { global: Record<string, boolean>; projects: Record<Id, Record<string, boolean>> } {
+    const s = this.state.skills;
+    return { global: { ...(s?.global ?? {}) }, projects: Object.fromEntries(Object.entries(s?.projects ?? {}).map(([k, v]) => [k, { ...v }])) };
+  }
+  /** `enabled` null removes the choice (back to the default); without a project it is the global default. */
+  setSkillPref(skillId: string, enabled: boolean | null, projectId?: Id): void {
+    const s = { ...(this.state.skills ?? {}) };
+    if (projectId === undefined) {
+      const g = { ...(s.global ?? {}) };
+      if (enabled === null) delete g[skillId]; else g[skillId] = enabled;
+      s.global = g;
+    } else {
+      const projects = { ...(s.projects ?? {}) };
+      const p = { ...(projects[projectId] ?? {}) };
+      if (enabled === null) delete p[skillId]; else p[skillId] = enabled;
+      if (Object.keys(p).length) projects[projectId] = p; else delete projects[projectId];
+      s.projects = projects;
+    }
+    this.state.skills = s;
+    this.dirty();
+  }
+  skillImports(): Record<string, { source: string; hash: string; importedAt: number }> { return { ...(this.state.skills?.imports ?? {}) }; }
+  setSkillImport(folder: string, rec: { source: string; hash: string; importedAt: number } | null): void {
+    const imports = { ...(this.state.skills?.imports ?? {}) };
+    if (rec) imports[folder] = rec; else delete imports[folder];
+    this.state.skills = { ...(this.state.skills ?? {}), imports };
+    this.flush(); // the recorded hash must survive a crash right after the import
   }
 
   // ---- "always allow for this project" tool rules

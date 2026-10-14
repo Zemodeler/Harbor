@@ -37,7 +37,9 @@ export function genericArgs(d: CustomCliDescriptor, o: RunOptions, promptFile?: 
     resumeArgs: o.resumeId && d.run.resume ? expandArgs(d.run.resume.args, { ...vars, sessionId: o.resumeId }) : [],
     effortArgs: d.run.effort?.[o.effort] ?? [],
     permissionArgs: d.run.permissions?.[o.permission] ?? [],
-    imageArgs: d.run.image ? (o.images ?? []).flatMap((p) => d.run.image!.args.map((a) => a.split('{path}').join(p))) : []
+    imageArgs: d.run.image ? (o.images ?? []).flatMap((p) => d.run.image!.args.map((a) => a.split('{path}').join(p))) : [],
+    // Folders of enabled skills outside the working folder (skills/delivery.ts); without run.readDir small skills are inlined instead.
+    readDirArgs: d.run.readDir ? (o.readableDirs ?? []).flatMap((p) => d.run.readDir!.args.map((a) => a.split('{path}').join(p))) : []
   };
   return expandArgs(d.run.args, vars, slots);
 }
