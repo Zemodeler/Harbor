@@ -14,6 +14,8 @@
     "test": "vitest run",
     "smoke": "tsx scripts/smoke.ts",
     "eval": "tsx scripts/eval/index.ts",
+    "headless": "tsx src/main/headlessMain.ts",
+    "harbor": "tsx scripts/harbor.ts",
     "dist": "node build/dist.mjs",
     "dist:watch": "node scripts/dist-watch.mjs",
     "dev:renderer": "npm --prefix src/renderer run dev:renderer",
