@@ -34,4 +34,11 @@
 .fxField select { max-width: 280px; }
 .fxTable { display: grid; grid-template-columns: max-content 1fr 1fr; gap: 6px 10px; align-items: center; font-size: 13px; }
 .fxDiag { width: 100%; min-height: 220px; font-family: Consolas, 'Cascadia Mono', monospace; font-size: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--bg); color: var(--ink); resize: vertical; }
+.fxPre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.fxLink { border: 0; background: none; padding: 0; min-height: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
+.fxRouting { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.fxRouting p { margin: 0; }
+.fxRouting h4 { font-size: 12px; margin: 4px 0 2px; }
+.fxRouting ol { padding: 0; }
+.fxRouting ol > li { display: grid; gap: 2px; padding: 4px 0; border-top: 1px solid var(--line); }
 @media (max-width: 760px) { .fxRow button, .fxRow input, .fxRow select { min-height: 40px; } .fxTable { grid-template-columns: 1fr; } }

@@ -14,6 +14,9 @@ import { instanceStartupAction, shouldHideOnClose, trayMenuModel, trayTooltip } 
 import { appDocument, hardenContents } from './windowSecurity';
 import { autoUpdater } from 'electron-updater';
 import { createUpdater } from './updater';
+import { acquireInstanceLock } from './instanceLock';
+import { resolveRemoteConfig } from './remote/guard';
+import { startRemoteServer, type RemoteServer } from './remote/server';
 
 let win: BrowserWindow | undefined;
 let quitting = false;
@@ -115,6 +118,9 @@ if (startupAction === 'start') app.on('second-instance', () => {
 });
 if (startupAction === 'start') app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('com.harbor.desktop');
+  // The headless service (npm run headless) may own this data folder; two Harbors would both write state.json.
+  const instance = acquireInstanceLock(dataDir, 'desktop');
+  if (!instance.ok) { dialog.showErrorBox('Harbor is already running', instance.refusal); app.exit(1); return; }
   const service = createHarborService({
     dataDir,
     appVersion: app.getVersion(),
@@ -184,6 +190,14 @@ if (startupAction === 'start') app.whenReady().then(() => {
       return new Response(await readFile(file.path), { headers: { 'content-type': file.mime, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
     } catch { return new Response(null, { status: 404 }); }
   });
+  // The remote API is off unless Settings.remote.enabled; its config is read once, at startup.
+  let remote: RemoteServer | undefined;
+  if (service.store.getSettings().remote?.enabled === true) {
+    try {
+      void startRemoteServer({ service, tokens: service.remoteTokens, config: resolveRemoteConfig(service.store.getSettings().remote), log: (m) => logger.info(m) })
+        .then((s) => { remote = s; }, (error) => logger.error('Remote API did not start', error));
+    } catch (error) { logger.error('Remote API did not start', error); }
+  }
   let tray: Tray | undefined;
   const openWindow = (): void => {
     if (!win) createWindow(hideOnClose);
@@ -264,7 +278,7 @@ if (startupAction === 'start') app.whenReady().then(() => {
     event.preventDefault();
     tray?.destroy();
     tray = undefined;
-    void service.shutdown().catch((error) => logger.error('Shutdown failed', error)).finally(() => { shutdownDone = true; app.quit(); });
+    void Promise.all([service.shutdown(), remote?.close()]).catch((error) => logger.error('Shutdown failed', error)).finally(() => { instance.release(); shutdownDone = true; app.quit(); });
   });
   // Timers can stall while the machine sleeps: permission requests are re-checked against their wall-clock deadlines on wake.
   powerMonitor.on('resume', () => service.onResume());

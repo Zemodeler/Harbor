@@ -209,6 +209,50 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!o || typeof o !== 'object' || Array.isArray(o) || !isId(o.cli)) bad('options must name a CLI');
       break;
     }
+    case 'createRemoteToken':
+      if (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > 80 || /[\x00-\x1f]/.test(args[0])) bad('name must be 1 to 80 characters');
+      if (args[1] !== 'read-only' && args[1] !== 'answer-permissions' && args[1] !== 'full') bad('scope must be read-only, answer-permissions or full');
+      break;
+    case 'revokeRemoteToken':
+      if (!isId(args[0])) bad('token id must be a short non-empty string');
+      break;
+    case 'answerPermission':
+      if (!isId(args[0])) bad('request id must be a short non-empty string');
+      if (typeof args[1] !== 'boolean') bad('allow must be true or false');
+      if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'object' || Array.isArray(args[2]))) bad('options must be an object');
+      break;
+    case 'getSpendStatus':
+      if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
+      if (args[1] !== undefined && args[1] !== null && !isId(args[1])) bad('conversation id must be a short non-empty string');
+      break;
+    case 'getTaskReport':
+      if (!isId(args[0])) bad('conversation id must be a short non-empty string');
+      break;
+    case 'rateResult':
+      if (!isId(args[0])) bad('target must be an agent or message id');
+      if (args[1] !== 'up' && args[1] !== 'down' && args[1] !== 'redo-stronger') bad('rating must be up, down or redo-stronger');
+      if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'string' || args[2].length > 1000)) bad('note must be text of at most 1000 characters');
+      break;
+    case 'listRatings':
+    case 'getRatingSummary':
+    case 'replayRouting': {
+      const o = args[0] as Record<string, unknown> | undefined | null;
+      if (o === undefined || o === null) break;
+      if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+      for (const k of ['projectId', 'conversationId']) if (o[k] !== undefined && !isId(o[k])) bad(`${k} must be a short non-empty string`);
+      if (o['by'] !== undefined && o['by'] !== 'cli' && o['by'] !== 'model' && o['by'] !== 'need') bad('by must be cli, model or need');
+      if (o['limit'] !== undefined && (typeof o['limit'] !== 'number' || !Number.isFinite(o['limit']))) bad('limit must be a number');
+      if (o['catalog'] !== undefined && (!Array.isArray(o['catalog']) || o['catalog'].length > 200)) bad('catalog must be a list of at most 200 entries');
+      if (o['settings'] !== undefined && (typeof o['settings'] !== 'object' || o['settings'] === null || Array.isArray(o['settings']))) bad('settings must be an object');
+      break;
+    }
+    case 'listProjectNotes':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'removeProjectNote':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (!isId(args[1])) bad('note id must be a short non-empty string');
+      break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

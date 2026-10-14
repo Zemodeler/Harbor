@@ -45,3 +45,26 @@ describe('Mock settings validate like Harbor', () => {
     expect(await api.exportDiagnostics!()).toContain('No message text');
   });
 });
+
+describe('Mock roadmap wave 1 methods', () => {
+  it('offers spend status, task report, ratings, replay, project notes and remote tokens like Harbor', async () => {
+    const api = createMockApi({ delay: 0 });
+    expect(await api.getSpendStatus!()).toEqual({ estimate: true, entries: [] });
+    await api.setSettings({ spendCeilings: { day: { kTokens: 500 } } });
+    expect((await api.getSpendStatus!()).entries.map(e => e.scope)).toEqual(['day']);
+    expect((await api.getTaskReport!('account')).notes[0]).toMatch(/Demo/);
+    const agent = (await api.listAgents('store'))[0];
+    await api.rateResult!(agent.id, 'down');
+    await api.rateResult!(agent.id, 'up', 'good');
+    expect((await api.listRatings!()).map(r => r.rating)).toEqual(['up']);
+    expect((await api.getRatingSummary!())[0]).toMatchObject({ up: 1, total: 1, approval: 1 });
+    expect((await api.replayRouting!()).summary.decisions).toBe(0);
+    const [note] = await api.listProjectNotes!('store');
+    expect(await api.removeProjectNote!('store', note.id)).toEqual([]);
+    await expect(api.createRemoteToken!('phone', 'full')).rejects.toThrow(/Full remote access is off/);
+    const { info } = await api.createRemoteToken!('phone', 'read-only');
+    expect((await api.listRemoteTokens!()).map(t => t.id)).toEqual([info.id]);
+    await api.revokeRemoteToken!(info.id);
+    expect(await api.listRemoteTokens!()).toEqual([]);
+  });
+});

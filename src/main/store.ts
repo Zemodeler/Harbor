@@ -1,18 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectSettings, RolePreference, Settings, ToolRule } from '../shared/api';
+import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectNote, ProjectSettings, ResultRating, RolePreference, Settings, SpendCeilings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
 import { cliPathProblem } from './clis/discovery';
+import { withRating } from './ratings';
+import { mergeNote, type NoteDraft } from './knowledge';
+import { normalizeRemoteSettings } from './remote/guard';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
 import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
+import { normalizeCeilings, pruneGrants, type SpendGrant, type SpendRun } from './spend';
 
 /**
  * State plus fields added after version 1; all optional so older files still load. `reportLedger` says the file records
  * report delivery (`AgentRecord.reportDelivery`); its absence means a file written before that existed.
  */
-type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive; calibration?: Calibration };
+type Persisted = State & { processes?: TrackedProcess[]; reportLedger?: 1; usageArchive?: UsageArchive; calibration?: Calibration; ratings?: ResultRating[] };
 
 /** Totals of usage events pruned from `usage`, so lifetime cost figures survive pruning. */
 export interface UsageTotals { runs: number; inputTokens: number; outputTokens: number; costUsd: number }
@@ -88,6 +92,18 @@ export class Store {
     this.state = this.load();
     this.indexMessages();
     this.pruneUsage();
+    this.carryOrphanSpend();
+  }
+
+  /** Runs in flight when the last Harbor ended without recording them (a crash) still spent what was last measured. */
+  private carryOrphanSpend(): void {
+    const left = Object.values(this.state.spendFlights ?? {});
+    const cutoff = this.now() - USAGE_KEEP_MS;
+    const carried = [...(this.state.spendCarried ?? []), ...left].filter((r) => r.time >= cutoff);
+    if (!left.length && carried.length === (this.state.spendCarried?.length ?? 0)) return;
+    this.state.spendFlights = undefined;
+    this.state.spendCarried = carried.length ? carried : undefined;
+    this.dirty();
   }
 
   /** Things worth telling the user once at startup (restored from backup, unreadable state, ...). */
@@ -267,6 +283,7 @@ export class Store {
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
     if (this.state.checksApproved?.[id]) { const { [id]: _gone, ...rest } = this.state.checksApproved; this.state.checksApproved = rest; }
     if (this.state.skills?.projects?.[id]) { const { [id]: _gone, ...rest } = this.state.skills.projects; this.state.skills = { ...this.state.skills, projects: rest }; }
+    if (this.state.notes?.[id]) { const { [id]: _gone, ...rest } = this.state.notes; this.state.notes = rest; }
     this.dirty();
   }
 
@@ -476,6 +493,10 @@ export class Store {
     return c && c.version === 1 && typeof c.throughTime === 'number' && c.pctPerKTok && c.tokensK && c.minutes ? c : undefined;
   }
   setCalibration(c: Calibration): void { this.state.calibration = c; this.dirty(); }
+
+  /** Quality ratings of results (ratings.ts), oldest first; local evidence only. */
+  listRatings(projectId?: Id): ResultRating[] { return (this.state.ratings ?? []).filter((r) => !projectId || r.projectId === projectId); }
+  addRating(r: ResultRating): ResultRating { this.state.ratings = withRating(this.state.ratings ?? [], r); this.dirty(); return r; }
   addResetApproval(r: State['resetApprovals'][number]): void { this.state.resetApprovals.push(r); this.dirty(); }
   listResetApprovals(): State['resetApprovals'] { return this.state.resetApprovals; }
 
@@ -504,6 +525,31 @@ export class Store {
   clearTrackedProcesses(): void { if (this.state.processes?.length) { this.state.processes = []; this.dirty(); } }
 
   // ---- approval of a project's checks file (by content hash)
+  // ---- spend ceilings (spend.ts) and secret-scan overrides (secretScan.ts)
+  listSpendGrants(): SpendGrant[] { return this.state.spendGrants ?? []; }
+  addSpendGrant(key: string): SpendGrant {
+    const g: SpendGrant = { id: newId(), key, time: this.now() };
+    this.state.spendGrants = [...pruneGrants(this.listSpendGrants(), this.now()), g];
+    this.flush(); // an explicit yes must survive a crash right after it
+    return g;
+  }
+  /** Spend of runs that ended without a usage event (a crash), still counted by the ceilings. */
+  listCarriedSpend(): SpendRun[] { return this.state.spendCarried ?? []; }
+  /** Latest live measurement of a run in flight (undefined removes it once its usage event is recorded). Not flushed on its own. */
+  setSpendFlight(key: string, run: SpendRun | undefined): void {
+    if (!run && !this.state.spendFlights?.[key]) return;
+    const next = { ...(this.state.spendFlights ?? {}) };
+    if (run) next[key] = run; else delete next[key];
+    this.state.spendFlights = Object.keys(next).length ? next : undefined;
+    this.dirty();
+  }
+  hasSecretOverride(projectId: Id, fingerprint: string): boolean { return !!this.state.secretOverrides?.[projectId]?.includes(fingerprint); }
+  addSecretOverride(projectId: Id, fingerprint: string): void {
+    const list = [...(this.state.secretOverrides?.[projectId] ?? []).filter((f) => f !== fingerprint), fingerprint].slice(-200);
+    this.state.secretOverrides = { ...(this.state.secretOverrides ?? {}), [projectId]: list };
+    this.flush();
+  }
+
   getChecksApproval(projectId: Id): string | undefined { return this.state.checksApproved?.[projectId]; }
   setChecksApproval(projectId: Id, hash: string): void {
     this.state.checksApproved = { ...(this.state.checksApproved ?? {}), [projectId]: hash };
@@ -558,30 +604,50 @@ export class Store {
     this.dirty();
   }
 
+  // ---- project knowledge notes (knowledge.ts: dedupe, size caps)
+  listProjectNotes(projectId: Id): ProjectNote[] { return [...(this.state.notes?.[projectId] ?? [])]; }
+  /** Adds a note, or refreshes the one it repeats; returns the stored note (undefined for empty text). */
+  addProjectNote(projectId: Id, draft: NoteDraft & { conversationId?: Id }): ProjectNote | undefined {
+    const { notes, note } = mergeNote(this.state.notes?.[projectId] ?? [], draft, this.now(), newId);
+    if (!note) return undefined;
+    this.state.notes = { ...(this.state.notes ?? {}), [projectId]: notes };
+    this.dirty(); return note;
+  }
+  removeProjectNote(projectId: Id, noteId: Id): void {
+    const notes = this.state.notes?.[projectId];
+    if (!notes?.some((n) => n.id === noteId)) return;
+    this.state.notes = { ...this.state.notes, [projectId]: notes.filter((n) => n.id !== noteId) };
+    this.dirty();
+  }
+
   // ---- settings
   getSettings(): Settings { return this.state.settings; }
   /** Validates first (throws on malformed values, so nothing is half-applied); `undefined` on a routing key resets it. */
   setSettings(patch: Partial<Settings>): Settings {
-    const p = normalizeSettingsPatch(patch);
-    const cur = this.state.settings;
-    const next: Settings = { ...cur, ...p, cliOverrides: { ...cur.cliOverrides, ...(p.cliOverrides ?? {}) } };
-    if ('projectOverrides' in p && p.projectOverrides) {
-      // Per project: an entry replaces that project's overrides; an empty or undefined entry removes them.
-      const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
-      for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
-      next.projectOverrides = merged;
-    }
-    if ('cliPaths' in p) {
-      const merged: Record<CliId, string> = { ...(cur.cliPaths ?? {}) };
-      for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
-      if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
-    }
-    for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
-      if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
-    }
-    this.state.settings = next;
+    this.state.settings = mergeSettings(this.state.settings, patch);
     this.dirty(); return this.state.settings;
   }
+}
+
+/** `cur` with a validated patch applied, as setSettings stores it (PURE; also the what-if settings of replayRouting). */
+export function mergeSettings(cur: Settings, patch: Partial<Settings>): Settings {
+  const p = normalizeSettingsPatch(patch);
+  const next: Settings = { ...cur, ...p, cliOverrides: { ...cur.cliOverrides, ...(p.cliOverrides ?? {}) } };
+  if ('projectOverrides' in p && p.projectOverrides) {
+    // Per project: an entry replaces that project's overrides; an empty or undefined entry removes them.
+    const merged: Record<Id, ProjectSettings> = { ...(cur.projectOverrides ?? {}) };
+    for (const [id, o] of Object.entries(p.projectOverrides)) { if (o && Object.keys(o).length) merged[id] = o; else delete merged[id]; }
+    next.projectOverrides = merged;
+  }
+  if ('cliPaths' in p) {
+    const merged: Record<CliId, string> = { ...(cur.cliPaths ?? {}) };
+    for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
+    if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
+  }
+  for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
+    if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
+  }
+  return next;
 }
 
 /**
@@ -613,7 +679,20 @@ const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;
 const EFFORT_POLICIES: readonly EffortPolicy[] = ['adaptive', 'conserve', 'quality'];
 const LOW_ALLOWANCE_POLICIES: readonly LowAllowancePolicy[] = ['reduceEffort', 'switch'];
 /** Settings a project can override. */
-const SCOPED_KEYS = ['concurrencyLimit', 'allowedModels', 'rolePreferences', 'effortPolicy', 'lowAllowancePolicy', 'subscriptionReserve'] as const;
+const SCOPED_KEYS = ['concurrencyLimit', 'allowedModels', 'rolePreferences', 'effortPolicy', 'lowAllowancePolicy', 'subscriptionReserve', 'spendCeilings', 'secretAllowlist'] as const;
+/** Entries of a secret-scan allowlist (path globs, or `type@glob`). */
+export const MAX_ALLOWLIST = 200;
+
+function secretAllowlist(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) throw new Error('secretAllowlist must be a list of path patterns.');
+  const out = [...new Set(v.map((e) => {
+    if (typeof e !== 'string') throw new Error('secretAllowlist entries must be text.');
+    if (e.length > 300 || /[\0\r\n]/.test(e)) throw new Error('secretAllowlist entries must be single-line patterns of at most 300 characters.');
+    return e.trim();
+  }).filter(Boolean))];
+  if (out.length > MAX_ALLOWLIST) throw new Error(`secretAllowlist holds at most ${MAX_ALLOWLIST} entries.`);
+  return out.length ? out : undefined;
+}
 
 type HelperRole = typeof HELPER_ROLES[number];
 
@@ -671,6 +750,8 @@ function scoped(v: Record<string, unknown>): ProjectSettings {
   if (has('lowAllowancePolicy')) out.lowAllowancePolicy = v['lowAllowancePolicy'] === undefined ? undefined : oneOf(v['lowAllowancePolicy'], LOW_ALLOWANCE_POLICIES, 'lowAllowancePolicy');
   if (has('allowedModels')) out.allowedModels = v['allowedModels'] === undefined ? undefined : allowedModels(v['allowedModels']);
   if (has('rolePreferences')) out.rolePreferences = v['rolePreferences'] === undefined ? undefined : rolePreferences(v['rolePreferences']);
+  if (has('spendCeilings')) out.spendCeilings = normalizeCeilings(v['spendCeilings']);
+  if (has('secretAllowlist')) out.secretAllowlist = v['secretAllowlist'] === undefined ? undefined : secretAllowlist(v['secretAllowlist']);
   return out;
 }
 
@@ -697,6 +778,7 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
     }
     out.cliPaths = map;
   }
+  if ('remote' in patch) out.remote = normalizeRemoteSettings(patch.remote);
   if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');
   if (patch.maxPlannersPerTurn !== undefined) out.maxPlannersPerTurn = clampInt(patch.maxPlannersPerTurn, PLANNERS_PER_TURN_RANGE, 'maxPlannersPerTurn');
   if ('projectOverrides' in patch) {
@@ -726,11 +808,20 @@ export interface EffectiveSettings {
   /** Undefined = headroom routing (see RoutingPolicy.lowAllowance). */
   lowAllowancePolicy?: LowAllowancePolicy;
   subscriptionReserve: number;
+  /**
+   * Per scope, the project's value wins. Note for day/week: a project value counts that project's runs only, the global one every
+   * project's (both apply; spend.checksFor builds the checks from the raw settings).
+   */
+  spendCeilings: SpendCeilings;
+  /** The global allowlist plus the project's own entries. */
+  secretAllowlist: string[];
 }
 
 export function effectiveSettings(s: Settings, projectId?: Id): EffectiveSettings {
   const p: ProjectSettings = (projectId && s.projectOverrides?.[projectId]) || {};
   return {
+    spendCeilings: { ...(s.spendCeilings ?? {}), ...(p.spendCeilings ?? {}) },
+    secretAllowlist: [...new Set([...(s.secretAllowlist ?? []), ...(p.secretAllowlist ?? [])])],
     concurrencyLimit: p.concurrencyLimit ?? s.concurrencyLimit,
     allowedModels: { ...(s.allowedModels ?? {}), ...(p.allowedModels ?? {}) },
     rolePreferences: { ...(s.rolePreferences ?? {}), ...(p.rolePreferences ?? {}) },

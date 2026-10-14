@@ -87,9 +87,11 @@ describe('Workspace modes', () => {
   it('updates board lanes from events and opens the correct conversation', async () => {
     localStorage.setItem(appearanceKey, JSON.stringify({ ...defaultAppearance, layout: 'mission' }));
     const api = window.harbor;
-    let deliver: ((e: HarborEvent) => void) | undefined;
+    // Several hooks subscribe (useHarbor, toasts): deliver to all of them.
+    const listeners: Array<(e: HarborEvent) => void> = [];
+    const deliver = (e: HarborEvent) => listeners.forEach(cb => cb(e));
     const onEvent = api.onEvent;
-    api.onEvent = cb => { deliver = cb; return onEvent(cb); };
+    api.onEvent = cb => { listeners.push(cb); return onEvent(cb); };
     render(<App/>);
     const board = await screen.findByRole('region', { name: 'Mission Board' });
     const task = (await api.listConversations('store')).find(c => c.id === 'checkout')!;

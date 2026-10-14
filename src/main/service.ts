@@ -2,12 +2,12 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
 import { cliPathProblem, defaultDiscoveryDeps, discoverClis, findExecutable, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
-import { loadCatalogWithWarnings, type CatalogEntry } from './clis/capabilities';
+import { loadCatalogWithWarnings, parseCatalog, type CatalogEntry } from './clis/capabilities';
 import { mergeCodexModels, type CodexModel } from './clis/codexModels';
 import { CLI_DEFINITIONS } from './clis/registry';
 import { EventBus } from './events';
@@ -24,12 +24,18 @@ import { skillsSection } from './prompts';
 import { SkillManager, type SkillHomes } from './skills/library';
 import type { SkillAccess } from './skills/delivery';
 import type { FetchLike } from './skills/github';
+import { effectiveSettings, mergeSettings, USAGE_KEEP_MS } from './store';
+import { aggregateRatings, isRatingValue, MAX_RATING_NOTE, ratingTarget } from './ratings';
+import { recordedDecisions, replayDecisions, type ReplayScenario } from './routingReplay';
+import { buildTaskReport } from './taskReport';
 import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
+import type { RepoMapCache } from './repoMap';
+import { RemoteTokens } from './remote/tokens';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
 import { attachmentDir, attachmentUrl, copyShownImage, real, savePng, urlForStoredPath } from './images';
 import { ScreenshotBroker, type Capturer } from './screenshots';
@@ -40,7 +46,14 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported'> & {
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting';
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
+  createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
+  listRemoteTokens(): Promise<RemoteTokenInfo[]>;
+  revokeRemoteToken(id: Id): Promise<void>;
+  listProjectNotes(projectId: Id): Promise<ProjectNote[]>;
+  removeProjectNote(projectId: Id, noteId: Id): Promise<ProjectNote[]>;
+  getSpendStatus(projectId?: Id, conversationId?: Id): Promise<SpendStatus>;
   previewBundleExport(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;
   exportBundle(token: string, opts?: { keepSecrets?: boolean; redactSecrets?: boolean }): Promise<BundleExportResult | null>;
   browseImportFile(kind: 'bundle' | 'chatExport'): Promise<string | null>;
@@ -63,6 +76,8 @@ export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'g
   /** Main-process extras (not part of the renderer contract). */
   readonly orchestrator: Orchestrator;
   readonly store: Store;
+  /** Hashed remote-API tokens (remote/server.ts verifies against them). */
+  readonly remoteTokens: RemoteTokens;
   whenIdle(timeoutMs?: number): Promise<void>;
   /**
    * Quitting: aborts every run, ends the CLI processes Harbor started (through the injected killer) and persists. The abort and
@@ -152,6 +167,11 @@ export interface ServiceOptions {
   mcpFetch?: McpFetch;
   /** How long testMcpServer waits for a server (tests shorten it); default 20 s (mcp/probe.ts). */
   mcpTestTimeoutMs?: number;
+  /** How often runs in flight are measured against the spend ceilings, and its timer (tests); defaults in spend.ts. */
+  spendCheckMs?: number;
+  spendTimer?: (fn: () => void, ms: number) => () => void;
+  /** Replace the repo map cache of helper prompts (tests). */
+  repoMaps?: RepoMapCache;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -216,6 +236,7 @@ function namedCodexModels(store: Store): string[] {
 export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const store = new Store(opts.dataDir);
   const bus = new EventBus();
+  const clock = opts.now ?? Date.now;
   // Capability knowledge is data: an optional capabilities.json in the data folder overrides the built-in catalog. What it dropped is
   // reported (log, journal, diagnostics) instead of silently routing on a catalog the owner did not intend.
   const loadedCatalog = loadCatalogWithWarnings(opts.dataDir ? join(opts.dataDir, 'capabilities.json') : undefined);
@@ -339,6 +360,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   });
 
   // Beside state.json; without a data folder (tests) the journal stays in memory, like the Store.
+  // Hashes only (see remote/tokens.ts); in memory without a data folder, like the Store.
+  const remoteTokens = new RemoteTokens(opts.dataDir ? join(opts.dataDir, 'remote-tokens.json') : undefined);
   const journal = new Journal(opts.dataDir ? join(opts.dataDir, 'journal.jsonl') : undefined);
 
   // ---- skills (plan section 3): the library lives in the data folder; without one (tests) nothing can be imported.
@@ -375,7 +398,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     foreground: opts.foreground, setTimer: opts.setTimer, timeoutMs: opts.screenshotTimeoutMs
   });
   const orchestrator = new Orchestrator({
-    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots,
+    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots, ...(opts.repoMaps ? { repoMaps: opts.repoMaps } : {}),
     attachImage: (conversationId, image) => copyShownImage(attachmentDir(dataRoot, conversationId), image),
     getClis: () => clis,
     adapterFor,
@@ -408,7 +431,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     stall: opts.stall,
     questionTimeoutMs: opts.questionTimeoutMs,
     maxAutoTurns: opts.maxAutoTurns,
-    autoApproveChecks: opts.autoApproveChecks
+    autoApproveChecks: opts.autoApproveChecks,
+    spendCheckMs: opts.spendCheckMs,
+    spendTimer: opts.spendTimer
   });
 
   // A state file that was restored from backup or set aside, and a write that keeps failing, are visible in the journal and the
@@ -500,12 +525,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
 
   return {
-    orchestrator, store,
+    orchestrator, store, remoteTokens,
     whenIdle: async (t) => { await ready; await orchestrator.whenIdle(t); },
     shutdown: async () => {
       if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = undefined; }
       await orchestrator.shutdown(); // aborts and flushes before its first await
       store.flush();
+      remoteTokens.flush();
     },
     activeRuns: () => orchestrator.activeRunCount(),
     onResume: () => orchestrator.rearmTimers(),
@@ -855,6 +881,68 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
     },
+    async getTaskReport(conversationId) {
+      const c = store.getConversation(conversationId);
+      if (!c) throw new Error('This conversation is no longer available.');
+      const agents = store.listAgentRecords(c.projectId);
+      const helperConvs = agents.filter((a) => a.role !== 'main' && a.parentConversationId === c.id).flatMap((a) => { const hc = store.findConversationByAgent(a.id); return hc && hc.id !== c.id ? [hc.id] : []; });
+      const messages = [c.id, ...helperConvs].flatMap((id) => store.listMessages(id));
+      return buildTaskReport({ conversation: c, agents, usage: store.listUsage(), messages, catalog, calibration: store.getCalibration(), now: clock(), keepMs: USAGE_KEEP_MS });
+    },
+    async rateResult(targetId, rating, note) {
+      if (typeof targetId !== 'string' || !targetId) throw new Error('Name the agent or message to rate.');
+      if (!isRatingValue(rating)) throw new Error('A rating is up, down or redo-stronger.');
+      if (note !== undefined && note !== null && typeof note !== 'string') throw new Error('The note must be text.');
+      const agent = store.getAgent(targetId);
+      const target = ratingTarget({ targetId, agent, message: agent ? undefined : store.getMessage(targetId), agentOf: (id) => store.getAgent(id), conversationOf: (id) => store.findConversationByAgent(id)?.id });
+      const text = typeof note === 'string' ? note.trim().slice(0, MAX_RATING_NOTE) : '';
+      return store.addRating({ id: newId(), time: clock(), rating, ...(text ? { note: text } : {}), ...target });
+    },
+    async listRatings(o) {
+      if (o?.projectId !== undefined) needProject(o.projectId);
+      return [...store.listRatings(o?.projectId)].reverse();
+    },
+    async getRatingSummary(o) {
+      if (o?.projectId !== undefined) needProject(o.projectId);
+      const by = o?.by ?? 'model';
+      if (by !== 'cli' && by !== 'model' && by !== 'need') throw new Error('Summarize ratings by cli, model or need.');
+      return aggregateRatings(store.listRatings(o?.projectId), by);
+    },
+    async replayRouting(o = {}) {
+      if (o.projectId !== undefined) needProject(o.projectId);
+      const limit = Math.min(2000, Math.max(1, Math.round(typeof o.limit === 'number' && Number.isFinite(o.limit) ? o.limit : 200)));
+      let convIds: Id[];
+      if (o.conversationId !== undefined) {
+        const c = store.getConversation(o.conversationId);
+        if (!c) throw new Error('This conversation is no longer available.');
+        if (o.projectId !== undefined && c.projectId !== o.projectId) throw new Error('That conversation belongs to another project.');
+        convIds = [c.id, ...store.listAgentRecords(c.projectId).filter((a) => a.role !== 'main' && a.parentConversationId === c.id).flatMap((a) => store.findConversationByAgent(a.id)?.id ?? [])];
+      } else {
+        convIds = (o.projectId !== undefined ? [needProject(o.projectId)] : store.listProjects()).flatMap((p) => store.listConversations(p.id).map((c) => c.id));
+      }
+      const messages = [...new Set(convIds)].flatMap((id) => store.listMessages(id));
+      const decisions = recordedDecisions(messages, (id) => store.getAgent(id)).slice(-limit);
+      const notes: string[] = [];
+      let altCatalog: CatalogEntry[] = catalog;
+      if (o.catalog !== undefined) {
+        if (!Array.isArray(o.catalog)) throw new Error('The what-if catalog must be a list of capabilities.json entries.');
+        const parsed = parseCatalog(o.catalog);
+        if (parsed.warnings.some((w) => /no usable entry|must be a list/.test(w))) throw new Error('The what-if catalog has no usable entry.');
+        altCatalog = parsed.catalog;
+        notes.push(...parsed.warnings.map((w) => w.replace(/^capabilities\.json/, 'what-if catalog')));
+      }
+      const cur = store.getSettings();
+      const altSettings = o.settings !== undefined ? mergeSettings(cur, o.settings) : cur;
+      const scenario = (cat: readonly CatalogEntry[], s: typeof cur): ReplayScenario => ({
+        catalog: cat, enabled: (c) => s.cliOverrides[c]?.enabled !== false, ...(store.getCalibration() ? { calibration: store.getCalibration() } : {}),
+        policyFor: (d) => {
+          const eff = effectiveSettings(s, d.projectId);
+          return { allowedModels: eff.allowedModels, effortPolicy: eff.effortPolicy, lowAllowance: eff.lowAllowancePolicy, reserve: eff.subscriptionReserve, preference: d.role === 'main' ? undefined : eff.rolePreferences[d.role] };
+        }
+      });
+      const out = replayDecisions(decisions, { base: scenario(catalog, cur), alt: scenario(altCatalog, altSettings), now: clock() });
+      return { ...out, notes: [...out.notes, ...notes] };
+    },
     async previewScreenshot(requestId, o) {
       const sourceId = o && typeof o === 'object' ? o.sourceId : undefined;
       return screenshots.preview(requestId, sourceId);
@@ -911,6 +999,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async previewImport(source, o) { return transfer.previewImport(source, o && typeof o === 'object' ? o : {}); },
     async importConversation(projectId, token, entryIds) { return transfer.importConversations(projectId, token, entryIds); },
     async continueImported(conversationId, o) { await ready; return transfer.continueImported(conversationId, o); },
+    async getSpendStatus(projectId, conversationId) {
+      if (projectId) needProject(projectId);
+      return orchestrator.spendStatus(projectId ?? undefined, conversationId ?? undefined);
+    },
     async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },
@@ -919,6 +1011,18 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       store.removeToolRule(projectId, ruleId);
       return store.listToolRules(projectId);
     },
+    async listProjectNotes(projectId) { return store.listProjectNotes(needProject(projectId).id); },
+    async removeProjectNote(projectId, noteId) {
+      needProject(projectId);
+      store.removeProjectNote(projectId, noteId);
+      return store.listProjectNotes(projectId);
+    },
+    async createRemoteToken(name, scope) {
+      if (scope === 'full' && store.getSettings().remote?.allowFullScope !== true) throw new Error('Full remote access is off. Turn on remote.allowFullScope in settings first, or create a read-only or answer-permissions token.');
+      return remoteTokens.create(name, scope);
+    },
+    async listRemoteTokens() { return remoteTokens.list(); },
+    async revokeRemoteToken(id) { remoteTokens.revoke(id); },
     onEvent: (cb) => bus.on(cb)
   };
 }
