@@ -1,0 +1,7 @@
+{"harborTranscript":1,"cli":"codex","source":"synthetic","scenario":"transient reconnect notices, then turn.failed on the usage limit","notes":"Hand-written. Event shapes follow parseCodexLine and the codex.ts header (codex exec --json verified against codex-cli 0.160.0). Not real CLI output.","expect":{"done":{"ok":false,"rateLimited":true,"errorIncludes":"usage limit"},"kinds":["session","done"]}}
+{"o":"{\"type\":\"thread.started\",\"thread_id\":\"019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b\"}"}
+{"o":"{\"type\":\"turn.started\"}"}
+{"o":"{\"type\":\"error\",\"message\":\"Reconnecting... 1/5\"}"}
+{"o":"{\"type\":\"error\",\"message\":\"Reconnecting... 2/5\"}"}
+{"o":"{\"type\":\"turn.failed\",\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}"}
+{"exit":1}

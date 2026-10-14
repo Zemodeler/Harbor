@@ -1,0 +1,5 @@
+{"harborTranscript":1,"cli":"codex","source":"synthetic","scenario":"an error event, then exit 1 without turn.failed","notes":"Hand-written. Event shapes follow parseCodexLine and the codex.ts header (codex exec --json verified against codex-cli 0.160.0). Not real CLI output.","expect":{"done":{"ok":false,"exitCode":null,"errorIncludes":"stream disconnected"},"kinds":["session","done"]}}
+{"o":"{\"type\":\"thread.started\",\"thread_id\":\"019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b\"}"}
+{"o":"{\"type\":\"error\",\"message\":\"stream disconnected before completion\"}"}
+{"e":"2026-10-14T10:00:00.000Z ERROR codex_exec: turn ended early"}
+{"exit":1}
