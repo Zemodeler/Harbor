@@ -1,72 +1,62 @@
 # Routing and usage
 
-Code: `router.ts` (pure scoring), `clis/capabilities.ts` (catalog as data), `usage.ts`, `codexLimits.ts`, `orchestrator.ts` (fallback). Constants are in `ROUTING_WEIGHTS`, pinned by tests, and reasoned rather than measured ([limitations](limitations.md)). The code wins over this page.
+Code: `router.ts` and `routePrice.ts` (pure scoring and pricing), `difficulty.ts`, `budget.ts` (pool states), `budgetCost.ts` and `budgetPriors.ts` (cost estimates), `calibration.ts`, `helperLimit.ts`, `clis/capabilities.ts` (the catalog, as data), `usage.ts` and `codexLimits.ts` (readings), and `orchestrator.ts` (fallback). Weights live in `ROUTING_WEIGHTS` and are pinned by tests. **Every budget constant is a starting value tuned in a week simulator (`tests/sim`, `scripts/simulate-week.ts`), not a provider fact.** Where this page and the code disagree, the code is right.
 
 ## What is routed
 
-Every CLI run separately: the concierge, each lead turn, each helper run and retry. A request has a role, complexity (low/medium/high), tier (cheap/standard/strong), needs, and optional extras (retry, a CLI you named or the lead pinned, the CLI holding the session). The decision and reason are stored on the message and shown in Session information.
+Every CLI run is routed on its own: the concierge, each lead turn, each helper run and each retry. Each decision stores its technical reason (`Message.details.reason`) and a plain summary (`details.summary`) on the message. The stored details include the difficulty, the best candidates with their effort and estimated price, what was skipped and why, and whether a review is advised.
 
-## Hard skips
+## Difficulty and the capability floor
 
-Not installed, no adapter (Gemini), disabled, signed out, already failed for this task, pinned elsewhere (an unmeetable pin falls back), excluded by allowed-models, missing a required need or vision, exhausted or rate-limited in the last 30 minutes (per model when named), or inside the subscription reserve. If nothing is left the run fails with the reasons and when they clear.
+`difficulty.ts` rates each piece of work from 0 to 10 using named signals: how many files it claims, the length of the instructions, risk words, whether a deliverable is named, whether verification is required, and whether it follows a planner's spec. The lead's own rating is only a starting hint. Reviewers and read-only helpers are capped at 5. The difficulty sets a **capability floor**, and each catalog model, at each effort, either clears it or does not.
 
-## Scoring
+## Choosing model and effort
 
-Start at 100, highest wins (ties: tier distance, load, verified adapter, catalog order). Every term is in `scored`.
+1. **Hard skips.** A CLI or model is dropped when it is: not installed; without a headless adapter (Gemini); disabled; signed out; already failed for this task; not allowed by the settings; a legacy or non-auto-routed model you did not name; missing a required need (for example vision for images); exhausted or rate-limited; inside the subscription reserve; or short of quota above the reserve for this run. A custom CLI with no read-only mode is skipped for read-only work unless you allowed it. If nothing is left, the run fails with every reason and when each one clears.
+2. **The floor.** Models that cannot clear the floor at any effort are dropped while something else clears it. If nothing clears it, Harbor takes the strongest model available, marks the choice degraded, and asks for a review. A helper whose capable models are only short of quota for now waits rather than being degraded.
+3. **Price.** Each option (model plus effort) gets an estimated price, in scarcity-weighted percent of a weekly quota window. The price combines expected tokens, the model's cost per k-token, the state of its pools, the risk of failure, and the cost of an automatic review if the margin is thin. Quota that will expire unused at a known reset is cheap ("use it or lose it"). Each doubling over the cheapest option costs 10 points, capped at 55.
+4. **Other terms.** Session continuity +28 (another CLI must be about 7x cheaper to move a session), going straight back to a CLI within 30 minutes -12, a CLI you named in the message +60, a role preference from settings +30 for the CLI and +30 more for the model, load -5 per running agent, needs +/-4 each (capped at +/-12), unknown sign-in -15, avoid on retry -30, recent failures up to -20. A resumed session keeps its model while that model can still do the work. A redo of rejected work never moves to a cheaper model.
+5. **Effort** is the one the price picked. The `conserve` and `quality` policies step it down or up, but a step down is taken only if the work still clears the floor. Retries are never lowered. Claude receives the effort as `--effort`, Codex as `model_reasoning_effort`. Codex's `xhigh`, `max` and `ultra` are never sent.
 
-| Term | Effect |
+The concierge is capped at the cheap tier while a cheap model can do its work. `/deep` forces a strong lead.
+
+## Quota pools
+
+Pools are `claude:all`, `claude:opus`, `claude:fable` and `codex:all`. A model draws from its CLI's account pool and, where the provider caps it separately, from its own pool too. For each pool's 5-hour and weekly window, `budget.ts` derives what is left, the burn rate, and a reserve held back for your interactive work: 15% weekly and 10% for the 5-hour window. The reserve shrinks before a reset and when a deadline is near. From these comes a pool state:
+
+| State | Meaning (projected at the current burn) |
 | --- | --- |
-| Headroom | up to -55 by room left in the tighter of the 5h and weekly windows |
-| Load | -5 per agent running on that CLI |
-| Tier fit | -8 per tier too strong, -25 per tier too weak |
-| Needs | +/-4 each, capped at +/-12 |
-| Continuity | +28 for the CLI holding the session; -12 for going straight back within 30 minutes |
-| You named a CLI | +60 (never beats a hard skip) |
-| Role preference | +30 CLI, +30 more for model |
-| Retry | -30 on the CLI that failed |
-| Unknown sign-in | -15 |
-| Weekly pacing | +35 to -20 |
+| spend | the window resets with quota unspent |
+| neutral | about on pace |
+| conserve | runs short before the reset |
+| protect | runs dry well before the reset; at most one helper |
 
-The catalog is editable (`capabilities.json` in the data folder). Built in: Claude `haiku`, `sonnet`, `opus`, `claude-fable-5-1` (unverified id), and Codex's default model. A session only resumes on the CLI that created it; otherwise Harbor says so and prepends a handoff.
+Helpers never use the reserve, but the lead and the concierge may (you are waiting on them). A per-conversation **deadline** (`setConversationDeadline`) adds urgency, which releases reserve and puts a price on time.
 
 ## Settings
 
-Global with per-project overrides: enabled CLIs, allowed models, role preferences (not the lead), effort policy (adaptive, conserve, quality), low-allowance policy (`reduceEffort`, `switch`), subscription reserve (0 to 50%), concurrency (1 to 8, default 4), editor, free-reset prompts. Not built: conversation or task overrides, API fallback.
+Settings are global, with per-project overrides: enabled CLIs, CLI paths, allowed models, role preferences, effort policy (adaptive, conserve, quality), low-allowance policy (unset = price routing; `reduceEffort`; `switch`), subscription reserve (0 to 50%), concurrency (1 to 8, default 4), helpers per turn (default 4), planners per turn (default 1), editor, and free-reset prompts. The catalog can be edited through `capabilities.json` in the data folder. Not built: overrides per conversation or per task, and an API fallback. `routing: manual` has no effect.
 
-## Effort
+## Usage readings
 
-A deliberate effort wins (concierge low, `/deep` high). Retrying rejected work on the top tier is high. A low allowance steps down one notch; the policy shifts the base. The base comes from role and complexity; a retry of rejected work goes one complexity level up. Sent as `--effort` (Claude) or `model_reasoning_effort` (Codex).
-
-## Headroom and pacing
-
-- The tighter of the 5h and weekly windows binds; the other adds a quarter of its points. Reported windows count in full, Harbor-only estimates at half.
-- Points by share left: 0 above 95%, 6 at 60%, 12 at 40%, 22 at 25%, 44 at 10%, 55 at 0.
-- A session stays on its CLI unless another has about 28 points more room: 55% vs 45% never moves it, 10% vs 90% always does.
-- Under 25% left, flexible work runs a tier cheaper at lower effort (not planners, retries, high complexity, resumed sessions).
-- **Weekly pacing** treats the week as a straight line to a known reset: underspent near the reset earns up to +35 (and, with a fresh reading, 30%+ surplus and under 36h left, a tier stronger); overspent costs up to -20 (and a tier cheaper). It needs a known reset time and ignores a CLI you named.
-
-## Complexity
-
-`complexity.ts` scores wording (refactor, migrate, root cause, long specs, many paths, plan/goal mode); renames and explanations are low. For messages skipping the concierge it is the rating; otherwise it can only raise it to high.
-
-## Fallback
-
-Transient failures retry on the same CLI; an overload retries once. Otherwise the CLI is excluded for the task and the next best is used ("Falling back to ..."), up to three attempts per CLI. A resumed session never moves to a cheaper model. Signed-out marks the CLI signed out until refresh.
-
-## Usage
-
-Each CLI run records one event (CLI, model, project, duration, success, tokens and cost when reported). Three kinds of reading:
+Each CLI run records one usage event: CLI, model, project, duration, success, and tokens and cost when the CLI reports them. Windows come from three kinds of reading:
 
 | Reading | Source | Use |
 | --- | --- | --- |
-| Reported | Claude's `rate_limit_event` during Harbor runs; Codex's newest session log in `~/.codex/sessions` | Preferred; dropped once past its reset |
-| Estimated | Harbor's own run count against a budget (calibrated from two readings, else a flagged fallback) | Only without a reported window; labeled "estimated from Harbor runs only"; half weight |
-| Unknown | Nothing (Gemini) | No window; never treated as unlimited |
+| **Reported** | Claude's `rate_limit_event` seen during Harbor runs; Codex's newest session log in `~/.codex/sessions` | Preferred. Dropped once past its reset. Claude's is only as fresh as Harbor's last Claude run. |
+| **Estimated** | Harbor's own runs, measured against a budget learned from provider readings, or else a flagged fallback (200 runs per 5h, 120 per week, measured once on one account) | Used only when there is no reported window. Labelled "estimated"; `calibrated: false` means it is the fallback. Half weight. |
+| **Unknown** | nothing (Gemini, custom CLIs without readings) | No window, and never treated as unlimited |
 
-Windows become a level (plenty < 50% used, limited 50%, low 80%, exhausted 100%). On reported windows a projection of 100%+ at reset raises the level, under 70% lowers "limited". Windows are never summed and providers' percentages are never compared. Not built: a cross-project queue, reserved capacity for your messages, waiting for a reset.
+Each window becomes a level: plenty below 50% used, limited from 50%, low from 80%, exhausted at 100%. Windows are never summed, and providers' percentages are never compared with each other. Harbor cannot see use outside Harbor. **Estimates are not your provider quota, and the UI must label them as estimates.**
 
-Free resets are dormant: no provider exposes one. If one ever does, it is only proposed as a permission request.
+## Free resets
+
+There are none. `FreeResetCoordinator` (`usage.ts`) could propose a reset through a `permission` prompt, but only for a window whose `freeResetAvailable` is set. That flag needs an entitlement source, and no source exists, so it is never set. A reset is never used without an explicit yes.
+
+## Fallback
+
+Transient failures retry on the same CLI, and an overload retries once. Otherwise the CLI is excluded for the task and the next best one is used ("Falling back to ..."). A run that already started editing passes a partial-work note to the next CLI. Signing out marks the CLI signed out until you refresh.
 
 ## Adding a CLI
 
-Implement `CliAdapter` (prompt on stdin, `Chunk` stream, one final `done`) and a `CliDefinition` in `clis/registry.ts`. Check flags with `<cli> --help` and record unverified ones in the file header.
+There are two ways. Without code: describe it in Settings as a custom CLI (`CustomCliDescriptor`), run a dry run, and approve the executable. With code: implement `CliAdapter` (prompt on stdin, a `Chunk` stream, one final `done`) and add a `CliDefinition` in `clis/registry.ts`. Check its flags with `<cli> --help` and record the unverified ones in the file header.
