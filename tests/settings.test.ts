@@ -91,7 +91,7 @@ describe('settings validation', () => {
 describe('effectiveSettings', () => {
   it('defaults when nothing is set', () => {
     expect(effectiveSettings(DEFAULT_SETTINGS, 'p1')).toEqual({
-      concurrencyLimit: undefined, allowedModels: {}, rolePreferences: {}, effortPolicy: 'adaptive', subscriptionReserve: 0
+      concurrencyLimit: undefined, allowedModels: {}, rolePreferences: {}, effortPolicy: 'adaptive', subscriptionReserve: 0, spendCeilings: {}, secretAllowlist: []
     });
   });
 
@@ -105,7 +105,7 @@ describe('effectiveSettings', () => {
     expect(effectiveSettings(s, 'p1')).toEqual({
       concurrencyLimit: 1, effortPolicy: 'conserve', subscriptionReserve: 20,
       allowedModels: { claude: ['opus'], codex: ['default'] },
-      rolePreferences: { implementer: { cli: 'codex' }, reviewer: { cli: 'codex', model: 'default' } }
+      rolePreferences: { implementer: { cli: 'codex' }, reviewer: { cli: 'codex', model: 'default' } }, spendCeilings: {}, secretAllowlist: []
     });
     expect(effectiveSettings(s, 'p2').concurrencyLimit).toBe(3);
     expect(effectiveSettings(s).allowedModels).toEqual({ claude: ['sonnet'], codex: ['default'] });
