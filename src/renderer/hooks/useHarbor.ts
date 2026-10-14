@@ -331,17 +331,21 @@ export function useHarbor() {
     return !!ok;
   }
   /** Per request, so one failed answer never blocks the others; the request stays visible until Harbor has the answer. */
-  async function answerPermission(requestId: string, answer: PermissionAnswer) {
+  async function answerPermission(requestId: string, answer: PermissionAnswer, shot?: { sourceId: string; forConversation?: boolean }) {
     const p = permissionList.current.find(x => x.requestId === requestId);
     if (!p || answeringPermissions.current.has(requestId)) return false;
     // "Always" is only ever sent for a tool request that offered it; anything else is a plain answer.
     const always = answer === 'always' && p.kind === 'tool' && p.alwaysAllow === true;
     if (answer === 'always' && !always) return false;
+    // A screenshot is only ever allowed with the window or screen the user picked in its card (Harbor refuses a bare yes).
+    const capture = p.kind === 'screenshot' && answer === 'allow';
+    if (capture && (!shot?.sourceId || !api.answerScreenshot)) return false;
     answeringPermissions.current.add(requestId);
     setPermissionAnswering(a => ({ ...a, [requestId]: answer }));
     setPermissionErrors(({ [requestId]: _, ...rest }) => rest);
     try {
-      await (always ? api.answerPermission(requestId, true, { always: true }) : api.answerPermission(requestId, answer === 'allow'));
+      await (capture ? api.answerScreenshot!(requestId, { allow: true, sourceId: shot!.sourceId, forConversation: shot!.forConversation === true })
+        : always ? api.answerPermission(requestId, true, { always: true }) : api.answerPermission(requestId, answer === 'allow'));
       forgetPermissions([requestId]);
       return true;
     } catch (e) {

@@ -8,8 +8,8 @@ import { isEmittableEffort } from '../clis/effort';
  * Verified against codex-cli 0.160.0: run, session id capture and event shapes. `exec resume` rejects `-s`,
  * so the sandbox is set with `-c sandbox_mode=...` for both modes.
  * Prompt is read from stdin via the `-` argument.
- * NOT VERIFIED (`codex exec --help` could not be run when these were added): `--image` (`-i`, also on `exec resume`),
- * `-c approval_policy=never` and `sandbox_mode=danger-full-access` for auto mode.
+ * `-i/--image <FILE>...` is listed by `codex exec --help` and `codex exec resume --help` of codex-cli 0.162.0-alpha.17.2 (checked for
+ * screenshots; no model run). NOT VERIFIED: `-c approval_policy=never` and `sandbox_mode=danger-full-access` for auto mode.
  * Config values are passed WITHOUT embedded double quotes: Codex parses `-c key=value` as TOML and falls back to the raw string,
  * and a `"` would be rejected by the .cmd shim quoting in proc.ts (that bug silently routed every Codex run to Claude).
  * Paths in arrays use TOML literal strings ('...'), which also need no double quotes.

@@ -33,7 +33,11 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
   return <article className={`${s.message} ${m.role === 'user' ? s.user : s.assistant} ${peer ? s.hqPeer : ''}`} data-peer={peer || undefined}>
     <div className={s.byline}>{m.role === 'assistant' ? <Brand compact/> : null}<strong>{m.role === 'user' ? 'You' : m.role === 'assistant' ? (subAgentId ? <button className={s.agentName} title="Open this agent" onClick={() => openAgent(subAgentId)}>{agentTitle}</button> : agentTitle || 'Harbor') : peer ? 'Between sessions' : 'Activity'}</strong><time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></div>
     {m.text ? <Markdown text={m.text}/> : working ? <p>Working…</p> : null}
-    {m.attachments?.length ? <ul className={s.messageImages} aria-label="Attached images">{m.attachments.map((a, i) => <li key={i} className={previews?.[i] ? s.hqImageItem : undefined}>{previews?.[i] ? <img src={previews[i]} alt=""/> : null}<span>{a.name}</span></li>)}</ul> : null}
+    {m.attachments?.length ? <ul className={s.messageImages} aria-label={m.attachments.some(a => a.origin === 'screenshot') ? 'Screenshot' : 'Attached images'}>{m.attachments.map((a, i) => {
+      // Harbor serves its stored copies through harbor-file:// (main checks the path); a just-sent image may still use its local preview.
+      const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];
+      return <li key={i} className={src ? s.hqImageItem : undefined}>{src ? <img src={src} alt={a.origin === 'screenshot' ? `Screenshot: ${a.name}` : ''} loading="lazy"/> : null}<span>{a.name}</span></li>;
+    })}</ul> : null}
     {m.details ? <details className={s.execution}><summary>Execution details</summary><p>{m.details.cli} / {m.details.model} · {m.details.effort} effort{complexity ? <> · <ComplexityBadge complexity={complexity}/></> : null}</p>{m.details.summary ? <><p>{m.details.summary}</p><details className={s.technical}><summary>Technical details</summary><p>{m.details.reason}</p></details></> : <p>{m.details.reason}</p>}</details> : null}
   </article>;
 });

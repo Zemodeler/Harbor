@@ -104,6 +104,20 @@ export function validateInvoke(method: string, args: unknown[]): void {
     case 'browseSkillSource':
       if (args[0] !== 'folder' && args[0] !== 'zip') bad('kind must be folder or zip');
       break;
+    case 'previewScreenshot': {
+      if (!isId(args[0])) bad('request id must be a short non-empty string');
+      const o = args[1] as { sourceId?: unknown } | undefined | null;
+      if (o !== undefined && o !== null && (typeof o !== 'object' || Array.isArray(o) || (o.sourceId !== undefined && !isId(o.sourceId)))) bad('options must be an object with an optional sourceId');
+      break;
+    }
+    case 'answerScreenshot': {
+      if (!isId(args[0])) bad('request id must be a short non-empty string');
+      const a = args[1] as { allow?: unknown; sourceId?: unknown; forConversation?: unknown } | null;
+      if (!a || typeof a !== 'object' || Array.isArray(a) || typeof a.allow !== 'boolean') bad('answer must be an object with a boolean allow');
+      if (a!.sourceId !== undefined && !isId(a!.sourceId)) bad('sourceId must be a short non-empty string');
+      if (a!.forConversation !== undefined && typeof a!.forConversation !== 'boolean') bad('forConversation must be true or false');
+      break;
+    }
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;

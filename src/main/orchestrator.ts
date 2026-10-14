@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity } from '../shared/api';
@@ -15,7 +15,7 @@ import { breakCycles } from './graph';
 import { Journal, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT, needsLock } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, newProtocolNonce, nonceInstruction, parseConcierge, parseProtocol, requestedCli, stripProtocol, subagentPrompt, systemFor,
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, leadPrompt, needsWorkspace, newProtocolNonce, noVisionNote, nonceInstruction, parseConcierge, parseProtocol, requestedCli, screenshotAnswerText, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type Protocol, type ReplyRequest, type SessionPeer
 } from './prompts';
 import { buildHandoff, type HandoffEvidence } from './handoff';
@@ -44,6 +44,9 @@ import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
 import { isModelSpecific } from './adapters/types';
 import type { EventBus } from './events';
+import { CLI_DEFINITIONS } from './clis/registry';
+import { resolveShownImage } from './images';
+import type { ScreenshotBroker, ScreenshotLine, ShotOutcome } from './screenshots';
 
 export interface OrchestratorDeps {
   store: Store;
@@ -102,6 +105,10 @@ export interface OrchestratorDeps {
   now?: () => number;
   /** Report wake-ups of the lead are gathered for `ms` (default 400) so a cascade of finishing helpers wakes it once; 0 = immediately. */
   reportDebounce?: { ms?: number; setTimer?: (fn: () => void, ms: number) => () => void };
+  /** HARBOR_SCREENSHOT requests (screenshots.ts): asks the user, captures what they pick. Absent = requests are refused with a note. */
+  screenshots?: ScreenshotBroker;
+  /** Copies a checked project image (HARBOR_SHOW_IMAGE) into the conversation's attachments folder. Absent = such lines are refused. */
+  attachImage?: (conversationId: Id, image: { path: string; mime: string }) => Attachment;
 }
 
 /** A run with no output for this long is flagged as possibly stuck (it is never killed for that alone). */
@@ -287,6 +294,11 @@ interface RoutedOptions {
   permission: 'read-only' | 'edit' | 'full';
   /** Absolute paths of images for this turn only. */
   images?: string[];
+  /**
+   * Screenshots Harbor captured for this agent (this turn only). Unlike `images` they do not require a vision model: a CLI whose
+   * `features.images` is false gets their file paths in the prompt with a note that it cannot see them.
+   */
+  shots?: string[];
   /** Pin to one CLI; routing falls back (with a note) when it is unavailable. */
   requireCli?: CliId;
   cwd: string;
@@ -423,6 +435,9 @@ export class Orchestrator {
     this.stoppedSessions.add(id);
     this.sessionGeneration.set(id, (this.sessionGeneration.get(id) ?? 0) + 1);
     this.denyToolAsks((p) => p.conversationId === id, 'the conversation was stopped');
+    // Open screenshot requests of this session are withdrawn, and a window allowed for it is allowed no longer.
+    this.d.screenshots?.cancel((r) => r.sessionId === id || r.conversationId === id, 'the conversation was stopped');
+    this.d.screenshots?.revokeGrant(id);
     this.leads.get(id)?.ctl.abort();
     for (const a of this.d.store.listAgentRecords(c.projectId)) {
       if (a.role !== 'main' && (a.parentConversationId === id || a.id === c.agentId)) this.stop(a.id);
@@ -462,7 +477,8 @@ export class Orchestrator {
     const start = Date.now();
     await this.startup;
     for (;;) {
-      const busy = this.running.size > 0 || this.mainBusy > 0 || this.reportWakes.size > 0;
+      // A screenshot request waiting for the user is not work in flight; one being checked or captured is.
+      const busy = this.running.size > 0 || this.mainBusy > 0 || this.reportWakes.size > 0 || (this.d.screenshots?.active() ?? 0) > 0;
       const pending = this.d.store.allAgentRecords().some((a) => a.role !== 'main' && (a.state === 'queued' || a.state === 'working'));
       if (!busy && !pending) return;
       if (Date.now() - start > timeoutMs) throw new Error('whenIdle timed out');
@@ -492,6 +508,7 @@ export class Orchestrator {
     for (const l of this.leads.values()) l.ctl.abort();
     for (const ctl of this.conflictAsks.values()) ctl.abort();
     this.denyToolAsks(() => true, 'Harbor is quitting');
+    this.d.screenshots?.cancel(() => true, 'Harbor is quitting');
     this.d.store.flush();
     const killer = this.d.killer ?? systemKiller;
     // Only this instance's processes: a second Harbor's CLIs are not ours to kill.
@@ -511,6 +528,7 @@ export class Orchestrator {
    */
   rearmTimers(): void {
     for (const p of [...this.toolAsks.values()]) p.rearm();
+    this.d.screenshots?.rearm();
   }
 
   /** Whether the folder is a git repo with commits; remembered, because lock decisions in the (synchronous) scheduler read it. */
@@ -793,10 +811,12 @@ export class Orchestrator {
         if (s.role !== 'main' && (!convs.size || convs.has(s.parentConversationId))) this.stop(s.id);
       }
       this.denyToolAsks((p) => p.agentId === a.id && convs.has(p.conversationId), 'the lead was stopped');
+      this.d.screenshots?.cancel((r) => r.agentId === a.id && (!convs.size || convs.has(r.sessionId)), 'the lead was stopped');
       for (const [, l] of active) l.ctl.abort();
       return;
     }
     this.denyToolAsks((p) => p.agentId === a.id, 'the agent was stopped');
+    this.d.screenshots?.cancel((r) => r.agentId === a.id, 'the agent was stopped');
     this.controllers.get(a.id)?.abort();
     if (!this.running.has(a.id) && !TERMINAL.includes(a.state)) {
       this.setState(a, 'stopped', { error: 'Stopped by the user before it started.', stopKind: 'user' });
@@ -1171,6 +1191,7 @@ export class Orchestrator {
         ...(trigger.kind === 'user' && trigger.images?.length ? { required: ['vision' as const] } : {}),
         permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
         images: trigger.kind === 'user' ? trigger.images : undefined,
+        ...(trigger.kind === 'screenshot' && trigger.shots?.length ? { shots: trigger.shots } : {}),
         signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true,
         nonce, allowedCommands: commandPrefixes(checkCmds),
         onAttempt: turn.marks.length ? () => this.reportsAttempted(turn) : undefined
@@ -1210,6 +1231,7 @@ export class Orchestrator {
     const pin = delegations.some((t) => t.integrate) ? await this.pinTarget(project) : undefined;
     const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty });
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
+    this.showImages(main, conversationId, proto.showImage, project.path, [project.path]);
     for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
     const replied = new Set(proto.reply.map((r) => this.deliverReply(project.id, conversationId, r)).filter((x): x is Id => !!x));
     const started = created.filter((c) => c.state !== 'failed');
@@ -1233,6 +1255,11 @@ export class Orchestrator {
       // A question in prose: the user's next message answers it, so it goes to the lead, not the front desk.
       this.leadQuestion.add(conversationId);
     }
+    // A screenshot request ends the turn like a question: the user decides in a card, and the answer (image or refusal) resumes the lead.
+    const shot = proto.screenshot[0];
+    const shotAsked = !!shot && !asking && !signal.aborted;
+    if (shotAsked) this.requestScreenshot(main, conversationId, conversationId, shot);
+    else if (shot && asking) this.post(conversationId, 'system', 'Harbor ignored the lead\'s screenshot request because it also asked you a question; it can ask again after your answer.', { agentId: main.id });
     if (trigger.kind === 'help' && !forHelper && !replied.has(trigger.from.id) && !created.some((c) => c.helpFor === trigger.from.id)) {
       if (trigger.question) {
         // The lead answered the helper's question in prose: forwarded as its next message (only while it still waits for it).
@@ -1250,15 +1277,15 @@ export class Orchestrator {
     if (ignored.length) {
       this.post(conversationId, 'system', `Harbor ignored ${ignored.length} protocol line(s): ${clip(ignored[0]!, 120)}`, { agentId: main.id });
       this.log({ kind: 'protocol', projectId: project.id, conversationId, agentId: main.id, text: `lead: ignored ${ignored.length} protocol line(s): ${clip(ignored[0]!, 200)}` });
-      if (!this.malformedResumed.has(conversationId) && !asking && !signal.aborted && this.autoTurn(conversationId)) {
+      if (!this.malformedResumed.has(conversationId) && !asking && !shotAsked && !signal.aborted && this.autoTurn(conversationId)) {
         this.malformedResumed.add(conversationId);
         resumed = true;
         this.enqueueMain(project.id, { kind: 'notice', text: `Harbor ignored ${ignored.length} protocol line(s) in your last answer, so nothing was done for them: ${ignored.slice(0, 3).map((l) => clip(l, 160)).join(' | ')}\nEvery protocol line must be ONE physical line of valid JSON at column 0 written as HARBOR_<KIND>[${out.nonce ?? 'tag'}]: {...} (use the tag from your instructions). Re-send only the corrected line(s); do not redo finished work.` }, conversationId);
       }
     }
     if (goalMode && !resumed) {
-      const stalled = trigger.kind === 'goal' && (out.toolCalls ?? 0) === 0 && !created.length && !asking && proto.goalDone === undefined;
-      this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking, { stalled, delegated: created.length > 0 });
+      const stalled = trigger.kind === 'goal' && (out.toolCalls ?? 0) === 0 && !created.length && !asking && !shotAsked && proto.goalDone === undefined;
+      this.goalStep(project.id, conversationId, proto.goalDone?.summary, !!asking || shotAsked, { stalled, delegated: created.length > 0 });
     }
   }
 
@@ -1958,7 +1985,7 @@ export class Orchestrator {
   }
 
   /** One CLI run for a helper (initial or follow-up), streaming into its conversation. */
-  private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean }): Promise<RoutedRun> {
+  private async execute(a: AgentRecord, prompt: string, o: { cwd: string; resume: boolean; shots?: string[] }): Promise<RoutedRun> {
     const ctl = this.controllers.get(a.id) ?? new AbortController();
     // Auto mode lifts prompts and the sandbox for edit helpers only; reviewers and read-only helpers stay read-only.
     // Plan mode wins over everything: every helper that starts (or resumes) in it is read-only.
@@ -1977,7 +2004,8 @@ export class Orchestrator {
       permission, cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true,
       contextIfNoResume: o.resume ? () => this.helperContext(a) : undefined,
-      nonce: newProtocolNonce(), ...(writableDirs.length ? { writableDirs } : {}), ...(allowed.length ? { allowedCommands: allowed } : {})
+      nonce: newProtocolNonce(), ...(writableDirs.length ? { writableDirs } : {}), ...(allowed.length ? { allowedCommands: allowed } : {}),
+      ...(o.shots?.length ? { shots: o.shots } : {})
     });
   }
 
@@ -2080,6 +2108,14 @@ export class Orchestrator {
     const blocked = res.ok && proto.help.some((h) => h.blocked);
     const asking = res.ok && !stopped && proto.ask[0];
     const askRoute = asking ? routeAsk(asking, { leadAsks: a.leadAsks ?? 0, leadAvailable: !this.stoppedSessions.has(a.parentConversationId) }) : undefined;
+    // A screenshot request makes the helper wait like a question: the user's answer (the image or a refusal) is its next message.
+    const shot = res.ok && !stopped && !asking && !blocked ? proto.screenshot[0] : undefined;
+    if (proto.screenshot.length && !shot && res.ok && !stopped) this.post(this.convFor(a), 'system', 'Harbor ignored this helper\'s screenshot request because it also asked a question or requested help; it can ask again afterwards.', { agentId: a.id });
+    if (res.ok && proto.showImage.length) {
+      const project = this.project(a.projectId);
+      const cwd = a.worktree && existsSync(a.worktree) ? await this.cwdIn(project, a.worktree) : project.path;
+      this.showImages(a, this.convFor(a), proto.showImage, cwd, [project.path, ...(a.worktree ? [a.worktree] : [])]);
+    }
     const summary = own?.summary || firstLine(report);
     if (stopped) {
       const where = `Its work so far is committed${a.branch ? ` on ${a.branch}` : ''}${a.headCommit ? ` at ${a.headCommit.slice(0, 10)}` : ''}.`;
@@ -2089,6 +2125,7 @@ export class Orchestrator {
     }
     else if (!res.ok) this.setState(a, 'failed', { report, error: res.error ?? 'failed', summary: undefined });
     else if (asking) this.setState(a, 'waiting', { report, summary, error: askRoute?.to === 'lead' ? "Waiting for the lead's answer." : 'Waiting for your answer.' });
+    else if (shot) this.setState(a, 'waiting', { report, summary, error: 'Waiting for your answer to its screenshot request.' });
     else if (blocked) this.setState(a, 'waiting', { report, summary, error: 'Blocked: waiting for another helper requested through the lead.' });
     else this.setState(a, 'done', { report, summary, error: undefined });
 
@@ -2109,9 +2146,11 @@ export class Orchestrator {
       }
     }
     for (const h of proto.help) this.helpRequested(a, h);
+    if (shot) this.requestScreenshot(a, this.convFor(a), a.parentConversationId, shot);
 
-    // Direct prompts that arrived while running are delivered now, resuming this agent's session.
-    const queued = this.followups.get(a.id)?.splice(0) ?? [];
+    // Direct prompts that arrived while running are delivered now, resuming this agent's session. While a screenshot request is
+    // open they stay queued: the answer resumes the helper, and that run's end delivers them.
+    const queued = shot ? [] : this.followups.get(a.id)?.splice(0) ?? [];
     if (queued.length && !stopped) { this.followUp(a, queued.join('\n\n')); return; }
     if (a.state !== 'waiting') this.finished(a);
     else this.pump(a.projectId);
@@ -2823,8 +2862,8 @@ export class Orchestrator {
   }
 
   /** Continue a helper's own session with a new message. */
-  private followUp(a: AgentRecord, text: string): void {
-    if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(text); this.followups.set(a.id, q); return; }
+  private followUp(a: AgentRecord, text: string, shots?: string[]): void {
+    if (this.running.has(a.id)) { const q = this.followups.get(a.id) ?? []; q.push(shots?.length ? `${text}\n(Screenshot file: ${shots.join(', ')})` : text); this.followups.set(a.id, q); return; }
     this.askTokens.delete(a.id); // whatever it waited for is answered now: no safe default later
     this.begin(a.id);
     // An integrator has no CLI session: any message (or resume) runs the integration again, which is idempotent.
@@ -2852,8 +2891,9 @@ export class Orchestrator {
         if (!r.ok) { this.running.delete(a.id); this.controllers.delete(a.id); this.post(this.convFor(a), 'system', 'Another agent owns the files this agent needs; try again when it finishes.', { agentId: a.id }); return; }
       }
       this.setState(a, 'working', { error: undefined, stopKind: undefined });
-      const res = await this.execute(a, text, { cwd, resume: true });
-      if (this.holdRun(a, res, text)) return;
+      const res = await this.execute(a, text, { cwd, resume: true, ...(shots?.length ? { shots } : {}) });
+      // Held for quota: the follow-up is delivered later as text, so a screenshot is named by its file path there.
+      if (this.holdRun(a, res, shots?.length ? `${text}\n(Screenshot file: ${shots.join(', ')})` : text)) return;
       await this.afterRun(a, res);
     })().catch((e) => this.failAgent(a, `Internal error: ${String(e?.message ?? e)}`));
   }
@@ -2911,6 +2951,87 @@ export class Orchestrator {
     if (!answer.trim()) throw new Error('Choose an option or type an answer.');
     this.questions.delete(requestId);
     await this.userMessage(q.conversationId, answer.trim());
+  }
+
+  // ------------------------------------------------------------ screenshots and images (plan section 4)
+
+  /** Whether a CLI can be handed image files (`features.images`); a CLI Harbor knows nothing about cannot. */
+  private seesImages(cli: CliId): boolean {
+    const r = this.d.getClis().find((c) => c.id === cli);
+    return (r?.features ?? CLI_DEFINITIONS.find((x) => x.id === cli)?.features)?.images === true;
+  }
+
+  /** HARBOR_SHOW_IMAGE: images the agent wants the user to see, checked (inside `roots`, a real image) and copied into the conversation. */
+  private showImages(a: AgentRecord, conversationId: Id, paths: string[], cwd: string, roots: string[]): void {
+    const who = a.role === 'main' ? 'the lead' : `"${a.title}"`;
+    for (const raw of paths) {
+      const r = resolveShownImage(raw, cwd, roots, (p) => readFileSync(p));
+      if ('error' in r || !this.d.attachImage) {
+        const why = 'error' in r ? r.error : 'images cannot be shown here';
+        this.post(conversationId, 'system', `Harbor did not show an image from ${who}: ${why} (${clip(raw, 120)}).`, { agentId: a.id });
+        // The journal gets the reason only: the path is the agent's text and may name anything on the machine.
+        this.log({ kind: 'protocol', projectId: a.projectId, conversationId: a.role === 'main' ? conversationId : a.parentConversationId, agentId: a.id, text: `${a.role === 'main' ? 'lead' : `${a.role} "${a.title}"`}: image not shown: ${why}` });
+        continue;
+      }
+      try {
+        const att = this.d.attachImage(conversationId, r);
+        this.post(conversationId, 'assistant', `Image from ${who}: ${att.name}`, { agentId: a.id, attachments: [att] });
+      } catch (e) {
+        this.post(conversationId, 'system', `Harbor could not copy an image from ${who}: ${String((e as Error).message ?? e)}`, { agentId: a.id });
+      }
+    }
+  }
+
+  /**
+   * An agent's HARBOR_SCREENSHOT line: the user is asked in a card with a live preview (screenshots.ts), and the answer (the image,
+   * or why there is none) resumes the agent. `conversationId` is where it shows; `sessionId` is the lead conversation it belongs to.
+   */
+  private requestScreenshot(a: AgentRecord, conversationId: Id, sessionId: Id, line: ScreenshotLine): void {
+    const who = a.role === 'main' ? 'The lead agent' : `"${a.title}"`;
+    const target = line.target === 'screen' ? 'a screen' : line.title ? `the window "${clip(line.title, 80)}"` : 'a window';
+    this.post(conversationId, 'system', `${who} asks for a screenshot of ${target}: ${line.why}`, { agentId: a.id });
+    if (a.role !== 'main' && conversationId !== sessionId) this.post(sessionId, 'system', `"${a.title}" asks for a screenshot of ${target}.`, { agentId: a.id });
+    const broker = this.d.screenshots;
+    if (!broker?.available) { this.shotAnswered(a.id, conversationId, { kind: 'denied', why: 'unavailable', detail: 'screen capture is not available in this Harbor (it needs the desktop app)' }); return; }
+    // Like a question: the session shows that it waits for the user (the lead's turn ends now; the answer starts the next one).
+    if (a.role === 'main') this.sessionState(conversationId, 'waiting', 'Waiting for your answer to a screenshot request.');
+    const project = this.d.store.getProject(a.projectId);
+    void broker.request({ agentId: a.id, agentRole: a.role, agentTitle: a.title, projectId: a.projectId, projectName: project?.name ?? '', conversationId, sessionId, line })
+      .then((o) => this.shotAnswered(a.id, conversationId, o))
+      .catch((e) => this.shotAnswered(a.id, conversationId, { kind: 'denied', why: 'failed', detail: String((e as Error)?.message ?? e) }));
+  }
+
+  /** The answer to a screenshot request: shown in the chat (with the image), journaled by the broker, and handed to the agent. */
+  private shotAnswered(agentId: Id, conversationId: Id, o: ShotOutcome): void {
+    const a = this.d.store.getAgent(agentId);
+    if (!a) return;
+    const who = a.role === 'main' ? 'the lead' : `"${a.title}"`;
+    const session = a.role === 'main' ? conversationId : a.parentConversationId;
+    if (o.kind === 'captured') {
+      const what = `${o.source.kind} "${clip(o.source.name, 80)}"`;
+      this.post(conversationId, 'system', `Screenshot of the ${what} captured for ${who}${o.how === 'conversation' ? ' (you allowed this window for this conversation)' : ''}. It goes to the agent with its next turn.`, { agentId: a.id, attachments: [o.attachment] });
+      if (a.role !== 'main' && conversationId !== session) this.post(session, 'system', `Screenshot captured for "${a.title}" (shown in its conversation).`, { agentId: a.id });
+    } else if (o.why !== 'cancelled') {
+      const minutes = Math.max(1, Math.round((this.d.screenshots?.timeoutMs ?? 0) / 60_000));
+      this.post(conversationId, 'system', o.why === 'user' ? `You declined the screenshot request from ${who}. Nothing was captured.`
+        : o.why === 'timeout' ? `No answer to the screenshot request from ${who} within ${minutes} minute${minutes === 1 ? '' : 's'}: declined, nothing was captured.`
+          : `No screenshot for ${who}: ${o.detail}.`, { agentId: a.id });
+    }
+    // Stopped (the agent, its conversation, or Harbor): nothing is resumed.
+    if (o.kind === 'denied' && o.why === 'cancelled') return;
+    if (this.shuttingDown || this.stoppedSessions.has(session)) return;
+    const idleLead = () => { if (a.role === 'main' && !this.leads.has(conversationId) && this.d.store.getConversation(conversationId)?.activity?.state === 'waiting') this.sessionState(conversationId, 'done', 'The lead has finished its turn.'); };
+    const text = screenshotAnswerText(o);
+    const shots = o.kind === 'captured' && o.attachment.path ? [o.attachment.path] : undefined;
+    // A lead whose request could not even be asked learns it on its next turn; waking it would only spend quota.
+    if (a.role === 'main' && o.kind === 'denied' && o.why === 'unavailable') { this.addNote(conversationId, text); idleLead(); return; }
+    if (a.role === 'main') {
+      if (!this.autoTurn(conversationId)) { this.addNote(conversationId, `${text}${shots ? ` File: ${shots[0]}` : ''}`); idleLead(); return; }
+      this.enqueueMain(a.projectId, { kind: 'screenshot', text, ...(shots ? { shots } : {}) }, conversationId);
+      return;
+    }
+    if (a.state !== 'waiting') return;
+    this.followUp(a, `Screenshot request: ${text}`, shots);
   }
 
   // ------------------------------------------------------------ tool permissions
@@ -3173,6 +3294,12 @@ export class Orchestrator {
         if (ctx) prompt = `${ctx}\n\n${prompt}`;
       }
       if (partialNote) prompt = `${partialNote}\n\n${prompt}`;
+      // Screenshots depend on the CLI just chosen: handed over as images when it can see them, otherwise named with a note.
+      let images = o.images;
+      if (o.shots?.length) {
+        if (this.seesImages(decision.cli)) images = [...(images ?? []), ...o.shots];
+        else prompt = `${prompt}\n\n${noVisionNote(o.shots)}`;
+      }
       if (o.nonce) prompt = `${prompt}\n\n${nonceInstruction(o.nonce)}`;
       // Skills depend on the CLI just chosen (native folders, read access, inlining), so they are added per attempt.
       let skills: { system: string; readableDirs: string[] } | undefined;
@@ -3237,7 +3364,7 @@ export class Orchestrator {
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images: o.images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.
@@ -3475,7 +3602,7 @@ export function commandPrefixes(cmds: string[]): string[] {
   return cmds.map((c) => c.trim()).filter((c) => c && !/[;&|<>`$()\r\n]/.test(c));
 }
 
-const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY)\s*:/;
+const BARE_PROTOCOL_LINE = /^\s*HARBOR_(?:REQUEST_HELP|ASK|DELEGATE|IMAGE_BRIEF|RESULT|GOAL_DONE|PEER|DECISION|REPLY|SCREENSHOT|SHOW_IMAGE)\s*:/;
 
 /**
  * Protocol lines Harbor did not act on: lines that were malformed, and (when a tag was required) lines written without it,

@@ -15,7 +15,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listAgents', 'openAgentConversation', 'stopAgent',
   'setAgentPriority', 'pauseAgent', 'resumeAgent', 'resumeAgentSession',
   'integrateBranches', 'applyIntegration', 'getChanges', 'previewRollback', 'rollbackTask',
-  'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'listPendingPermissions', 'answerQuestion',
+  'getUsage', 'getSettings', 'setSettings', 'answerPermission', 'previewScreenshot', 'answerScreenshot', 'listPendingPermissions', 'answerQuestion',
   'listToolRules', 'removeToolRule', 'exportDiagnostics'
 ];
 

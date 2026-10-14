@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
+import type { Attachment, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -30,8 +30,12 @@ import { projectPathRefusal } from './projectPath';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import { FreeResetCoordinator, UsageLedger, type LedgerOptions } from './usage';
+import { attachmentDir, attachmentUrl, copyShownImage, savePng, urlForStoredPath } from './images';
+import { ScreenshotBroker, type Capturer } from './screenshots';
 
-export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline'> & {
+export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | 'previewScreenshot' | 'answerScreenshot'> & {
+  previewScreenshot(requestId: Id, opts?: { sourceId?: string }): Promise<ScreenshotSource[]>;
+  answerScreenshot(requestId: Id, answer: { allow: boolean; sourceId?: string; forConversation?: boolean }): Promise<void>;
   setConversationDeadline(conversationId: Id, deadline: number | null): Promise<Conversation>;
   openWorkspace(projectId: Id, action: 'terminal' | 'editor' | 'folder', opts?: { agentId?: Id; file?: string }): Promise<void>;
   exportDiagnostics(): Promise<string>;
@@ -109,6 +113,12 @@ export interface ServiceOptions {
   fetch?: FetchLike;
   /** Folder or .zip picker for browseSkillSource(); injected so this module never imports electron. */
   pickSkillSource?: (kind: 'folder' | 'zip') => Promise<string | undefined>;
+  /** Window and screen capture for HARBOR_SCREENSHOT (index.ts wraps Electron's desktopCapturer; tests inject a fake). Absent = refused. */
+  capturer?: Capturer;
+  /** Whether Harbor's window is visible: a window allowed for a conversation is never captured while Harbor is in the background. */
+  foreground?: () => boolean;
+  /** How long a screenshot request waits for the user (tests); default 5 minutes (screenshots.ts). */
+  screenshotTimeoutMs?: number;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -116,7 +126,6 @@ const HARBOR_JOURNAL = '__harbor__';
 const CONVERSATION_MODES: ConversationMode[] = ['default', 'auto', 'plan', 'goal'];
 // A Map, not an object: a mime such as "constructor" or "__proto__" must never match an inherited property.
 const IMAGE_EXT = new Map<string, string>([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'], ['image/webp', 'webp']]);
-const CONVERSATION_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Canonical base64 only: right alphabet and padding, and decoding then re-encoding gives the input back (no stray bits). */
 export function decodeStrictBase64(s: string): Buffer | undefined {
@@ -125,15 +134,8 @@ export function decodeStrictBase64(s: string): Buffer | undefined {
   return data.toString('base64') === s ? data : undefined;
 }
 
-/** `<data>/attachments/<conversationId>`; refuses ids that are not plain tokens and paths that would leave the attachments folder. */
-export function attachmentDir(dataRoot: string, conversationId: string): string {
-  if (typeof conversationId !== 'string' || !CONVERSATION_ID.test(conversationId)) throw new Error('Invalid conversation id.');
-  const root = resolve(dataRoot, 'attachments');
-  const dir = resolve(root, conversationId);
-  const rel = relative(root, dir);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('Invalid conversation id.');
-  return dir;
-}
+// `<data>/attachments/<conversationId>` with its traversal guard lives in images.ts (the harbor-file protocol uses it too).
+export { attachmentDir };
 export const MAX_ATTACHMENTS = 6;
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
@@ -156,7 +158,7 @@ export function saveAttachments(dir: string, input: { name: string; mime: string
   return decoded.map((d) => {
     const path = join(dir, `${newId()}.${d.ext}`);
     writeFileSync(path, d.data);
-    return { name: d.name, mime: d.mime, path };
+    return { name: d.name, mime: d.mime, path, url: attachmentUrl(dir, path), origin: 'user' };
   });
 }
 
@@ -312,8 +314,18 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   const skillAccess = (cli: CliId): SkillAccess => (cli === 'claude' ? 'readDirs' : cli === 'codex' ? 'readable' : customOf(cli)?.run.readDir ? 'readDirs' : 'inline');
   const nativeSkills = (cli: CliId): boolean => (clis.find((c) => c.id === cli)?.features ?? CLI_DEFINITIONS.find((d) => d.id === cli)?.features)?.nativeSkills === true;
   const projectRef = (id: Id | undefined) => { if (id === undefined || id === null) return undefined; const p = needProject(id); return { id: p.id, path: p.path }; };
+  // ---- screenshots and shown images (plan section 4): both land in the conversation's attachments folder, never anywhere else.
+  const screenshots = new ScreenshotBroker({
+    capturer: opts.capturer,
+    save: (conversationId, png, name) => savePng(attachmentDir(dataRoot, conversationId), png, name, 'screenshot'),
+    emit: (e) => bus.emit(e),
+    // One line per request and per capture; never image bytes, never the window title.
+    journal: (e) => journal.add({ kind: 'screenshot', ...e }),
+    foreground: opts.foreground, setTimer: opts.setTimer, timeoutMs: opts.screenshotTimeoutMs
+  });
   const orchestrator = new Orchestrator({
-    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal,
+    store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots,
+    attachImage: (conversationId, image) => copyShownImage(attachmentDir(dataRoot, conversationId), image),
     getClis: () => clis,
     adapterFor,
     enabled: (c) => store.getSettings().cliOverrides[c]?.enabled !== false,
@@ -371,6 +383,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
   const ready = refresh(0, true).then(() => orchestrator.recover(), () => orchestrator.recover());
 
+  /** Attachments stored before harbor-file URLs existed get theirs on the way out (only files under the attachments folder). */
+  const withImageUrls = (m: Message): Message => {
+    if (!m.attachments?.some((a) => !a.url && a.path)) return m;
+    return { ...m, attachments: m.attachments.map((a) => { if (a.url) return a; const url = urlForStoredPath(dataRoot, a.path); return url ? { ...a, url } : a; }) };
+  };
   const needProject = (id: Id): Project => {
     const p = store.getProject(id);
     if (!p) throw new Error(`Unknown project ${id}`);
@@ -582,7 +599,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async newConversation(projectId) { needProject(projectId); return orchestrator.newConversation(projectId); },
     async listMessages(conversationId, opts) {
       if (opts !== undefined && (typeof opts !== 'object' || opts === null || (opts.limit !== undefined && (typeof opts.limit !== 'number' || !Number.isFinite(opts.limit))))) throw new Error('Invalid paging options.');
-      return store.listMessages(conversationId, opts);
+      return store.listMessages(conversationId, opts).map(withImageUrls);
     },
     async deleteConversation(id) {
       const c = store.getConversation(id);
@@ -674,6 +691,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return next;
     },
     async answerPermission(requestId, allow, o) {
+      // A screenshot is never allowed by a bare yes: the user must pick (and see) what is captured, through answerScreenshot.
+      if (screenshots.has(requestId)) {
+        if (allow === true) throw new Error('Choose the window or screen to capture in the screenshot card (answerScreenshot).');
+        await screenshots.answer(requestId, { allow: false });
+        return;
+      }
       // Tool requests live in the orchestrator (they time out and end with their run); the rest are plain yes/no asks.
       if (orchestrator.answerToolPermission(requestId, allow === true, o?.always === true)) return;
       const r = pending.get(requestId);
@@ -696,7 +719,16 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
           ...(store.lastFlushError ? [`Saving state is failing: ${store.lastFlushError.message} (since ${new Date(store.lastFlushError.time).toISOString()})`] : [])]
       });
     },
-    async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...[...pending.values()].map((p) => p.event)]; },
+    async previewScreenshot(requestId, o) {
+      const sourceId = o && typeof o === 'object' ? o.sourceId : undefined;
+      return screenshots.preview(requestId, sourceId);
+    },
+    async answerScreenshot(requestId, answer) {
+      if (!answer || typeof answer !== 'object' || typeof answer.allow !== 'boolean') throw new Error('Answer with allow true or false.');
+      if (answer.sourceId !== undefined && typeof answer.sourceId !== 'string') throw new Error('Choose a window or screen from the preview.');
+      await screenshots.answer(requestId, { allow: answer.allow, ...(answer.sourceId !== undefined ? { sourceId: answer.sourceId } : {}), forConversation: answer.forConversation === true });
+    },
+    async listPendingPermissions() { return [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)]; },
     async answerQuestion(requestId, answer) { await ready; await orchestrator.answerQuestion(requestId, answer); },
     async listToolRules(projectId) { return store.listToolRules(needProject(projectId).id); },
     async removeToolRule(projectId, ruleId) {
