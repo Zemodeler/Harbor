@@ -201,6 +201,13 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       if (image) p.image = image; else delete p.image;
       return copy(p);
     },
+    async renameProject(projectId, name) {
+      const p = data.projects.find(x => x.id === projectId);
+      if (!p) throw new Error('Unknown project');
+      if (!name.trim()) throw new Error('A project name needs 1 to 120 characters.');
+      p.name = name.trim();
+      return copy(p);
+    },
     async removeProject(projectId) {
       data.agents.filter(a => a.projectId === projectId).forEach(a => { const run = runs.get(a.id); if (run) run.cancelled = true; });
       const convIds = new Set(data.conversations.filter(c => c.projectId === projectId).map(c => c.id));

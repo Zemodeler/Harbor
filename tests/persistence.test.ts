@@ -38,3 +38,17 @@ describe('restart persistence', () => {
     } finally { rmSync(proj, { recursive: true, force: true }); }
   });
 });
+
+describe('renameProject', () => {
+  it('trims, persists the new name and rejects empty or oversized names', async () => {
+    const proj = mkdtempSync(join(tmpdir(), 'harbor-rename-'));
+    try {
+      const svc = createHarborService({ discover: async () => [] });
+      const p = (await svc.addProject(proj))!;
+      expect((await svc.renameProject!(p.id, '  Crawler  ')).name).toBe('Crawler');
+      expect((await svc.listProjects()).find((x) => x.id === p.id)?.name).toBe('Crawler');
+      await expect(svc.renameProject!(p.id, '   ')).rejects.toThrow();
+      await expect(svc.renameProject!(p.id, 'x'.repeat(121))).rejects.toThrow();
+    } finally { rmSync(proj, { recursive: true, force: true }); }
+  });
+});

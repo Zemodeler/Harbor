@@ -207,6 +207,7 @@ export interface HarborApi {
  listToolRules(projectId: Id): Promise<ToolRule[]>; removeToolRule(projectId: Id, ruleId: Id): Promise<ToolRule[]>;   // "always allow for this project" rules; remove returns the remaining rules
  listPendingPermissions(): Promise<PendingPermission[]>;   // permission requests still waiting for an answer (a reloaded renderer misses the events); same fields as the `permission` event
  answerQuestion(requestId: Id, answer: string): Promise<void>;   // delivered into the asking agent's conversation as the user's message
+ renameProject?(id: Id, name: string): Promise<Project>;   // trims; 1-120 characters; the folder on disk is untouched. CHANGELOG 0.1.44
  listProjectNotes?(projectId: Id): Promise<ProjectNote[]>; removeProjectNote?(projectId: Id, noteId: Id): Promise<ProjectNote[]>;   // project knowledge notes, oldest first; remove returns the remaining notes (unknown note id = no-op; both reject an unknown project). CHANGELOG 0.1.40
  exportDiagnostics?(): Promise<string>;   // redacted plain-text support bundle (versions, CLI states, counts, journal and log tails); contains no message text, prompts or credentials
  previewBundleExport?(projectId: Id, selection: BundleSelection): Promise<BundleExportPreview>;   // builds the bundle in memory (paths rewritten, secret scan run) and lists exactly what goes in; writes nothing (CHANGELOG 0.1.35)

@@ -90,7 +90,8 @@ export default function App() {
   const visiblePanel = panel || (layout === 'command' && wide && !activityHidden && state.conversation ? 'activity' : undefined);
   const showBoard = layout === 'mission' && !missionFull;
   const showViewer = docs.tabs.length > 0 && !docs.hidden;
-  const viewerModal = showViewer && (!wide || view !== 'conversation') && !dialog && !renaming && !menu;
+  // In the Mission Board layout the board fills the grid, so a docked viewer would land in a stray row: use the modal there.
+  const viewerModal = showViewer && (!wide || view !== 'conversation' || showBoard) && !dialog && !renaming && !menu;
   function changeAppearance(patch: Partial<Appearance>) {
     if (patch.layout && patch.layout !== layout) {
       setMissionFull(false); setPanel(undefined); setActivityHidden(false);
@@ -191,7 +192,7 @@ export default function App() {
             {showBoard ? <div className={s.selectedTaskHeading}><small>Selected conversation</small><strong>{state.conversation?.title || 'Choose a conversation'}</strong></div> : null}
             <Conversation state={state} openProject={openProject} workspace={workspace} review={() => setPanel('review')} dock={layout === 'focus' ? <AgentDock state={state} expand={toggleActivity}/> : undefined} showCrew={layout !== 'focus' && !(layout === 'command' && wide && visiblePanel === 'activity')}/>
           </div>
-          {showViewer && wide && view === 'conversation' ? <aside className={dc.viewerPane} aria-label="Documents"><DocumentViewer docs={docs} api={state.api} projectId={state.projectId} agentTitle={id => state.agents.find(a => a.id === id)?.title} close={docs.hide}/></aside> : null}
+          {showViewer && wide && view === 'conversation' && !showBoard ? <aside className={dc.viewerPane} aria-label="Documents"><DocumentViewer docs={docs} api={state.api} projectId={state.projectId} agentTitle={id => state.agents.find(a => a.id === id)?.title} close={docs.hide}/></aside> : null}
           {visiblePanel && wide ? <aside className={`${s.infoPanel} ${visiblePanel === 'review' ? s.reviewPanel : ''}`} aria-label={visiblePanel === 'activity' ? 'Session information' : 'Change review'}>{visiblePanel === 'activity' ? layout === 'command' ? <LiveActivity state={state} close={closePanel} review={() => setPanel('review')}/> : <SessionPanel state={state} close={closePanel}/> : <ReviewPanel state={state} close={closePanel}/>}</aside> : null}
         </div>
       </>}

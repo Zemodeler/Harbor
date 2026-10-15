@@ -10,6 +10,9 @@ const CODE_PATH = new RegExp(`^(?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/]|[\\\\/])?(?:[
 /** A path inside prose: needs at least one separator, and is not part of a URL or a longer word. */
 export const TEXT_PATH = new RegExp(`(?<![\\w/\\\\.:@-])((?:[A-Za-z]:[\\\\/]|\\.{1,2}[\\\\/])?(?:[\\w.@-]+[\\\\/])+[\\w@.-]*\\w\\.(?:${EXT})${LINE})(?![\\w/\\\\-])`, 'gi');
 
+/** `src/a.ts:65:3` names a place in the file: the viewer opens the file itself. */
+export const withoutLine = (path: string): string => path.replace(/:\d+(?::\d+)?$/, '');
+
 export function isPathLike(code: string): boolean {
   const t = code.trim();
   return t.length > 2 && t.length <= 400 && !/^[a-z][a-z0-9+.-]*:\/\//i.test(t) && CODE_PATH.test(t);

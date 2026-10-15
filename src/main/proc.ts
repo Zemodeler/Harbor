@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 export interface RunResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string; /** Output exceeded the cap; the middle was dropped (head and tail kept). */ truncated?: boolean }
 
@@ -42,6 +43,15 @@ const procName = (exe: string): string =>
   isShellScript(exe) ? 'cmd' : (exe.split(/[\\/]/).pop() ?? exe).replace(/\.[a-z0-9]+$/i, '').toLowerCase();
 
 /** Spawn a CLI, handling Windows .cmd shims (which Node refuses to spawn without a shell). */
+/**
+ * Node reports a missing working folder as `spawn <exe> ENOENT`, which looks like a missing CLI and made Harbor try every other
+ * CLI (all failing the same way). Say what is really missing, in words that do not read as a spawn failure.
+ */
+export function spawnErrorMessage(e: { message: string; code?: string }, exe: string, cwd?: string): string {
+  if (e.code === 'ENOENT' && cwd && !existsSync(cwd)) return `The working folder no longer exists: ${cwd}. Re-add the project or restore the folder, then try again.`;
+  return e.message;
+}
+
 export function spawnCli(exe: string, args: string[], opts: SpawnOptions = {}): ChildProcess {
   let child: ChildProcess;
   if (isShellScript(exe)) {
@@ -188,7 +198,7 @@ export const runProcess: Runner = (exe, args, opts = {}) =>
     const timer = opts.timeoutMs ? setTimeout(() => { timedOut = true; killTree(child); }, opts.timeoutMs) : undefined;
     child.stdout?.on('data', (d) => out.push(String(d)));
     child.stderr?.on('data', (d) => err.push(String(d)));
-    child.on('error', (e) => { clearTimeout(timer); done({ code: null, timedOut, error: e.message }); });
+    child.on('error', (e) => { clearTimeout(timer); done({ code: null, timedOut, error: spawnErrorMessage(e, exe, opts.cwd) }); });
     child.on('close', (code) => { clearTimeout(timer); done({ code, timedOut }); });
     child.stdin?.on('error', () => {});
     child.stdin?.end(opts.input ?? '');

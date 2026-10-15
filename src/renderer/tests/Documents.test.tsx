@@ -8,7 +8,7 @@ import { DocumentLinks } from '../documents/DocumentLinks';
 import { DocumentMarkdown } from '../documents/DocumentMarkdown';
 import { DocumentViewer } from '../documents/DocumentViewer';
 import { formatJson, HIGHLIGHT_MAX_CHARS, tokenize } from '../documents/highlight';
-import { isPathLike, resolveRelative, splitPaths } from '../documents/paths';
+import { isPathLike, resolveRelative, splitPaths, withoutLine } from '../documents/paths';
 import { useDocuments } from '../hooks/useDocuments';
 import { createMockApi } from '../mock/mockApi';
 import type { DocumentResult, HarborEvent } from '../../shared/api';
@@ -59,6 +59,7 @@ describe('file paths in text', () => {
   it('recognises file names in code spans and paths with a folder in prose, not URLs or dotted words', () => {
     for (const p of ['src/main/index.ts', 'README.md', 'C:\\Projects\\a\\notes.txt', './docs/plan.md', 'src/a.ts:42', 'data/orders.csv']) expect(isPathLike(p), p).toBe(true);
     for (const p of ['state.api', 'e.g.', 'npm test', 'https://example.com/a.md', 'v1.2', 'foo']) expect(isPathLike(p), p).toBe(false);
+    expect(['src/a.ts:42', 'src/a.ts:42:7', 'C:/x/y.json:3', 'src/a.ts', 'C:/x/y.json'].map(withoutLine)).toEqual(['src/a.ts', 'src/a.ts', 'C:/x/y.json', 'src/a.ts', 'C:/x/y.json']);
     expect(splitPaths('Edited src/main/index.ts and docs/plan.md:3, see https://x.com/a/b.md or e.g. this.')).toEqual(['Edited ', 'src/main/index.ts', ' and ', 'docs/plan.md:3', ', see https://x.com/a/b.md or e.g. this.']);
   });
   it('resolves links relative to the document; web links, anchors and site-root paths are not files', () => {

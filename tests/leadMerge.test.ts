@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { claudeArgs } from '../src/main/adapters/claude';
+import { claudeArgs, NO_ATTRIBUTION_SETTINGS } from '../src/main/adapters/claude';
 import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
@@ -77,12 +77,22 @@ it('asks the adapter to deny git writes on lead runs only', async () => {
   expect(seen.every((o) => o.denyGitWrites === true)).toBe(true);
 });
 
-it('claude denies git merge/rebase/cherry-pick/reset/push only when asked', () => {
+it('claude denies git merge/rebase/cherry-pick/reset only when asked, and never plain push', () => {
   const base: RunOptions = { cwd: '.', model: 'sonnet', effort: 'medium', permission: 'edit' };
   const on = claudeArgs({ ...base, denyGitWrites: true }).join('|');
-  for (const c of ['merge', 'rebase', 'cherry-pick', 'reset', 'push']) expect(on).toContain(`Bash(git ${c} *)`);
+  for (const c of ['merge', 'rebase', 'cherry-pick', 'reset']) expect(on).toContain(`Bash(git ${c} *)`);
+  expect(on).not.toContain('Bash(git push *)');
+  expect(on).toContain('Bash(git push --force *)');
   expect(on).toMatch(/--disallowedTools\|Task\|Agent\|Bash\(git merge \*\)/);
   expect(claudeArgs(base).join('|')).not.toContain('Bash(git merge');
+});
+
+it('claude gets a settings file that switches off the Co-Authored-By trailer', () => {
+  const base: RunOptions = { cwd: '.', model: 'sonnet', effort: 'medium', permission: 'edit' };
+  const a = claudeArgs(base, undefined, undefined, 'settings.json');
+  expect(a.slice(a.indexOf('--settings'), a.indexOf('--settings') + 2)).toEqual(['--settings', 'settings.json']);
+  expect(JSON.parse(NO_ATTRIBUTION_SETTINGS)).toEqual({ includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
+  expect(claudeArgs(base)).not.toContain('--settings');
 });
 
 it('tells the lead to delegate an integrator instead of merging', () => {

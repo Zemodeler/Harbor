@@ -8,7 +8,7 @@ import { entryScore, highlight, matchScore, parseQuery, pushRecent, rankEntries,
 import { appearanceModes, contrastTokens, parseAppearance, resolveTheme, themeTokens } from '../appearance';
 import { normalizeTag, parseMeta, parseTags, tagCounts } from '../conversationMeta';
 import { applySlash, builtinCommands, fillTemplate, matchSlash, slashCommands, slashQuery, slug } from '../slashCommands';
-import { classifyFile, quoteTextFile, textFileProblem } from '../attachments';
+import { classifyFile, notebookToText, quoteTextFile, textFileProblem } from '../attachments';
 import { activityToast, addToast, MAX_TOASTS, questionToast } from '../toasts';
 import { cliReadiness, onboardingKey, readinessSummary, shouldOfferOnboarding } from '../onboarding';
 import { resetNotificationPrefs } from '../notificationPrefs';
@@ -221,13 +221,25 @@ describe('Navigation flows', () => {
     expect(screen.queryByRole('listbox', { name: 'Slash commands' })).not.toBeInTheDocument();
     expect(box).toHaveValue('/rev');
   });
-  it('quotes text and log files into the draft and explains refused PDFs', async () => {
+  it('attaches any file as a real attachment, chips included, and refuses credentials', async () => {
     await ready();
-    const picker = screen.getByLabelText('Choose text files');
-    fireEvent.change(picker, { target: { files: [new File(['ERROR at line 4\n'], 'app.log', { type: 'text/plain' }), new File(['%PDF-1.7'], 'spec.pdf', { type: 'application/pdf' })] } });
-    await waitFor(() => expect((screen.getByLabelText('Message Harbor') as HTMLTextAreaElement).value).toContain('Attached file: app.log'));
-    expect((screen.getByLabelText('Message Harbor') as HTMLTextAreaElement).value).toContain('ERROR at line 4');
-    expect(screen.getByRole('alert')).toHaveTextContent('PDFs cannot be attached yet');
+    const sent: { name: string; mime: string }[][] = [];
+    window.harbor.send = async (_id: string, _t: string, a?: { name: string; mime: string }[]) => { sent.push(a ?? []); };
+    const picker = screen.getByLabelText('Choose files');
+    fireEvent.change(picker, { target: { files: [new File(['{"cells":[]}'], 'analysis.ipynb'), new File(['%PDF-1.7'], 'spec.pdf', { type: 'application/pdf' }), new File(['K=1'], '.env')] } });
+    expect(await screen.findByText('analysis.ipynb')).toBeInTheDocument();
+    expect(screen.getByText('spec.pdf')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('credential');
+    await userEvent.click(screen.getByRole('button', { name: /^Send/ }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]!.map(a => a.name)).toEqual(['analysis.ipynb', 'spec.pdf']);
+    expect(sent[0]![1]!.mime).toBe('application/pdf');
+  });
+  it('takes files dropped anywhere in the window', async () => {
+    await ready();
+    const file = new File(['x=1'], 'notes.py');
+    fireEvent.drop(document.body, { dataTransfer: { files: [file], types: ['Files'] } });
+    expect(await screen.findByText('notes.py')).toBeInTheDocument();
   });
   it('shows a finished toast for another conversation and opens it', async () => {
     const api = window.harbor, listeners: Array<(e: HarborEvent) => void> = [], subscribe = api.onEvent;
@@ -262,5 +274,20 @@ describe('Navigation flows', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(localStorage.getItem(onboardingKey)).toBe('done');
     expect(sent).toEqual([]);
+  });
+});
+
+describe('any-file attachments', () => {
+  it('treats unknown extensions as text and keeps known binaries out', () => {
+    expect(classifyFile({ name: 'model.ipynb', type: '' })).toBe('text');
+    expect(classifyFile({ name: 'data.weirdext', type: '' })).toBe('text');
+    expect(classifyFile({ name: 'report.xlsx', type: '' })).toBe('unsupported');
+  });
+  it('quotes a notebook as cells without base64 outputs', () => {
+    const nb = JSON.stringify({ cells: [{ cell_type: 'markdown', source: ['# Hi'] }, { cell_type: 'code', source: ['print(1)'], outputs: [{ data: { 'image/png': 'AAAA', 'text/plain': ['<Fig>'] } }] }] });
+    const text = notebookToText(nb);
+    expect(text).toContain('print(1)');
+    expect(text).toContain('# <Fig>');
+    expect(text).not.toContain('AAAA');
   });
 });

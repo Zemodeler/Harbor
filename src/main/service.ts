@@ -191,27 +191,40 @@ export function decodeStrictBase64(s: string): Buffer | undefined {
 export { attachmentDir };
 export const MAX_ATTACHMENTS = 6;
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+export const MAX_FILES = 10;
+export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
-/** Validate every image first, then write them as `<dir>/<id>.<ext>`. Nothing is written when any one is rejected. */
+/** A file name that is safe to put on disk: no folders, no characters Windows refuses, never a device name. */
+function safeFileName(raw: unknown): string {
+  const name = basename(String(raw ?? '').replace(/[\\]/g, '/')).replace(/[<>:"|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').slice(0, 120);
+  return !name || /^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name) ? `file${name ? `-${name}` : ''}` : name;
+}
+
+/**
+ * Validate every attachment first, then write them under `dir`. Nothing is written when any one is rejected.
+ * PNG, JPEG, GIF and WebP are images (validated, stored as `<id>.<ext>`, shown in the conversation). Anything else is a plain
+ * file, stored as `<id>-<name>` with its own name and extension so the agent can open it with its tools.
+ */
 export function saveAttachments(dir: string, input: { name: string; mime: string; dataBase64: string }[]): Attachment[] {
-  if (input.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${MAX_ATTACHMENTS} images per message.`);
+  if (input.length > MAX_FILES) throw new Error(`Attach at most ${MAX_FILES} files per message.`);
   const decoded = input.map((a) => {
-    const ext = IMAGE_EXT.get(a.mime);
-    const name = basename(String(a.name ?? '')).slice(0, 120) || 'image';
-    if (!ext) throw new Error(`"${name}" is not a supported image type (use PNG, JPEG, GIF or WebP).`);
+    const ext = typeof a.mime === 'string' && IMAGE_EXT.has(a.mime) ? IMAGE_EXT.get(a.mime) : undefined;
+    const name = safeFileName(a.name);
+    const limit = ext ? MAX_ATTACHMENT_BYTES : MAX_FILE_BYTES;
     // Check the encoded length before decoding so an oversized payload is never allocated.
-    if (typeof a.dataBase64 !== 'string' || a.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4) throw new Error(`"${name}" is larger than 10 MB.`);
+    if (typeof a.dataBase64 !== 'string' || a.dataBase64.length > Math.ceil(limit / 3) * 4 + 4) throw new Error(`"${name}" is larger than ${limit / 1024 / 1024} MB.`);
     const data = decodeStrictBase64(a.dataBase64);
-    if (!data) throw new Error(`"${name}" is not valid image data.`);
+    if (!data) throw new Error(`"${name}" is not valid ${ext ? 'image ' : 'file '}data.`);
     if (!data.length) throw new Error(`"${name}" is empty.`);
-    if (data.length > MAX_ATTACHMENT_BYTES) throw new Error(`"${name}" is larger than 10 MB.`);
-    return { name, mime: a.mime, ext, data };
+    if (data.length > limit) throw new Error(`"${name}" is larger than ${limit / 1024 / 1024} MB.`);
+    return { name: name === 'file' && ext ? 'image' : name, mime: ext ? a.mime : 'application/octet-stream', ext, data };
   });
+  if (decoded.filter((d) => d.ext).length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${MAX_ATTACHMENTS} images per message.`);
   if (decoded.length) mkdirSync(dir, { recursive: true });
   return decoded.map((d) => {
-    const path = join(dir, `${newId()}.${d.ext}`);
+    const path = join(dir, d.ext ? `${newId()}.${d.ext}` : `${newId()}-${d.name}`);
     writeFileSync(path, d.data);
-    return { name: d.name, mime: d.mime, path, url: attachmentUrl(dir, path), origin: 'user' };
+    return { name: d.name, mime: d.mime, path, ...(d.ext ? { url: attachmentUrl(dir, path) } : {}), origin: 'user' as const };
   });
 }
 
@@ -314,8 +327,18 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (fileStamp(custom.exe) !== verifiedStamp.get(id)) { staleCheck ??= refresh().catch(() => []).finally(() => { staleCheck = undefined; }); return undefined; }
       return new GenericAdapter(custom);
     }
-    if (id === 'claude') return new ClaudeAdapter(r.path);
-    if (id === 'codex') return new CodexAdapter(r.path);
+    // A self-update (Claude desktop, Codex desktop) can swap the versioned folder after discovery: spawning the remembered path
+    // would fail with ENOENT, so look again right now and refresh the cached status in the background.
+    let path = r.path;
+    if (!isFile(path)) {
+      const def = CLI_DEFINITIONS.find((x) => x.id === id);
+      const now = def && findExecutable(def, discoveryDeps(store.getSettings().cliPaths));
+      staleCheck ??= refresh().catch(() => []).finally(() => { staleCheck = undefined; });
+      if (!now) return undefined;
+      path = now;
+    }
+    if (id === 'claude') return new ClaudeAdapter(path);
+    if (id === 'codex') return new CodexAdapter(path);
     return undefined; // gemini and others: detected, but no headless adapter yet
   };
   // A run that reports a login failure takes the CLI out of routing until the next refresh (discovery sets authState).
@@ -667,6 +690,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const { image: _old, ...rest } = p;
       return store.upsertProject(image === null ? rest : { ...rest, image });
     },
+    async renameProject(id, name) {
+      const p = needProject(id);
+      const next = String(name).trim();
+      if (!next || next.length > 120) throw new Error('A project name needs 1 to 120 characters.');
+      return store.upsertProject({ ...p, name: next });
+    },
     async removeProject(id) {
       for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
       store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.
@@ -775,7 +804,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!store.getConversation(conversationId)) throw new Error('This conversation is no longer available.');
       readOnlyImported(store.getConversation(conversationId));
       const saved = attachments?.length ? saveAttachments(attachmentDir(dataRoot, conversationId), attachments) : [];
-      await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached image(s).', saved, { steer: opts?.steer === true });
+      await orchestrator.userMessage(conversationId, text.trim() ? text : 'See the attached file(s).', saved, { steer: opts?.steer === true });
     },
     async setConversationMode(conversationId, mode, goal) {
       const c = store.getConversation(conversationId);

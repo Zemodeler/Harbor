@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeArgs } from '../src/main/adapters/claude';
 import { codexArgs } from '../src/main/adapters/codex';
@@ -92,9 +92,10 @@ describe('attachments', () => {
   it('validates type, size and count, and writes nothing when one is rejected', () => {
     const dir = join(tmp(), 'att');
     const ok = { name: 'a.png', mime: 'image/png', dataBase64: PNG };
-    expect(() => saveAttachments(dir, [ok, { name: 'x.svg', mime: 'image/svg+xml', dataBase64: PNG }])).toThrow(/supported image/);
+    expect(() => saveAttachments(dir, [ok, { ...ok, dataBase64: '' }])).toThrow(/empty/);
     expect(existsSync(dir)).toBe(false);
     expect(() => saveAttachments(dir, Array(7).fill(ok))).toThrow(/at most 6/);
+    expect(() => saveAttachments(dir, Array(11).fill({ name: 'a.txt', mime: 'text/plain', dataBase64: 'aGk=' }))).toThrow(/at most 10/);
     expect(() => saveAttachments(dir, [{ ...ok, dataBase64: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') }])).toThrow(/10 MB/);
     const [saved] = saveAttachments(dir, [{ ...ok, name: '..\\..\\evil.png' }]);
     expect(saved!.name).toBe('evil.png');
@@ -128,7 +129,7 @@ describe('attachments', () => {
 
   it('rejects a bad attachment through send()', async () => {
     const h = await harness({});
-    await expect(h.svc.send(h.conv.id, 'x', [{ name: 'a.bmp', mime: 'image/bmp', dataBase64: PNG }])).rejects.toThrow(/supported image/);
+    await expect(h.svc.send(h.conv.id, 'x', [{ name: 'a.png', mime: 'image/png', dataBase64: '' }])).rejects.toThrow(/empty/);
     expect(await h.svc.listMessages(h.conv.id)).toHaveLength(0);
   });
 });
@@ -369,6 +370,23 @@ describe('goal loop and helpers', () => {
   });
 });
 
+describe('file attachments', () => {
+  it('stores any file under its own name and never as an image', () => {
+    const dir = join(tmp(), 'att');
+    const [nb, evil, dev] = saveAttachments(dir, [
+      { name: 'analysis.ipynb', mime: '', dataBase64: Buffer.from('{"cells":[]}').toString('base64') },
+      { name: '..\\..\\x/y.xlsx', mime: 'application/zip', dataBase64: 'UEs=' },
+      { name: 'CON', mime: 'text/plain', dataBase64: 'aGk=' },
+    ]);
+    expect(nb!.path).toMatch(/[0-9a-f-]{36}-analysis.ipynb$/i);
+    expect(nb!.mime).toBe('application/octet-stream');
+    expect(readFileSync(nb!.path!, 'utf8')).toBe('{"cells":[]}');
+    expect(evil!.name).toBe('y.xlsx');
+    expect(dirname(evil!.path!)).toBe(dir);
+    expect(dev!.name).not.toMatch(/^con$/i);
+  });
+});
+
 describe('attachment hardening', () => {
   const ok = { name: 'a.png', mime: 'image/png', dataBase64: PNG };
   it('rejects non-canonical base64', () => {
@@ -381,8 +399,11 @@ describe('attachment hardening', () => {
   });
   it('only accepts own-property mime types', () => {
     const dir = join(tmp(), 'att');
+    // Anything that is not an own-property image type is a plain file: never treated as an image.
     for (const mime of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'image/svg+xml']) {
-      expect(() => saveAttachments(dir, [{ ...ok, mime }]), mime).toThrow(/supported image/);
+      const [saved] = saveAttachments(dir, [{ ...ok, mime }]);
+      expect(saved!.mime, mime).toBe('application/octet-stream');
+      expect(saved!.url, mime).toBeUndefined();
     }
   });
   it('validates conversation ids and keeps attachment paths inside <data>/attachments', () => {

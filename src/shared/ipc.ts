@@ -21,7 +21,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listToolRules', 'removeToolRule', 'exportDiagnostics',
   'previewBundleExport', 'exportBundle', 'browseImportFile', 'previewBundle', 'importBundle',
   'listImportSources', 'previewImport', 'importConversation', 'continueImported',
-  'getSpendStatus', 'listProjectNotes', 'removeProjectNote',
+  'getSpendStatus', 'renameProject', 'listProjectNotes', 'removeProjectNote',
   'createRemoteToken', 'listRemoteTokens', 'revokeRemoteToken',
   'getTaskReport', 'rateResult', 'listRatings', 'getRatingSummary', 'replayRouting'
 ];

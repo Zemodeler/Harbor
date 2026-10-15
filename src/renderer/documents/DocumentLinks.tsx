@@ -1,5 +1,5 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { isPathLike, splitPaths } from './paths';
+import { isPathLike, splitPaths, withoutLine } from './paths';
 import d from './Documents.module.css';
 
 /** Opens a file in the document viewer; provided by App. Without a provider, paths stay plain text (tests, other screens). */
@@ -11,7 +11,7 @@ export const LinkAgent = createContext<string | undefined>(undefined);
 function PathButton({ path, children }: { path: string; children: ReactNode }) {
   const opener = useContext(DocumentLinks);
   const agentId = useContext(LinkAgent);
-  return <button type="button" className={d.pathLink} title={`Open ${path} in Harbor's viewer`} onClick={() => opener?.open(path, agentId ? { agentId } : undefined)}>{children}</button>;
+  return <button type="button" className={d.pathLink} title={`Open ${path} in Harbor's viewer`} onClick={() => opener?.open(withoutLine(path), agentId ? { agentId } : undefined)}>{children}</button>;
 }
 
 /** A file name in a list (changed files, the Git panel) that opens in the viewer; plain text when there is no viewer or nothing to open. */

@@ -21,7 +21,9 @@ import { startRemoteServer, type RemoteServer } from './remote/server';
 let win: BrowserWindow | undefined;
 let quitting = false;
 
-const dataDir = join(app.getPath('appData'), 'Harbor');
+// HARBOR_DATA_DIR lets a debugging run use its own state and instance lock instead of the real ones.
+const dataDir = process.env['HARBOR_DATA_DIR'] ? process.env['HARBOR_DATA_DIR'] : join(app.getPath('appData'), 'Harbor');
+if (dataDir !== join(app.getPath('appData'), 'Harbor')) app.setPath('userData', dataDir);
 const logger = createLogger(join(dataDir, 'logs'));
 // A stray error in one run should not take every running agent down with the window: log it and carry on.
 // A burst means state is likely broken, so stop instead of looping.

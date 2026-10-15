@@ -385,7 +385,8 @@ describe('B6 claude helper safety', () => {
     for (const broad of ['Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)']) expect(helper).not.toContain(broad);
     const denies = helper.slice(helper.indexOf('--disallowedTools'));
     for (const rule of ['Bash(git clean *)', 'Bash(git restore *)', 'Bash(git checkout -- *)', 'Bash(git branch -D *)', 'Bash(git update-ref *)', 'Bash(git worktree *)',
-      'Bash(git stash drop *)', 'Bash(git stash clear *)', 'Bash(git config *)', 'Bash(git remote *)', 'Bash(git push *)', 'Bash(git -C *)']) expect(denies, rule).toContain(rule);
+      'Bash(git stash drop *)', 'Bash(git stash clear *)', 'Bash(git config *)', 'Bash(git remote *)', 'Bash(git push --force *)', 'Bash(git push -f *)', 'Bash(git -C *)']) expect(denies, rule).toContain(rule);
+    expect(denies).not.toContain('Bash(git push *)');
     expect(denies).not.toContain('Bash(git merge *)'); // integrator helpers merge inside their worktree
     const lead = claudeArgs({ ...base, denyGitWrites: true });
     expect(lead).toContain('Bash(git *)');
@@ -403,8 +404,8 @@ describe('B6 claude helper safety', () => {
   });
   it('recognises destructive git in a command line', () => {
     for (const c of ['git clean -fdx', 'cd x && git restore .', 'git checkout -- src', 'git checkout .', 'git branch -D harbor/a', 'git -C ../other status', 'git stash drop',
-      'git update-ref -d refs/heads/x', 'git worktree remove x', 'git config user.name x', 'git remote add o u', 'git push origin main', 'git reset --hard HEAD~1']) expect(isGitDestructive('Bash', { command: c }), c).toBe(true);
-    for (const c of ['git status', 'git diff --stat', 'git commit -m "x"', 'git log --oneline', 'git checkout -b feature', 'git branch --show-current', 'npm test']) expect(isGitDestructive('Bash', { command: c }), c).toBe(false);
+      'git update-ref -d refs/heads/x', 'git worktree remove x', 'git config user.name x', 'git remote add o u', 'git push --force origin main', 'git push origin main -f', 'git push origin +main', 'git push origin --delete x', 'git reset --hard HEAD~1']) expect(isGitDestructive('Bash', { command: c }), c).toBe(true);
+    for (const c of ['git status', 'git diff --stat', 'git commit -m "x"', 'git log --oneline', 'git checkout -b feature', 'git branch --show-current', 'npm test', 'git push', 'git push origin main', 'git push -u origin feature', 'git push --follow-tags origin main']) expect(isGitDestructive('Bash', { command: c }), c).toBe(false);
     expect(isGitDestructive('Write', { command: 'git clean' })).toBe(false);
   });
 });
@@ -479,4 +480,17 @@ describe.skipIf(process.platform !== 'win32')('B1 codex through a real .cmd shim
       if (permission === 'edit') expect(r.stdout).toContain(`writable_roots=['${join(d, 'wt dir')}']`);
     }
   }, 60000);
+});
+
+import { spawnErrorMessage as _spawnErrorMessage } from '../src/main/proc';
+describe('spawnErrorMessage', () => {
+  it('names a missing working folder instead of the executable', () => {
+    const m = _spawnErrorMessage({ message: 'spawn C:/x/claude.exe ENOENT', code: 'ENOENT' }, 'C:/x/claude.exe', 'C:/definitely/missing/folder');
+    expect(m).toMatch(/working folder no longer exists/);
+    expect(m).not.toMatch(/ENOENT/);
+  });
+  it('keeps the original text when the folder exists or the error differs', () => {
+    expect(_spawnErrorMessage({ message: 'spawn x ENOENT', code: 'ENOENT' }, 'x', process.cwd())).toBe('spawn x ENOENT');
+    expect(_spawnErrorMessage({ message: 'boom', code: 'EACCES' }, 'x', 'C:/missing')).toBe('boom');
+  });
 });

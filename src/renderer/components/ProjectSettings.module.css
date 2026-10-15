@@ -1,0 +1,17 @@
+.identity { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.avatar { flex: none; width: 64px; height: 64px; border-radius: 16px; display: grid; place-items: center; overflow: hidden; background: var(--rail); color: var(--rail-ink); font-weight: 600; font-size: 20px; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; }
+.imageActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.quiet { color: var(--muted); border-color: transparent; }
+.field { display: grid; gap: 6px; font-size: 13px; font-weight: 600; }
+.field input { font-weight: 400; font-size: 15px; }
+.path { margin: 8px 0 0; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.danger_zone { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 28px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--error) 45%, var(--line)); border-radius: 10px; }
+.danger_zone h3 { margin: 0 0 2px; font-size: 14px; }
+.danger_zone p { margin: 0; font-size: 12px; line-height: 1.5; }
+.dangerOutline { flex: none; color: var(--error); border-color: color-mix(in srgb, var(--error) 55%, var(--line)); }
+.dangerOutline:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 14%, transparent); }
+.danger { background: var(--error); color: var(--bg); border-color: var(--error); }
+.danger:hover:not(:disabled) { background: var(--error); filter: brightness(.92); }
+.confirm p { margin-bottom: 10px; }
+@media (max-width: 480px) { .danger_zone { flex-direction: column; align-items: stretch; } .identity { align-items: flex-start; flex-direction: column; } }

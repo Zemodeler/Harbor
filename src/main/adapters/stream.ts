@@ -1,5 +1,5 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { CappedText, killTree, spawnCli } from '../proc';
+import { CappedText, killTree, spawnCli, spawnErrorMessage } from '../proc';
 
 /**
  * Longest line held back while waiting for a newline. A JSONL event longer than this is cut into pieces that no longer parse, so
@@ -84,7 +84,7 @@ export async function* streamLines(
   pump('stdout', child.stdout);
   pump('stderr', child.stderr);
 
-  child.on('error', (e) => { spawnError = e.message; closed = true; poke(); });
+  child.on('error', (e) => { spawnError = spawnErrorMessage(e, exe, opts.cwd); closed = true; poke(); });
   child.on('close', (c) => { code = c; closed = true; poke(); });
   child.stdin?.on('error', () => {});
   if (opts.interactive) {
