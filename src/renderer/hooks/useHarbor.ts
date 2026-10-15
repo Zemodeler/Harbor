@@ -302,6 +302,11 @@ export function useHarbor() {
     if (removed) await reload();
     return removed;
   }
+  async function renameProject(id: string, name: string, area?: string) {
+    let renamed = false;
+    await run(async () => { await api.renameProject!(id, name); setProjects(await api.listProjects()); renamed = true; }, area);
+    return renamed;
+  }
   async function setProjectImage(id: string, image: string | null) {
     await run(async () => { await api.setProjectImage(id, image); setProjects(await api.listProjects()); });
   }
@@ -397,7 +402,7 @@ export function useHarbor() {
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),
     sending, run, reload, selectProject, selectConversation, clearProject, retryMessages: () => conversation ? selectConversation(conversation) : Promise.resolve(),
-    newConversation, deleteConversation, openAgent, addProject, removeProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
+    newConversation, deleteConversation, openAgent, addProject, removeProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

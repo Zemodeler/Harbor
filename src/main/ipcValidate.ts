@@ -213,6 +213,10 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > 80 || /[\x00-\x1f]/.test(args[0])) bad('name must be 1 to 80 characters');
       if (args[1] !== 'read-only' && args[1] !== 'answer-permissions' && args[1] !== 'full') bad('scope must be read-only, answer-permissions or full');
       break;
+    case 'renameProject':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 120 || CONTROL.test(args[1])) bad('name must be 1 to 120 characters');
+      break;
     case 'revokeRemoteToken':
       if (!isId(args[0])) bad('token id must be a short non-empty string');
       break;

@@ -3,6 +3,8 @@ import type { Conversation } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { Modal } from './Modal';
+import { ProjectSettings } from './ProjectSettings';
+import { initials } from './projectIcon';
 import { sessionStatus } from '../session';
 import { SessionStatus } from './SessionStatus';
 import { CloseIcon, MoreIcon, PlusIcon, SearchIcon, SettingsIcon } from './Icons';
@@ -10,33 +12,6 @@ import { tagCounts } from '../conversationMeta';
 import s from '../Harbor.module.css';
 import n from './Navigation.module.css';
 
-// Two letters are enough to tell a handful of projects apart on the rail.
-function initials(name: string) {
-  const words = name.split(/[\s_\-.]+/).filter(Boolean);
-  return (words.length > 1 ? words[0][0] + words[1][0] : name.slice(0, 2)).toUpperCase();
-}
-// Downscale to a small square PNG so the icon stays tiny inside state.json.
-function toIcon(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    // A data: URL, not a blob: URL: the CSP (index.html) allows img-src 'self' data: only.
-    const bad = () => reject(new Error('That file is not an image Harbor can read.'));
-    const reader = new FileReader();
-    reader.onerror = bad;
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const size = 96, c = document.createElement('canvas'); c.width = c.height = size;
-        const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height, side = Math.min(w, h);
-        if (!side) return bad();
-        c.getContext('2d')!.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, size, size);
-        resolve(c.toDataURL('image/png'));
-      };
-      img.onerror = bad;
-      img.src = String(reader.result);
-    };
-    reader.readAsDataURL(file);
-  });
-}
 const startOfToday = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
 
 /** Arrow keys move between conversations (Home/End to the ends); Tab still reaches each row's menu and delete button. */
@@ -52,6 +27,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
   const [tagFilter, setTagFilter] = useState<string>();
   const [deleting, setDeleting] = useState<Conversation>();
   const [deletePending, setDeletePending] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   // Escape or a click elsewhere closes an open conversation menu; Escape returns focus to its button.
   useEffect(() => {
@@ -67,7 +43,6 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
     return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', click); };
   }, []);
   const project = state.projects.find(p => p.id === state.projectId);
-  const picker = useRef<HTMLInputElement>(null);
   const roleOf = (c: Conversation) => state.agents.find(a => a.id === c.agentId)?.role;
   // Subagent conversations are reached from the chat with the main agent, not from here.
   const allMains = state.conversations.filter(c => roleOf(c) === undefined || roleOf(c) === 'main');
@@ -101,14 +76,12 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
     <div className={s.panel}>
       {state.loading ? <p role="status" className={s.muted}>Loading projects…</p> : null}
       {project ? <>
-        <h2 className={s.panelTitle} title={project.path}>{project.name}</h2>
-        <button className={s.sidebarSearch} onClick={search}><SearchIcon size={16} aria-hidden="true"/> Search <kbd>Ctrl K</kbd></button>
-        <div className={s.imageRow}>
-          <input ref={picker} type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.ico,image/png,image/jpeg,image/*" hidden aria-label="Project image file" onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) void state.run(async () => state.setProjectImage(project.id, await toIcon(f))); }}/>
-          <button onClick={() => picker.current?.click()}>{project.image ? 'Change image' : 'Choose image'}</button>
-          {project.image ? <button onClick={() => void state.setProjectImage(project.id, null)}>Remove image</button> : null}
+        <div className={s.projectHead}>
+          <span className={s.projectAvatar} aria-hidden="true">{project.image ? <img src={project.image} alt=""/> : initials(project.name)}</span>
+          <div className={s.projectHeadText}><h2 className={s.panelTitle} title={project.path}>{project.name}</h2><p className={s.panelSub}>{mains.length === 1 ? '1 conversation' : `${mains.length} conversations`}</p></div>
+          <button className={s.projectGear} aria-label="Project options" title="Project options" onClick={() => setSettingsOpen(true)}><SettingsIcon size={18} aria-hidden="true"/></button>
         </div>
-        <p className={s.panelSub}>{mains.length === 1 ? '1 conversation' : `${mains.length} conversations`}</p>
+        <button className={s.sidebarSearch} onClick={search}><SearchIcon size={16} aria-hidden="true"/> Search <kbd>Ctrl K</kbd></button>
         {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.stopConversation(running.id); }}>Stop</button></div> : null}
         <button className={s.newConversation} onClick={() => { void state.newConversation(); close(); }}>New conversation</button>
         {state.projectLoading ? <p role="status" className={s.muted}>Loading conversations…</p> : null}
@@ -137,6 +110,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
         {state.areaErrors.delete ? <p className={s.error} role="alert">{state.areaErrors.delete}</p> : null}
         <div className={s.actions}><button disabled={deletePending} onClick={() => { setDeleting(undefined); state.clearError('delete'); }}>Keep conversation</button><button className={s.primary} disabled={deletePending || isBusy(deleting)} onClick={() => { const c = deleting; setDeletePending(true); void state.deleteConversation(c, 'delete').then(ok => { if (ok) { forget?.(c.id); setDeleting(undefined); } }).finally(() => setDeletePending(false)); }}>{deletePending ? 'Deleting…' : 'Delete'}</button></div>
       </Modal> : null}
+      {project && settingsOpen ? <ProjectSettings state={state} project={project} close={() => setSettingsOpen(false)}/> : null}
       <div className={s.panelFoot}><button className={s.historyButton} onClick={history}>Conversation history</button><small>Local workspace{document.documentElement.dataset.demo ? ' · Demo' : ''}</small></div>
     </div>
   </nav>;

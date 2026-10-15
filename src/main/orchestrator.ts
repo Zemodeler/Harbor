@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity, SpendStatus } from '../shared/api';
 import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
 import { DEFAULT_CATALOG, autoRoutable, entryFor, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
@@ -15,7 +15,7 @@ import { breakCycles } from './graph';
 import { Journal, type JournalEntry } from './journal';
 import { LockTable, WHOLE_PROJECT, needsLock } from './locks';
 import {
-  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, isReadOnlyQuestion, leadPrompt, proseAsk, needsWorkspace, newProtocolNonce, noVisionNote, nonceInstruction, parseConcierge, parseProtocol, requestedCli, screenshotAnswerText, stripProtocol, subagentPrompt, systemFor,
+  CONCIERGE_SYSTEM, LEAD_SYSTEM, MAX_PEERS_PER_TURN, REPORT_CHARS, RESUME_PROMPT, clip, titleFrom, conciergePrompt, historyText, imageBriefText, isApproval, isReadOnlyQuestion, leadPrompt, proseAsk, needsWorkspace, newProtocolNonce, attachedFilesNote, noVisionNote, nonceInstruction, parseConcierge, parseProtocol, requestedCli, screenshotAnswerText, stripProtocol, subagentPrompt, systemFor,
   type AskRequest, type Escalation, type HelpRequest, type HeldReports, type LeadTrigger, type PeerMessage, type PeerRequest, type PlannedTask, type Protocol, type ReplyRequest, type SessionPeer
 } from './prompts';
 import { buildHandoff, type HandoffEvidence } from './handoff';
@@ -329,6 +329,8 @@ interface RoutedOptions {
   permission: 'read-only' | 'edit' | 'full';
   /** Absolute paths of images for this turn only. */
   images?: string[];
+  /** Absolute paths of other files the user attached this turn (any type); named in the prompt and their folder made readable. */
+  files?: string[];
   /**
    * Screenshots Harbor captured for this agent (this turn only). Unlike `images` they do not require a vision model: a CLI whose
    * `features.images` is false gets their file paths in the prompt with a note that it cannot see them.
@@ -806,10 +808,17 @@ export class Orchestrator {
       this.autoTurns.set(conversationId, 0);
       this.peerWakes.delete(conversationId);
       if (opts.steer) this.interruptLead(conversationId);
-      const images = attachments.map((a) => a.path).filter((p): p is string => !!p);
-      this.enqueueMain(agent.projectId, { kind: 'user', text, ...(images.length ? { images } : {}) }, conversationId);
+      const isImage = (a: Attachment) => a.mime.startsWith('image/');
+      const images = attachments.filter(isImage).map((a) => a.path).filter((p): p is string => !!p);
+      const files = attachments.filter((a) => !isImage(a) && a.path).map((a) => a.path!);
+      this.enqueueMain(agent.projectId, { kind: 'user', text: files.length ? `${text}
+
+${attachedFilesNote(attachments.filter((a) => !isImage(a) && a.path))}` : text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) }, conversationId);
     } else {
-      this.direct(agent, text, conversationId);
+      const others = attachments.filter((a) => !a.mime.startsWith('image/') && a.path);
+      this.direct(agent, others.length ? `${text}
+
+${attachedFilesNote(others)}` : text, conversationId);
     }
   }
 
@@ -972,9 +981,9 @@ export class Orchestrator {
           // only by thinking harder, so the price cannot trade it down to a weaker model at high effort.
           plan = { complexity: 'high', needs: ['planning', 'code'], ack: '', effort: 'high', difficulty: DEEP_DIFFICULTY };
           trigger = { ...trigger, text: trigger.text.slice(deep[0].length) || trigger.text };
-        } else if (trigger.images?.length) {
-          // The front desk cannot see images, so it never triages them: straight to a lead that can.
-          plan = this.estimated(conversationId, trigger.text, trigger.images.length);
+        } else if (trigger.images?.length || trigger.files?.length) {
+          // The front desk can neither see images nor open files, so it never triages them: straight to a lead that can.
+          plan = this.estimated(conversationId, trigger.text, (trigger.images?.length ?? 0) + (trigger.files?.length ?? 0));
         } else if ((this.plans.has(conversationId) || this.goAhead.has(conversationId)) && isApproval(trigger.text)) {
           // A go-ahead continues the last request at its size: no front-desk call, no fresh guess. A one-off "/deep" is not inherited.
           plan = { ...plan, effort: undefined, difficulty: undefined };
@@ -1274,6 +1283,7 @@ export class Orchestrator {
         ...(trigger.kind === 'user' && trigger.images?.length ? { required: ['vision' as const] } : {}),
         permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
         images: trigger.kind === 'user' ? trigger.images : undefined,
+        ...(trigger.kind === 'user' && trigger.files?.length ? { files: trigger.files } : {}),
         ...(trigger.kind === 'screenshot' && trigger.shots?.length ? { shots: trigger.shots } : {}),
         signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true,
         nonce, allowedCommands: commandPrefixes(checkCmds),
@@ -3730,7 +3740,7 @@ export class Orchestrator {
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length ? { readableDirs: skills.readableDirs } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.

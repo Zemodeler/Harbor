@@ -46,11 +46,11 @@ describe('control protocol helpers', () => {
     expect(JSON.parse(controlError('r2', 'bad'))).toEqual({ type: 'control_response', response: { subtype: 'error', request_id: 'r2', error: 'bad' } });
   });
   it('recognises git writes in Bash commands only', () => {
-    for (const c of ['git merge harbor/x', 'git push', 'git -C ../x rebase main', 'cd x && git reset --hard', 'git cherry-pick abc'])
+    for (const c of ['git merge harbor/x', 'git -C ../x rebase main', 'cd x && git reset --hard', 'git cherry-pick abc'])
       expect(isGitWrite('Bash', { command: c })).toBe(true);
-    for (const c of ['git status', 'git merge-base a b', 'git log --grep=merge', 'npm push'])
+    for (const c of ['git status', 'git merge-base a b', 'git log --grep=merge', 'npm push', 'git push origin main'])
       expect(isGitWrite('Bash', { command: c })).toBe(false);
-    expect(isGitWrite('Write', { command: 'git push' })).toBe(false);
+    expect(isGitWrite('Write', { command: 'git merge x' })).toBe(false);
   });
 });
 
@@ -71,7 +71,8 @@ describe('controlled-mode args', () => {
   it('edit + handler adds stream-json input and keeps the deny rules', () => {
     const a = claudeArgs({ ...base, ...h, denyGitWrites: true });
     expect(a.slice(-4)).toEqual(['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio']);
-    expect(a).toContain('Bash(git push *)');
+    expect(a).toContain('Bash(git merge *)');
+    expect(a).not.toContain('Bash(git push *)');
     expect(a.slice(0, -4)).toEqual(claudeArgs({ ...base, denyGitWrites: true }));
   });
 });

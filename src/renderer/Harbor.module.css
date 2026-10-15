@@ -12,7 +12,8 @@
 :global(input[type=radio]) { accent-color: var(--accent); }
 :global(textarea::placeholder), :global(input::placeholder) { color: var(--muted); opacity: 1; }
 :global(textarea) { caret-color: var(--accent); }
-:global(::selection) { background: var(--wash); color: var(--ink); }
+/* --wash is nearly the page colour, which made a selection invisible; the accent mix reads in light and dark. */
+:global(::selection) { background: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--ink); }
 :global(h1), :global(h2), :global(h3), :global(p) { margin-top: 0; }
 :global(h1) { font-size: 16px; margin-bottom: 0; }
 :global(h2) { font-size: 23px; letter-spacing: -.5px; }
@@ -33,8 +34,12 @@
 .rail .chip { width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border-radius: 10px; font-weight: 600; font-size: 13px; color: var(--rail-ink); background: rgba(255,255,255,.07); position: relative; }
 .chip:hover:not(:disabled) { background: rgba(255,255,255,.16); }
 .chipImg { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
-.imageRow { display: flex; gap: 6px; padding: 6px 16px 0; }
-.imageRow button { padding: 3px 8px; font-size: 12px; color: var(--muted); }
+.projectHead { display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; margin-bottom: 12px; }
+.projectAvatar { flex: none; width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; overflow: hidden; background: var(--rail); color: var(--rail-ink); font-size: 13px; font-weight: 600; }
+.projectAvatar img { width: 100%; height: 100%; object-fit: cover; }
+.projectHeadText { min-width: 0; flex: 1; }
+.projectHead .panelTitle, .projectHead .panelSub { padding: 0; margin: 0; }
+.projectGear { flex: none; display: grid; place-items: center; width: 32px; height: 32px; min-height: 0; padding: 0; border-color: transparent; color: var(--muted); border-radius: 8px; }
 .rail .chipOn, .rail .chipOn:hover:not(:disabled) { background: var(--rail-accent); color: var(--rail-on-accent); }
 .chipOn::before { content: ''; position: absolute; left: -10px; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--rail-accent); }
 .railSpace { flex: 1; }
@@ -570,9 +575,12 @@
 .hqPeer .byline strong { color: var(--accent); }
 .hqQuote { margin: 0 0 14px; padding: 2px 0 2px 14px; border-left: 3px solid var(--line); color: var(--muted); }
 .hqQuote p { margin-bottom: 8px; }
-.hqImageItem { display: inline-flex; align-items: center; gap: 8px; }
-.hqImageItem img { max-width: 160px; max-height: 120px; border-radius: 6px; border: 1px solid var(--line); object-fit: cover; }
+.messageImages .hqImageItem { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 6px; border-radius: 10px; }
+.hqImageItem img { display: block; max-width: min(360px, 100%); max-height: 260px; min-width: 48px; min-height: 48px; border-radius: 6px; object-fit: contain; background: var(--surface); }
+.imageOpen { padding: 0; border: 0; background: transparent; min-height: 0; cursor: zoom-in; border-radius: 6px; }
 .hqBannerActions { display: inline-flex; gap: 8px; }
 .hqQuestions { display: grid; gap: 10px; padding: 0 24px 12px; }
 .hqQuestion { border: 1px solid var(--accent); border-radius: 12px; padding: 14px 16px; background: var(--surface); }
 .hqQuestionTitle { font-size: 14px; margin: 0 0 6px; }
+.thumbnails .fileChip { display: flex; align-items: center; max-width: 220px; padding: 6px 28px 6px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; background: var(--wash); }
+.thumbnails .fileChip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

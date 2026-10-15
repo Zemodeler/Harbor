@@ -63,10 +63,10 @@ const bashRules = (prefixes: string[]): string[] => prefixes.flatMap((p) => [`Ba
 export const GIT_DESTRUCTIVE_PREFIXES = [
   'git clean', 'git restore', 'git checkout --', 'git checkout .', 'git branch -D', 'git branch -d', 'git branch -M', 'git branch -m',
   'git branch --delete', 'git branch --move', 'git update-ref', 'git worktree', 'git stash drop', 'git stash clear', 'git config',
-  'git remote', 'git push', 'git reset --hard', 'git gc', 'git prune', 'git reflog', 'git filter-branch', 'git -C'
+  'git remote', 'git push --force', 'git push -f', 'git push --force-with-lease', 'git push --delete', 'git reset --hard', 'git gc', 'git prune', 'git reflog', 'git filter-branch', 'git -C'
 ];
 export const GIT_DESTRUCTIVE_DENY: readonly string[] = bashRules(GIT_DESTRUCTIVE_PREFIXES);
-const GIT_DESTRUCTIVE_RE = /\bgit\b(?:\s+-[Cc]\b|[^;&|\n]*?\s(?:clean|restore|update-ref|worktree|config|remote|push|gc|prune|reflog|filter-branch)(?![\w-])|[^;&|\n]*?\s(?:checkout\s+(?:--|\.)|branch\s+(?:-[DdMm]\b|--delete|--move)|stash\s+(?:drop|clear)|reset\s+--hard))/i;
+const GIT_DESTRUCTIVE_RE = /\bgit\b(?:\s+-[Cc]\b|[^;&|\n]*?\s(?:clean|restore|update-ref|worktree|config|remote|gc|prune|reflog|filter-branch)(?![\w-])|[^;&|\n]*?\spush\s(?:[^;&|\n]*?\s)?(?:--force\S*|-[a-z]*f[a-z]*|--delete|-d|\+\S)|[^;&|\n]*?\s(?:checkout\s+(?:--|\.)|branch\s+(?:-[DdMm]\b|--delete|--move)|stash\s+(?:drop|clear)|reset\s+--hard))/i;
 
 /** Bash commands a helper may run without being asked: read-only git, staging and committing, tests. Everything else is asked or denied. */
 export const HELPER_BASH_ALLOW: readonly string[] = bashRules([
@@ -82,7 +82,8 @@ export function claudeDenyRules(o: RunOptions): string[] {
   return [...(o.denyGitWrites ? GIT_WRITE_DENY : []), ...GIT_DESTRUCTIVE_DENY];
 }
 
-const GIT_WRITE_CMDS = ['merge', 'rebase', 'cherry-pick', 'reset', 'push'];
+// Plain `git push` is allowed for leads (the user asked for it); force and delete pushes stay in GIT_DESTRUCTIVE_PREFIXES.
+const GIT_WRITE_CMDS = ['merge', 'rebase', 'cherry-pick', 'reset'];
 const GIT_WRITE_DENY = GIT_WRITE_CMDS.map((c) => `Bash(git ${c} *)`);
 // Broader than the deny rules on purpose (`git -C x merge`, `cd x && git push`): a false deny is cheap, a merge is not.
 const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join('|')})(?![\\w-])`, 'i');
@@ -90,8 +91,13 @@ const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join
 /** Whether this run answers permission prompts through the host instead of silently denying. */
 export const isControlled = (o: RunOptions): boolean => !!o.onToolPermission && o.permission === 'edit';
 
-export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFile?: string): string[] {
+/** `includeCoAuthoredBy` is the older spelling of `attribution`; both are set so any Claude Code version stays quiet. */
+export const NO_ATTRIBUTION_SETTINGS = JSON.stringify({ includeCoAuthoredBy: false, attribution: { commit: '', pr: '' } });
+
+export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFile?: string, settingsFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
+  // A settings file (quotes cannot go through .cmd shims) switches off the "Co-Authored-By: Claude" trailer and the generated-with line.
+  if (settingsFile) a.push('--settings', settingsFile);
   if (o.model && o.model !== 'default') a.push('--model', o.model);
   a.push('--effort', o.effort);
   if (o.lean) {
@@ -327,6 +333,7 @@ export class ClaudeAdapter implements CliAdapter {
     if (o.images?.length) prompt = `${prompt}\n\nImage file(s) come with this message (the user's attachments, or a screenshot Harbor captured for you). Read each one with the Read tool to see it:\n${o.images.map((p) => `- ${p}`).join('\n')}`;
     let done = false;
     let spFile: string | undefined;
+    let settingsFile: string | undefined;
     // The concierge (lean) never gets MCP servers. The file is removed in `finally`: after success, failure and abort alike.
     let mcpFile: { file: string; cleanup: () => void } | undefined;
     let res: IteratorResult<StreamedLine, StreamResult>;
@@ -339,7 +346,11 @@ export class ClaudeAdapter implements CliAdapter {
         writeFileSync(spFile, o.systemPrompt);
       }
       if (o.mcp?.servers.length && !o.lean) mcpFile = writeMcpConfig(o.mcp.servers);
-      const args = claudeArgs(o, spFile, mcpFile?.file);
+      if (!o.lean) {
+        settingsFile = join(tmpdir(), `harbor-settings-${randomUUID()}.json`);
+        writeFileSync(settingsFile, NO_ATTRIBUTION_SETTINGS);
+      }
+      const args = claudeArgs(o, spFile, mcpFile?.file, settingsFile);
       gen = ctl
         ? streamLines(this.exe, args, { ...proc, cwd: o.cwd, input: userMessageLine(prompt), interactive: (s) => ctl.attach(s) })
         : streamLines(this.exe, args, { ...proc, cwd: o.cwd, input: prompt });
@@ -368,6 +379,7 @@ export class ClaudeAdapter implements CliAdapter {
       await gen?.return(undefined as never).catch(() => undefined);
       mcpFile?.cleanup();
       if (spFile) try { unlinkSync(spFile); } catch { /* already gone */ }
+      if (settingsFile) try { unlinkSync(settingsFile); } catch { /* already gone */ }
     }
     if (!done) {
       const r = res.value;

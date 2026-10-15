@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import type { Agent, Conversation as ConversationRecord, Message } from '../../shared/api';
+import { memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import type { Agent, Attachment, Conversation as ConversationRecord, Message } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { Markdown } from './Markdown';
+import { DocumentLinks } from '../documents/DocumentLinks';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { sessionStatus } from '../session';
 import { groupMessages, ToolActivity } from './ToolActivity';
@@ -10,7 +11,7 @@ import { AttachIcon, CloseIcon, ImageIcon, TemplateIcon } from './Icons';
 import { RoutingDetails } from './RoutingDetails';
 import { ModePicker } from './ModePicker';
 import { HelperDetails } from './HelperDetails';
-import { acceptImages, classifyFile, IMAGE_TYPES, quoteTextFile, readImage, readText, TEXT_ACCEPT, textFileProblem, type PendingImage } from '../attachments';
+import { acceptFiles, acceptImages, classifyFile, IMAGE_TYPES, readFileAttachment, readImage, type PendingImage } from '../attachments';
 import { applySlash, matchSlash, slashCommands, slashQuery, type SlashCommand } from '../slashCommands';
 import { ImportedNotice } from './Transfer';
 import s from '../Harbor.module.css';
@@ -30,6 +31,18 @@ const sameDay = (a: number, b: number) => new Date(a).toDateString() === new Dat
 
 interface SentImages { conversationId: string; at: number; names: string[]; previews: string[] }
 
+/** One image of a message: shown at a readable size (no lazy loading: the stream follows new messages and a collapsed lazy image may never load), opens in the viewer when it has a stored file, and says so when it cannot be shown. */
+function AttachmentThumb({ a, src, agentId }: { a: Attachment; src?: string; agentId?: string }) {
+  const opener = useContext(DocumentLinks);
+  const [failed, setFailed] = useState(false);
+  const shown = src && !failed;
+  const img = shown ? <img src={src} alt={a.origin === 'screenshot' ? `Screenshot: ${a.name}` : a.name} onError={() => setFailed(true)}/> : null;
+  return <li className={shown ? s.hqImageItem : undefined}>
+    {img && opener && a.path ? <button type="button" className={s.imageOpen} title="Open in Harbor's viewer" onClick={() => opener.open(a.path!, agentId ? { agentId } : undefined)}>{img}</button> : img}
+    <span>{a.name}{src && failed ? ' (the image could not be loaded)' : ''}</span>
+  </li>;
+}
+
 const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, complexity, working, previewsFor, openAgent }: { m: Message; agentTitle?: string; subAgentId?: string; complexity?: 'low' | 'medium' | 'high'; working: boolean; previewsFor: (m: Message) => string[] | undefined; openAgent: (id: string) => void }) {
   const peer = isPeerMessage(m);
   const previews = m.attachments?.length ? previewsFor(m) : undefined;
@@ -39,7 +52,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
     {m.attachments?.length ? <ul className={s.messageImages} aria-label={m.attachments.some(a => a.origin === 'screenshot') ? 'Screenshot' : 'Attached images'}>{m.attachments.map((a, i) => {
       // Harbor serves its stored copies through harbor-file:// (main checks the path); a just-sent image may still use its local preview.
       const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];
-      return <li key={i} className={src ? s.hqImageItem : undefined}>{src ? <img src={src} alt={a.origin === 'screenshot' ? `Screenshot: ${a.name}` : ''} loading="lazy"/> : null}<span>{a.name}</span></li>;
+      return <AttachmentThumb key={i} a={a} src={src} agentId={m.agentId}/>;
     })}</ul> : null}
     {m.details ? <details className={s.execution}><summary>Execution details · why this model</summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
   </article>;
@@ -203,7 +216,7 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
     // A pending question is waiting for exactly this text: send it now instead of queueing behind the helpers that still run.
     const answering = state.questions?.some(q => q.conversationId === c.id);
     const hold = busy && !answering;
-    if (hold && sentImages.length) { setAttachmentError('Images can be sent when the session is idle. Remove them to queue this text.'); return; }
+    if (hold && sentImages.length) { setAttachmentError('Attachments can be sent when the session is idle. Remove them to queue this text.'); return; }
     if (hold) { workspace.setQueue(id, [...queue, { id: crypto.randomUUID(), text: body }]); edit('', true); return; }
     edit('', true); setImages([]); setAttachmentError('');
     if (sentImages.length) rememberImages(id, sentImages);
@@ -214,30 +227,30 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
       setImages(now => now.length ? now : sentImages); setSendError('Your message was kept. Retry when the connection is ready.');
     });
   }
-  /** Text, log and source files are quoted into the draft (the contract only carries images); PDFs and credentials are refused. */
+  /** Any non-image file becomes a real attachment: main saves it and the agent opens it with its own tools. */
   async function attachFiles(files: File[]) {
-    setAttachmentError('');
-    let total = 0, problem = '';
-    const blocks: string[] = [];
-    for (const file of files) {
-      const why = textFileProblem(file, total);
-      if (why) { problem ||= why; continue; }
-      try {
-        const content = await readText(file);
-        if (content.includes('\0')) { problem ||= `${file.name} is not a plain text file.`; continue; }
-        total += file.size; blocks.push(quoteTextFile(file.name, content));
-      } catch { problem ||= `${file.name} could not be read. Try another file.`; }
-    }
-    if (!mounted.current) return;
-    if (blocks.length) { const before = latest.current; edit(`${before}${before ? '\n\n' : ''}${blocks.join('\n\n')}`, true); }
-    setAttachmentError(problem);
+    const { accepted, error } = acceptFiles(images.length, files);
+    setAttachmentError(error);
+    try { const read = await Promise.all(accepted.map(readFileAttachment)); if (mounted.current) setImages(prev => [...prev, ...read].slice(0, 10)); }
+    catch { if (mounted.current) setAttachmentError('A file could not be read. Try another one.'); }
   }
-  /** Dropped or pasted files: images become attachments, everything else goes through the text-file rules. */
+  /** Dropped, pasted or picked files: images get a preview, everything else is attached as is. */
   function addFiles(files: File[]) {
-    const images = files.filter(f => classifyFile(f) === 'image'), others = files.filter(f => classifyFile(f) !== 'image');
-    if (images.length) void addImages(images);
+    const pics = files.filter(f => classifyFile(f) === 'image'), others = files.filter(f => classifyFile(f) !== 'image');
+    if (pics.length) void addImages(pics);
     if (others.length) void attachFiles(others);
   }
+  // Drop anywhere in the window (not only on the composer) and the files land in this conversation; the browser never opens them instead.
+  const addFilesRef = useRef(addFiles); addFilesRef.current = addFiles;
+  useEffect(() => {
+    if (c.archived) return;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types?.includes('Files');
+    const over = (e: DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); setDragging(true); };
+    const leave = (e: DragEvent) => { if (!e.relatedTarget) setDragging(false); };
+    const drop = (e: DragEvent) => { if (!hasFiles(e)) return; e.preventDefault(); setDragging(false); const files = [...(e.dataTransfer?.files ?? [])]; if (files.length) addFilesRef.current(files); };
+    window.addEventListener('dragover', over); window.addEventListener('dragleave', leave); window.addEventListener('drop', drop);
+    return () => { window.removeEventListener('dragover', over); window.removeEventListener('dragleave', leave); window.removeEventListener('drop', drop); setDragging(false); };
+  }, [c.archived]);
   const slashList = useMemo(() => slashCommands(workspace.preferences.templates), [workspace.preferences.templates]);
   const slashText = slashQuery(text);
   const slashMatches = useMemo(() => slashText === null || slashDismissed === text ? [] : matchSlash(slashList, slashText).slice(0, 8), [slashList, slashText, slashDismissed, text]);
@@ -261,18 +274,15 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
       {dock}
       {c.archived ? <div className={s.archivedNotice}>This conversation is archived.<button onClick={() => void state.updateConversation(c, { archived: false })}>Restore conversation</button></div> : null}
       {queue.length ? <details className={s.promptQueue} open><summary>{queue.length} queued {queue.length === 1 ? 'follow-up' : 'follow-ups'}</summary>{queue.map((item, i) => <div key={item.id}><span>{item.text.slice(0, 100)}{item.paused ? ' · Paused' : ''}</span>{item.paused || (['stopped', 'failed'].includes(status) && resumed !== c.id) ? <button onClick={() => { setResumed(c.id); workspace.setQueue(c.id, items => items.map(x => ({ ...x, paused: false }))); }}>Resume queue</button> : null}{i > 0 ? <button aria-label={`Move follow-up ${i + 1} first`} onClick={() => workspace.setQueue(c.id, [item, ...queue.filter(x => x.id !== item.id)])}>Move first</button> : null}<button onClick={() => { edit(item.text, true); workspace.setQueue(c.id, queue.filter(x => x.id !== item.id)); }}>Edit</button><button aria-label={`Remove follow-up ${i + 1}`} onClick={() => workspace.setQueue(c.id, queue.filter(x => x.id !== item.id))}>Remove</button></div>)}</details> : null}
-      <div className={s.composer} data-dragging={dragging || undefined}
-        onDragOver={e => { if (c.archived || !e.dataTransfer?.types?.includes('Files')) return; e.preventDefault(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={e => { setDragging(false); const files = [...(e.dataTransfer?.files ?? [])]; if (c.archived || !files.length) return; e.preventDefault(); addFiles(files); }}>
+      <div className={s.composer} data-dragging={dragging || undefined}>
       <div className={s.recipient}>To <strong>{projectName} · {agent?.title || 'Main agent'}</strong></div>
       <ModePicker conversation={c} disabled={c.archived} setMode={(mode, goal) => state.setConversationMode(c, mode, goal)}/>
       {slashMatches.length ? <ul className={n.slashMenu} id={slashId} role="listbox" aria-label="Slash commands">{slashMatches.map((cmd, i) => <li key={cmd.id} id={`${slashId}-${i}`} role="option" aria-selected={i === slashIndex} className={n.slashItem} onMouseDown={e => e.preventDefault()} onClick={() => chooseSlash(cmd)}><code>/{cmd.name}</code><span>{cmd.kind === 'saved' ? `Saved prompt · ${cmd.title}` : cmd.description}</span></li>)}</ul> : null}
       <textarea ref={textarea} disabled={c.archived} aria-label={agent?.role !== 'main' ? `Message ${agent?.title || 'agent'}` : 'Message Harbor'} aria-controls={slashMatches.length ? slashId : undefined} aria-activedescendant={slashMatches.length ? `${slashId}-${slashIndex}` : undefined} aria-keyshortcuts="Enter Shift+Enter" placeholder={agent?.role !== 'main' ? `Message ${agent?.title || 'agent'}…` : 'Message Harbor… (type / for commands)'} value={text} onChange={e => edit(e.target.value)} onPaste={e => { const files = [...e.clipboardData.files]; if (files.length) { e.preventDefault(); addFiles(files); } }} onKeyDown={e => { if (slashKey(e)) return; if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!state.messagesLoading) send(); } }}/>
-      {images.length ? <ul className={s.thumbnails} aria-label="Images to send">{images.map(img => <li key={img.id}><img src={img.preview} alt={img.name}/><button type="button" aria-label={`Remove ${img.name}`} onClick={() => setImages(prev => prev.filter(x => x.id !== img.id))}><CloseIcon size={12} aria-hidden="true"/></button></li>)}</ul> : null}
+      {images.length ? <ul className={s.thumbnails} aria-label="Images to send">{images.map(img => <li key={img.id} className={img.preview ? undefined : s.fileChip}>{img.preview ? <img src={img.preview} alt={img.name}/> : <span>{img.name}</span>}<button type="button" aria-label={`Remove ${img.name}`} onClick={() => setImages(prev => prev.filter(x => x.id !== img.id))}><CloseIcon size={12} aria-hidden="true"/></button></li>)}</ul> : null}
       <div className={s.composerTools}><div className={s.composerAttachments}>
-        <input ref={filePicker} hidden multiple type="file" accept={TEXT_ACCEPT} aria-label="Choose text files" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) void attachFiles(files); }}/>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Attach text, log or source files" title="Attach text, log or source files (quoted into the message; up to 200 KB each)" onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button>
+        <input ref={filePicker} hidden multiple type="file" aria-label="Choose files" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) addFiles(files); }}/>
+        <button className={s.iconButton} disabled={c.archived} aria-label="Attach files" title="Attach any file (up to 10, 50 MB each). You can also drag files in anywhere." onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button>
         <input ref={imagePicker} hidden multiple type="file" accept={IMAGE_TYPES.join(',')} aria-label="Choose images" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; void addImages(files); }}/>
         <button className={s.iconButton} disabled={c.archived} aria-label="Attach images" title="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button>
         <button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button>

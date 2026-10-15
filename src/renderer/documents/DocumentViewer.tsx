@@ -59,9 +59,10 @@ function TabBody({ tab, docs, api, projectId, agentTitle }: { tab: DocTab; docs:
       <div className={d.where}><strong title={doc.path}>{doc.relPath || doc.name}</strong><small>{where} · {size(doc.size)} · read-only</small></div>
       <div className={d.actions}>
         {canToggle ? <button aria-pressed={source} onClick={() => setSource(v => !v)}>{source ? 'Preview' : 'Source'}</button> : null}
-        {doc.canOpenExternally ? <button onClick={() => void act('openExternal')}>Open in default app</button> : null}
-        <button onClick={() => void act('reveal')}>Show in Explorer</button>
-        <button onClick={() => void copy()}>Copy path</button>
+        {doc.canOpenExternally ? <button onClick={() => void act('openExternal')}>Open in app</button> : null}
+        <details className={d.more}><summary aria-label="More actions">More</summary>
+          <div className={d.moreMenu}><button onClick={() => void act('reveal')}>Show in Explorer</button><button onClick={() => void copy()}>Copy path</button></div>
+        </details>
       </div>
     </div>
     {tab.gone ? <p className={d.warning} role="status">This file changed and can no longer be shown: {tab.gone} The last version stays below.</p> : null}
