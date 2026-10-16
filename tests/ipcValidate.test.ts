@@ -25,7 +25,7 @@ function setup() {
 
 const rejected: Array<[string, unknown[]]> = [
   ['send', [42, 'hi']], ['send', ['c1', 7]], ['send', ['c1', 'x'.repeat(200_001)]], ['send', ['c1', 'hi', 'img']], ['send', ['c1', 'hi', [{ name: 'a' }]]],
-  ['send', ['c1', 'hi', Array.from({ length: 7 }, () => ({ name: 'a.png', mime: 'image/png', dataBase64: 'AA==' }))]],
+  ['send', ['c1', 'hi', Array.from({ length: 11 }, () => ({ name: 'a.txt', mime: 'text/plain', dataBase64: 'AA==' }))]],
   ['answerQuestion', ['', 'yes']], ['answerQuestion', ['r1', { a: 1 }]], ['answerQuestion', ['r1', 'x'.repeat(20_001)]],
   ['setAgentPriority', ['a1', '5']], ['setAgentPriority', ['a1', 1.5]], ['setAgentPriority', ['a1', Number.NaN]], ['setAgentPriority', [{}, 1]],
   ['integrateBranches', ['p1', []]], ['integrateBranches', ['p1', 'a1']], ['integrateBranches', ['p1', ['a1', 3]]], ['integrateBranches', ['p1', ['a1'], 5]], ['integrateBranches', ['p1', ['a1'], 'x\ny']],
@@ -51,6 +51,8 @@ describe('registerIpc argument validation', () => {
     await expect(s.invoke('addProject')).resolves.toBeTruthy();
     await expect(s.invoke('addProject', 'C:/work/app')).resolves.toBeTruthy();
     await expect(s.invoke('send', 'c1', '', [{ name: 'a.png', mime: 'image/png', dataBase64: 'AA==' }])).resolves.toBeTruthy();
+    // Seven files are within the 10-file limit (the service, not this shape check, enforces 6 images): the old check refused them as "6 images".
+    await expect(s.invoke('send', 'c1', 'logs', Array.from({ length: 7 }, (_, i) => ({ name: `${i}.txt`, mime: 'text/plain', dataBase64: 'AA==' })))).resolves.toBeTruthy();
     await expect(s.invoke('setAgentPriority', 'a1', -3)).resolves.toBeTruthy();
     await expect(s.invoke('integrateBranches', 'p1', ['a1', 'a2'], 'main')).resolves.toBeTruthy();
     await expect(s.invoke('answerQuestion', 'r1', 'yes')).resolves.toBeTruthy();

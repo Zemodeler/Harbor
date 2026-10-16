@@ -585,6 +585,26 @@ describe('file conflicts', () => {
     return h;
   };
 
+  it('an open conflict question blocks archiving and deleting only its own conversation, not others of the project', async () => {
+    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
+    const other = await h.svc.newConversation(h.project.id);
+    const third = await h.svc.newConversation(h.project.id);
+    let ask: string | undefined;
+    h.svc.onEvent((e) => { if (e.type === 'permission' && !ask) ask = e.requestId; });
+    await h.svc.send(h.conv.id, 'go');
+    for (let i = 0; i < 300 && !ask; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(ask).toBeTruthy();
+    await expect(h.svc.updateConversation(h.conv.id, { archived: true })).rejects.toThrow(/pending requests/);
+    await expect(h.svc.deleteConversation(h.conv.id)).rejects.toThrow(/pending requests/);
+    // The ask belongs to the first conversation's helpers: idle conversations of the same project are not held up by it.
+    await h.svc.updateConversation(other.id, { archived: true });
+    expect(h.svc.store.getConversation(other.id)!.archived).toBe(true);
+    await h.svc.deleteConversation(third.id);
+    expect(h.svc.store.getConversation(third.id)).toBeUndefined();
+    await h.svc.answerPermission(ask!, false);
+    await h.svc.whenIdle();
+  });
+
   it('withdraws an unanswered conflict question once the waiting agent got its files', async () => {
     const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
     let asked = 0;
