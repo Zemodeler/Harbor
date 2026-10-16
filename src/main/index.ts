@@ -15,6 +15,7 @@ import { appDocument, hardenContents } from './windowSecurity';
 import { autoUpdater } from 'electron-updater';
 import { createUpdater } from './updater';
 import { acquireInstanceLock } from './instanceLock';
+import { NotificationGate } from './notifications';
 import { resolveRemoteConfig } from './remote/guard';
 import { startRemoteServer, type RemoteServer } from './remote/server';
 
@@ -244,20 +245,20 @@ if (startupAction === 'start') app.whenReady().then(() => {
     removeHandler: name => ipcMain.removeHandler(name)
   };
   registerIpc(service, ipcHost, () => win?.webContents, appDoc);
+  // Desktop notifications only on a real transition to done/failed (a rename, pin or deadline change re-emits the same state) and on asks.
+  const notifications = new NotificationGate();
+  notifications.seed(service.store.listProjects().flatMap(p => service.store.listConversations(p.id)));
   // A question must not wait unseen behind other windows: bring Harbor forward (the pop-up itself is in the renderer).
   service.onEvent((e) => {
     if (e.type === 'agent' || e.type === 'conversation') syncTray();
+    const conversation = e.type === 'conversation' ? e.conversation : undefined;
+    const helpersBusy = () => !!conversation && service.store.listAgentRecords(conversation.projectId).some(a => a.parentConversationId === conversation.id && ['queued', 'working', 'waiting'].includes(a.state));
+    const kind = notifications.check(e, helpersBusy); // checked for every event, so the gate sees every state change
     if (!win) return;
-    if (service.store.getSettings().desktopNotifications && !win.isFocused() && Notification.isSupported()) {
-      const conversation = e.type === 'conversation' ? e.conversation : undefined;
-      const helpers = conversation ? service.store.listAgentRecords(conversation.projectId).filter(a => a.parentConversationId === conversation.id) : [];
-      const completed = conversation?.activity?.state === 'done' && !helpers.some(a => ['queued', 'working', 'waiting'].includes(a.state));
-      const attention = e.type === 'question' || e.type === 'permission' || conversation?.activity?.state === 'failed';
-      if (completed || attention) {
-        const notification = new Notification({ title: attention ? 'Harbor needs your attention' : 'Harbor finished a session', body: conversation?.title || 'Open Harbor to continue.', silent: true });
-        notification.on('click', () => { if (win?.isMinimized()) win.restore(); win?.show(); win?.focus(); });
-        notification.show();
-      }
+    if (kind && service.store.getSettings().desktopNotifications && !win.isFocused() && Notification.isSupported()) {
+      const notification = new Notification({ title: kind === 'attention' ? 'Harbor needs your attention' : 'Harbor finished a session', body: conversation?.title || 'Open Harbor to continue.', silent: true });
+      notification.on('click', () => { if (win?.isMinimized()) win.restore(); win?.show(); win?.focus(); });
+      notification.show();
     }
     // A screenshot request is answered in a card with a preview: it must be seen, never approved from the background.
     if (e.type !== 'question' && !(e.type === 'permission' && e.kind === 'screenshot')) return;
