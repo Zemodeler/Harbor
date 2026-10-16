@@ -120,6 +120,7 @@
 .composer textarea { display: block; width: 100%; resize: vertical; min-height: 54px; max-height: 24dvh; border: 0; background: transparent; padding: 4px 0; font-size: 15px; line-height: 1.5; }
 .composerTools { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; margin-top: 8px; }
 .primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+/* Explicit accent on hover: the global button:hover wash must never show --on-accent text on a --wash background. */
 .primary:hover:not(:disabled) { background: var(--accent); filter: brightness(.92); }
 .composeHint { font-size: 11px; color: var(--muted); text-align: center; margin: 9px 0 0; }
 .muted { color: var(--muted); }
