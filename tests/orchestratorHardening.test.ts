@@ -37,6 +37,22 @@ describe('protocol tag (nonce)', () => {
   });
 });
 
+describe('automatic turn cap notice', () => {
+  it('says "Paused automatic coordination" once per user message, however many capped steps follow', async () => {
+    const ask = `Stopping here.\nHARBOR_ASK: ${JSON.stringify({ question: 'May I touch the shared file?', options: ['Yes', 'No'] })}`;
+    const h = await harness({ claude: script({ lead: (p) => (p.includes('User:') ? delegate('go', impl('a'), impl('b')) : say('ok')), helper: () => say(ask) }) }, { git: false, service: { maxAutoTurns: 0 } });
+    await h.svc.send(h.conv.id, 'implement the thing in src/a.ts');
+    await h.svc.whenIdle();
+    // Both helpers asked the lead; with no automatic turn left each question fell through to the user, and the notice came once.
+    expect(h.calls(isLead)).toHaveLength(1);
+    expect((await h.texts()).filter((t) => t.startsWith('Paused automatic coordination'))).toHaveLength(1);
+    // The user's next message resets the cap: a later capped step says so again, once.
+    await h.svc.send(h.conv.id, 'carry on');
+    await h.svc.whenIdle();
+    expect((await h.texts()).filter((t) => t.startsWith('Paused automatic coordination')).length).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe('malformed protocol lines', () => {
   it('reports one system message and resumes the lead once, counted against the automatic turn cap', async () => {
     const h = await harness({ claude: script({ lead: (p) => (p.includes('Notice from Harbor') ? say('fixed') : say('hmm\nHARBOR_DELEGATE: {"title": oops')) }) });

@@ -406,6 +406,10 @@ export class Orchestrator {
   /** Urgent wake-ups of an idle lead since the user last wrote to it; bounded so two leads cannot wake each other forever. */
   private peerWakes = new Map<Id, number>();
   private sessionGeneration = new Map<Id, number>();
+  /** Conversations told "Paused automatic coordination" since the user's last message: the notice is posted once, not per capped caller. */
+  private autoPaused = new Set<Id>();
+  /** Helper id -> revision whose "Assignment" message is already in its conversation (a run held for quota re-enters runAgent). */
+  private assignmentPosted = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
   /** Conversations whose running lead turn was aborted to make room for a newer user message (not a user stop). */
   private steered = new Set<Id>();
@@ -823,6 +827,7 @@ export class Orchestrator {
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: titleFrom(text) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
+      this.autoPaused.delete(conversationId);
       this.peerWakes.delete(conversationId);
       if (opts.steer) this.interruptLead(conversationId);
       const isImage = (a: Attachment) => a.mime.startsWith('image/');
@@ -906,7 +911,9 @@ ${attachedFilesNote(others)}` : text, conversationId);
       }
       this.denyToolAsks((p) => p.agentId === a.id && convs.has(p.conversationId), 'the lead was stopped');
       this.d.screenshots?.cancel((r) => r.agentId === a.id && convs.has(r.sessionId), 'the lead was stopped');
-      for (const [, l] of active) l.ctl.abort();
+      // Turns already chained behind the aborted one (reports, goal steps) are dropped too, as on stopConversation: a stop must not
+      // be followed by a lead turn that spends quota. Their reports stay held for the user's next message.
+      for (const [c, l] of active) { this.sessionGeneration.set(c, (this.sessionGeneration.get(c) ?? 0) + 1); l.ctl.abort(); }
       return;
     }
     this.denyToolAsks((p) => p.agentId === a.id, 'the agent was stopped');
@@ -1083,7 +1090,10 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const turns = (this.autoTurns.get(conversationId) ?? 0) + 1;
     this.autoTurns.set(conversationId, turns);
     if (turns > (this.d.maxAutoTurns ?? 12)) {
-      this.post(conversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
+      if (!this.autoPaused.has(conversationId)) {
+        this.autoPaused.add(conversationId);
+        this.post(conversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
+      }
       return false;
     }
     return true;
@@ -2035,7 +2045,11 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const { store, git } = this.d;
     const conv = this.convFor(a);
     this.setState(a, 'working', { error: undefined, stopKind: undefined });
-    this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+    // Once per revision: a run that routing held for quota comes back through here when the hold ends.
+    if (this.assignmentPosted.get(a.id) !== a.revision) {
+      this.assignmentPosted.set(a.id, a.revision);
+      this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+    }
 
     // Workspace: edit helpers get an isolated worktree; read-only helpers read the project (or the change under review).
     let cwd = project.path;
@@ -2492,6 +2506,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
   private finished(a: AgentRecord): void {
     const { store } = this.d;
     this.conflictAsked.delete(a.id);
+    this.assignmentPosted.delete(a.id);
     this.withdrawConflictAsk(a.id);
     const parent = a.parentConversationId;
     const verb = a.state === 'done' ? 'finished' : a.state === 'stopped' ? 'was stopped' : 'failed';
