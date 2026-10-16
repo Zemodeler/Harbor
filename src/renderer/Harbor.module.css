@@ -640,3 +640,38 @@
   .tabGroupLabel { display: none; }
   .settingsLayout .tabs button { width: auto; white-space: nowrap; flex: none; }
 }
+
+/* Conversation, header, empty states, sidebar loading (UI polish pass). */
+.execution > summary { display: flex; align-items: center; gap: var(--sp-2); list-style: none; font-size: var(--fs-xs); color: var(--muted); }
+.execution > summary::-webkit-details-marker { display: none; }
+.execution > summary:hover { color: var(--ink); }
+.reviewAction { align-self: start; margin: 0 0 var(--sp-4); font-size: var(--fs-sm); }
+.message { margin-bottom: 28px; }
+.assistant { max-width: 72ch; }
+.byline strong { font-weight: 600; font-size: var(--fs-sm); }
+.byline time { font-size: var(--fs-xs); }
+.headerActions > button { border-color: transparent; color: var(--ink); font-size: var(--fs-sm); }
+.headerActions > button:hover:not(:disabled) { border-color: transparent; }
+.headerActions > button[aria-expanded=true] { background: var(--wash); color: var(--accent); }
+.headerActions > button.primary { color: var(--on-accent); }
+.headerTitle small { font-size: var(--fs-xs); }
+.starters { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-4); }
+.starter { border-radius: var(--r-pill); padding: 6px 14px; font-size: var(--fs-sm); background: var(--surface); }
+.emptyConversation h2 { font-size: var(--fs-xl); }
+.skeletonList { display: grid; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); }
+.skeletonRow { display: block; height: 38px; border-radius: var(--r-md); background: linear-gradient(90deg, var(--surface), var(--wash), var(--surface)); background-size: 200% 100%; animation: shimmer 1.6s ease-in-out infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeletonRow { animation: none; } }
+.sidebar .newConversation { border-radius: var(--r-md); }
+.sidebar .conversationLink { font-size: var(--fs-sm); }
+.group { font-size: var(--fs-xs); letter-spacing: .01em; }
+.live { background: var(--wash); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent); }
+.panelFoot { display: grid; gap: var(--sp-1); }
+.sidebar .historyButton { padding: 6px 0; margin: 0; }
+.infoPanel { flex-basis: 320px; width: 320px; }
+.activityAgent { padding: var(--sp-3) 0; }
+.activityAgent > .activityStop { border: 0; }
+.activityActions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.activityActions button:first-child { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.activityActions button:first-child:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
+.activityActions button:last-child { border-color: transparent; color: var(--muted); }

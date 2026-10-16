@@ -84,7 +84,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
         <button className={s.sidebarSearch} onClick={search}><SearchIcon size={16} aria-hidden="true"/> Search <kbd>Ctrl K</kbd></button>
         {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.stopConversation(running.id); }}>Stop</button></div> : null}
         <button className={s.newConversation} onClick={() => { void state.newConversation(); close(); }}>New conversation</button>
-        {state.projectLoading ? <p role="status" className={s.muted}>Loading conversations…</p> : null}
+        {state.projectLoading ? <div className={s.skeletonList} role="status"><span className={s.srOnly}>Loading conversations…</span>{[0, 1, 2].map(i => <span key={i} className={s.skeletonRow} aria-hidden="true"/>)}</div> : null}
         {projectTags.length ? <div className={n.tagFilter} role="group" aria-label="Filter by tag">{projectTags.map(({ tag, count }) => <button key={tag} aria-pressed={activeFilter === tag} title={`${count} conversation${count === 1 ? '' : 's'}`} onClick={() => setTagFilter(activeFilter === tag ? undefined : tag)}>#{tag}</button>)}</div> : null}
         <div className={s.conversationList} ref={list} onKeyDown={listKeys}>
           {groups.map(g => <div key={g.label}><p className={s.group}>{g.label}</p>

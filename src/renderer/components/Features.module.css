@@ -48,3 +48,6 @@
 .fxRouting ol { padding: 0; }
 .fxRouting ol > li { display: grid; gap: 2px; padding: 4px 0; border-top: 1px solid var(--line); }
 @media (max-width: 760px) { .fxRow button, .fxRow input, .fxRow select { min-height: 40px; } .fxTable { grid-template-columns: 1fr; } }
+
+.fxMore > summary { font-size: var(--fs-xs); color: var(--muted); font-weight: 600; margin-bottom: var(--sp-1); }
+.fxMore[open] > summary { color: var(--ink); }
