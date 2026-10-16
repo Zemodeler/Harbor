@@ -14,6 +14,7 @@ import { canExportDiagnostics, Diagnostics } from './Diagnostics';
 import { SkillsPanel } from './Skills';
 import { McpPanel, canManageMcp } from './McpServers';
 import { TransferPanel, canTransfer } from './Transfer';
+import { Switch } from './Switch';
 import s from '../Harbor.module.css';
 
 export function Settings({ state, appearanceState, workspace, showConversation }: { state: HarborState; appearanceState: AppearanceState; workspace: WorkspaceState; showConversation?: () => void }) {
@@ -21,6 +22,7 @@ export function Settings({ state, appearanceState, workspace, showConversation }
   const { appearance, scheme, updateAppearance, saveError } = appearanceState;
   const [pending, setPending] = useState(false);
   const tabs = ['Connections', 'Appearance', 'Workspace', 'Routing', 'Usage', 'Project', ...(state.api.listSkills ? ['Skills'] : []), ...(canManageMcp(state.api) ? ['MCP servers'] : []), ...(canTransfer(state.api) ? ['Import & export'] : []), ...(canExportDiagnostics(state.api) ? ['Diagnostics'] : [])];
+  const groups = [['General', ['Connections', 'Appearance', 'Workspace']], ['Routing', ['Routing', 'Usage', 'Project']], ['Integrations', ['Skills', 'MCP servers']], ['Maintenance', ['Import & export', 'Diagnostics']]] as const;
   const project = state.projects.find(p => p.id === state.projectId);
   async function action(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   // Custom CLIs (plan 2.2): their descriptors, for Edit, and the open Add/Edit panel.
@@ -37,8 +39,9 @@ export function Settings({ state, appearanceState, workspace, showConversation }
   return <section className={s.settings} aria-label="Settings">
     <div className={s.settingsHeading}><h2>{tab === 'Appearance' ? 'Make Harbor yours.' : tab === 'Routing' ? 'How work gets assigned.' : tab === 'Workspace' ? 'Your workspace, your way.' : tab === 'Usage' ? 'Your usage, at a glance.' : tab === 'Project' ? 'Settings for this project.' : tab === 'Diagnostics' ? 'Help us help you.' : tab === 'Skills' ? 'Skills your agents can use.' : tab === 'MCP servers' ? 'Tools your agents can reach.' : tab === 'Import & export' ? 'Bring work in, take it along.' : 'Your tools, connected.'}</h2>{tab === 'Connections' ? <button disabled={pending} onClick={() => void action(state.refreshClis)}>{pending ? 'Checking…' : 'Refresh'}</button> : null}</div>
     <p className={s.muted}>{tab === 'Appearance' ? 'Choose how Harbor is arranged, then make the colors yours.' : tab === 'Routing' ? 'Set the defaults for your projects and conversations.' : tab === 'Workspace' ? 'Reading preferences, notifications, and reusable prompts.' : tab === 'Usage' ? 'Review available readings from your connected tools.' : tab === 'Project' ? 'Override routing for one project and manage the tools it always allows.' : tab === 'Diagnostics' ? 'Export a redacted bundle for support.' : tab === 'Skills' ? 'Instructions in folders, from Harbor’s library, your project, Claude Code and Codex.' : tab === 'MCP servers' ? 'One list of MCP servers, handed to each CLI in its own format.' : tab === 'Import & export' ? 'Harbor bundles for a project, and chats from Claude Code, Codex, claude.ai and ChatGPT as read-only history.' : 'Harbor discovers installed CLIs and uses their existing sign-ins.'}</p>
-    <div className={s.tabs} role="tablist" aria-label="Settings sections">{tabs.map((name, i, all) => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const n = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : -1) + all.length) % all.length; setTab(all[n]); document.getElementById(`tab-${all[n]}`)?.focus(); } }}>{name}</button>)}</div>
-    <div role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
+    <div className={s.settingsLayout}>
+    <div className={s.tabs} role="tablist" aria-label="Settings sections" aria-orientation="vertical">{groups.map(([group, names]) => { const present = names.filter(n => tabs.includes(n)); return present.length ? <div key={group} className={s.tabGroup} role="presentation"><span className={s.tabGroupLabel} aria-hidden="true">{group}</span>{present.map(name => <button key={name} role="tab" id={`tab-${name}`} aria-controls="settings-panel" aria-selected={tab === name} tabIndex={tab === name ? 0 : -1} className={tab === name ? s.tabActive : ''} onClick={() => setTab(name)} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const all = tabs.filter(n => groups.some(g => (g[1] as readonly string[]).includes(n))); const i = all.indexOf(name); const next = e.key === 'Home' ? 0 : e.key === 'End' ? all.length - 1 : (i + (e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1) + all.length) % all.length; setTab(all[next]); document.getElementById(`tab-${all[next]}`)?.focus(); } }}>{name}</button>)}</div> : null; })}</div>
+    <div className={s.settingsPanel} role="tabpanel" id="settings-panel" aria-labelledby={`tab-${tab}`}>
       {tab === 'Workspace' ? <WorkspaceSettings state={state} workspace={workspace}/> : tab === 'Appearance' ? <>
         <fieldset className={s.appearanceGroup}><legend>Workspace mode</legend><p className={s.muted} id="layout-help">Three ways to work. Switching keeps your conversations, drafts, and running agents.</p>
           <div className={s.layoutChoices} aria-describedby="layout-help">{layouts.map(layout => <label key={layout.id} className={s.layoutChoice}>
@@ -64,14 +67,14 @@ export function Settings({ state, appearanceState, workspace, showConversation }
         <p className={s.appearanceSaved} role="status">{saveError ? 'Applied for this session. Harbor could not save this preference on your device.' : 'Changes apply instantly and are saved on this device.'}</p>
       </> : state.loading || !state.settings ? <p role="status">Loading settings…</p> : tab === 'Connections' ? <>
         {!state.clis.length ? <p>No CLIs detected. Install a supported CLI, then refresh.</p> : state.clis.map(cli => <div className={s.connection} key={cli.id}>
-          <div className={s.connectionHeading}><h3>{cli.name}</h3><span className={cli.signedIn ? s.ready : s.muted}>{!cli.installed ? 'Not installed' : cli.authState === 'unknown' ? 'Status unknown' : cli.signedIn ? '✓ Ready' : 'Needs login'}</span></div>
+          <div className={s.connectionHeading}><h3>{cli.name}</h3><span className={s.pill} data-tone={!cli.installed ? undefined : cli.authState === 'unknown' ? 'warn' : cli.signedIn ? 'ok' : 'warn'}>{!cli.installed ? 'Not installed' : cli.authState === 'unknown' ? 'Status unknown' : cli.signedIn ? '✓ Ready' : 'Needs login'}</span></div>
           <p>{!cli.installed ? 'Install this CLI through its native installer, then refresh.' : cli.signedIn ? 'Available when enabled for routing.' : cli.authState === 'unknown' ? 'Sign-in status could not be confirmed. Open the native CLI or refresh.' : 'Installed. Sign in through its native CLI to start using it.'}</p>
           <small>{cli.version ? `Version ${cli.version}` : 'Version unavailable'}{cli.note ? ` · ${cli.note}` : ''}</small>
           <div className={s.connectionActions}>{cli.installed && !cli.signedIn && cli.authState !== 'unknown' ? <button disabled={pending} onClick={() => void action(() => state.run(() => state.api.openLogin(cli.id)))}>Sign in to {cli.name}</button> : null}
-            <label><input type="checkbox" disabled={!cli.installed || pending} checked={state.settings?.cliOverrides[cli.id]?.enabled !== false} onChange={e => void action(() => state.updateSettings({ cliOverrides: { ...state.settings!.cliOverrides, [cli.id]: { enabled: e.target.checked } } }))}/> Enable {cli.name}</label></div>
+            <Switch disabled={!cli.installed || pending} checked={state.settings?.cliOverrides[cli.id]?.enabled !== false} onChange={on => void action(() => state.updateSettings({ cliOverrides: { ...state.settings!.cliOverrides, [cli.id]: { enabled: on } } }))}>Enable {cli.name}</Switch></div>
           <CliFeaturesNote cli={cli}/>
           {cli.custom ? <CustomCliActions api={state.api} cli={cli} descriptor={customs.find(c => c.id === cli.id)} disabled={pending} onEdit={() => setEditor(customs.find(c => c.id === cli.id))} onRemoved={afterCustomChange}/>
-            : <CliPathField key={`${cli.id}:${state.settings?.cliPaths?.[cli.id] ?? ''}`} api={state.api} cli={cli} saved={state.settings?.cliPaths?.[cli.id]} disabled={pending} onSave={path => state.saveSettings({ cliPaths: { [cli.id]: path } })}/>}
+            : <details className={s.advanced} open={!!state.settings?.cliPaths?.[cli.id] || undefined}><summary>Advanced: executable path</summary><CliPathField key={`${cli.id}:${state.settings?.cliPaths?.[cli.id] ?? ''}`} api={state.api} cli={cli} saved={state.settings?.cliPaths?.[cli.id]} disabled={pending} onSave={path => state.saveSettings({ cliPaths: { [cli.id]: path } })}/></details>}
         </div>)}
         {state.api.saveCustomCli && state.api.dryRunCustomCli ? (editor
           ? <AddCliPanel key={editor === 'new' ? 'new' : editor.id} api={state.api} editing={editor === 'new' ? undefined : editor} onClose={() => setEditor(undefined)} onSaved={afterCustomChange}/>
@@ -90,6 +93,7 @@ export function Settings({ state, appearanceState, workspace, showConversation }
       </> : <p>Open a project to change its settings.</p>) : tab === 'Skills' ? <SkillsPanel key={project?.id ?? 'none'} api={state.api} projectId={project?.id} projectName={project?.name}/> : tab === 'MCP servers' ? <McpPanel key={project?.id ?? 'none'} api={state.api} projectId={project?.id} projectName={project?.name} ownMcp={state.settings.claudeOwnMcp === true} onOwnMcp={async (on) => { await state.updateSettings({ claudeOwnMcp: on }); }}/> : tab === 'Diagnostics' ? <Diagnostics api={state.api}/> : tab === 'Import & export' ? <TransferPanel key={project?.id ?? 'none'} state={{ ...state, openConversation: async (c) => { await state.openConversation(c); showConversation?.(); } }}/> : <>
         <UsageWindows windows={state.usage} clis={state.clis}/>
       </>}
+    </div>
     </div>
   </section>;
 }
