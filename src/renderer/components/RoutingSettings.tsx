@@ -105,10 +105,10 @@ export function RoutingSettings({ state }: { state: HarborState }) {
   return <>
     <RoutingFields state={state}/>
     <div className={s.fxSettingsGroup}><h4>Helpers per lead turn</h4>
-      <p className={s.fxNote}>A brake on fan-out: when a lead asks for more, Harbor holds the rest back and says so in the conversation.</p>
-      <div className={s.fxField}><span>Helpers</span><NumberField label="Helpers per lead turn" value={st.maxHelpersPerTurn} min={1} max={12} placeholder="default 4" suffix="per turn (1–12)" disabled={saving !== ''} onCommit={v => void save('maxHelpers', { maxHelpersPerTurn: v })}/></div>
+      <p className={s.fxNote}>Off by default: every delegation is queued and the concurrency limit paces it. Set a number to have Harbor create the rest paused, for you to resume from their cards.</p>
+      <div className={s.fxField}><span>Helpers</span><NumberField label="Helpers per lead turn" value={st.maxHelpersPerTurn} min={1} max={12} placeholder="no limit" suffix="per turn (1–12)" disabled={saving !== ''} onCommit={v => void save('maxHelpers', { maxHelpersPerTurn: v })}/></div>
       {errors.maxHelpers ? <p className={s.fxError} role="alert">{errors.maxHelpers}</p> : null}
-      <div className={s.fxField}><span>Planners</span><NumberField label="Planners per lead turn" value={st.maxPlannersPerTurn} min={1} max={4} placeholder="default 1" suffix="per turn (1–4)" disabled={saving !== ''} onCommit={v => void save('maxPlanners', { maxPlannersPerTurn: v })}/></div>
+      <div className={s.fxField}><span>Planners</span><NumberField label="Planners per lead turn" value={st.maxPlannersPerTurn} min={1} max={4} placeholder="no limit" suffix="per turn (1–4)" disabled={saving !== ''} onCommit={v => void save('maxPlanners', { maxPlannersPerTurn: v })}/></div>
       {errors.maxPlanners ? <p className={s.fxError} role="alert">{errors.maxPlanners}</p> : null}
     </div>
     <div className={s.fxSettingsGroup}><h4>Background</h4>

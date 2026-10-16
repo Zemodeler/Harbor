@@ -671,8 +671,7 @@ export const CONCURRENCY_RANGE = [1, 8] as const;
 /** At most half the allowance can be reserved, or automatic routing would rarely have anything to use. */
 export const RESERVE_RANGE = [0, 50] as const;
 /** Fan-out brake per lead turn (see leadTurn): helpers beyond these wait for the lead's confirmation. */
-export const DEFAULT_HELPERS_PER_TURN = 4;
-export const DEFAULT_PLANNERS_PER_TURN = 1;
+// No per-turn brake by default: every delegation is created and the scheduler (concurrency, budget) paces it. The ranges apply when set.
 export const HELPERS_PER_TURN_RANGE = [1, 12] as const;
 export const PLANNERS_PER_TURN_RANGE = [1, 4] as const;
 const HELPER_ROLES = ['planner', 'implementer', 'reviewer', 'other'] as const;

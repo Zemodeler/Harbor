@@ -7,7 +7,7 @@ import { claudeArgs, parseClaudeLine } from '../src/main/adapters/claude';
 import { RATE_LIMIT_RE, isModelSpecific, type Chunk, type RunOptions } from '../src/main/adapters/types';
 import { DEFAULT_CATALOG, costWeightOf, loadCatalogWithWarnings, type CatalogEntry } from '../src/main/clis/capabilities';
 import type { ResolvedCli } from '../src/main/clis/discovery';
-import { askedCounts } from '../src/main/orchestrator';
+import { askedCounts, missedHistory } from '../src/main/orchestrator';
 import { quoteWinArg } from '../src/main/proc';
 import { ROUTING_WEIGHTS as W, explainNoRoute, route, tierFor, type RouteRequest, type RouterInput } from '../src/main/router';
 import { PRICE_CAP } from '../src/main/routePrice';
@@ -533,32 +533,44 @@ describe('item 3: planner tier follows complexity', () => {
 
 describe('item 4: fan-out brakes', () => {
   const six = Array.from({ length: 6 }, (_, i) => task({ ref: `t${i}`, title: `Look ${i}` }));
-  const run = async (text: string, plan: unknown[], settings?: { maxHelpersPerTurn?: number }) => {
+  const run = async (text: string, plan: unknown[], settings?: { maxHelpersPerTurn?: number; maxPlannersPerTurn?: number }) => {
     const h = await harness({ claude: script({ lead: (p) => (p.includes('User:\n') ? delegate('go', ...plan) : say('ok')) }) });
     if (settings) await h.svc.setSettings(settings);
     await h.svc.send(h.conv.id, text);
     await h.svc.whenIdle();
     return h;
   };
-  it('at most four helpers start per turn; the rest are announced and put to the lead as a note, not dropped silently', async () => {
+  it('no per-turn limit by default: every delegation is created and nothing is held back', async () => {
     const h = await run('survey the whole repository in src/', six);
-    expect(h.helpers()).toHaveLength(4);
-    expect((await h.texts()).some((t) => /started 4 of 6 delegated helper\(s\) and held back 2/.test(t))).toBe(true);
+    expect(h.helpers()).toHaveLength(6);
+    expect(h.helpers().every((a) => !a.paused)).toBe(true);
+    expect((await h.texts()).some((t) => /paused|held back/.test(t))).toBe(false);
+  });
+  it('a per-turn setting creates the rest paused (a record to resume), tells the user and the lead, and the user asking for more lifts it', async () => {
+    const h = await run('survey the whole repository in src/', six, { maxHelpersPerTurn: 4 });
+    expect(h.helpers()).toHaveLength(6);
+    expect(h.helpers().filter((a) => a.paused).map((a) => a.title).sort()).toEqual(['Look 4', 'Look 5']);
+    expect((await h.texts()).some((t) => /created 2 of 6 delegated helper\(s\) paused \(your limit per turn: 4 helpers\)/.test(t))).toBe(true);
     const next = h.calls(isLead).find((c) => c.prompt.includes('Helper reports'))!;
-    expect(next.prompt).toContain('Harbor did NOT start 2 of your delegations');
-    expect(next.prompt).toContain('Look 4');
+    expect(next.prompt).toContain('Harbor created but PAUSED 2 of your delegations');
+    expect(next.prompt).toContain('do not delegate them again');
+    expect((await run('use 6 helpers to survey src/', six, { maxHelpersPerTurn: 4 })).helpers().every((a) => !a.paused)).toBe(true);
   });
-  it('a settings value raises it, and so does the user asking for that many', async () => {
-    expect((await run('survey src/', six, { maxHelpersPerTurn: 6 })).helpers()).toHaveLength(6);
-    expect((await run('use 6 helpers to survey src/', six)).helpers()).toHaveLength(6);
-  });
-  it('one planner per turn; the work waiting on a held-back planner is held back with it', async () => {
+  it('a planner limit pauses the extra planner; the work waiting on it is created and waits on it (never dropped)', async () => {
     const plan = [task({ ref: 'p1', title: 'Plan A', role: 'planner' }), task({ ref: 'p2', title: 'Plan B', role: 'planner' }),
       task({ ref: 'i2', title: 'Build B', role: 'implementer', access: 'edit', specFrom: 'p2', files: ['b.txt'] })];
-    const h = await run('plan and build src/ changes', plan);
-    expect(h.helpers().map((a) => a.title)).toEqual(['Plan A']);
-    expect((await h.texts()).some((t) => /held back 2/.test(t))).toBe(true);
-    expect((await run('use 2 planners for src/ changes', plan)).helpers().map((a) => a.title).sort()).toEqual(['Build B', 'Plan A', 'Plan B']);
+    const h = await run('plan and build src/ changes', plan, { maxPlannersPerTurn: 1 });
+    expect(h.helpers().map((a) => `${a.title}${a.paused ? ' (paused)' : ''}`).sort()).toEqual(['Build B', 'Plan A', 'Plan B (paused)']);
+    expect(h.helper('Build B').dependsOn).toContain(h.helper('Plan B').id);
+    expect((await run('use 2 planners for src/ changes', plan, { maxPlannersPerTurn: 1 })).helpers().every((a) => !a.paused)).toBe(true);
+  });
+  it('missedHistory: what a resumed session did not see while another CLI had the conversation', () => {
+    const m = (time: number, role: 'user' | 'assistant' | 'system', cli?: string) => ({ id: String(time), conversationId: 'c', role, text: `t${time}`, time, ...(cli ? { details: { cli, model: 'm', effort: 'medium', reason: '' } } : {}) });
+    const msgs = [m(1, 'user'), m(2, 'assistant', 'claude'), m(3, 'user'), m(4, 'assistant', 'codex'), m(5, 'system'), m(6, 'user')];
+    // Claude's session last ran at 2 (its own reply is at 2): it missed the user at 3 and codex at 4; the trigger at 6 is already in the prompt.
+    expect(missedHistory(msgs, 2, 'claude').map((x) => x.time)).toEqual([3, 4]);
+    expect(missedHistory(msgs, 4, 'codex')).toEqual([]);
+    expect(missedHistory(Array.from({ length: 30 }, (_, i) => m(i + 1, i % 2 ? 'assistant' : 'user', 'codex')), 0, 'claude')).toHaveLength(10);
   });
   it('settings are validated and clamped', async () => {
     const h = await harness({});
