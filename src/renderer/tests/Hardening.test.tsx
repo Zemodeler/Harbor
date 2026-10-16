@@ -427,3 +427,33 @@ describe('Production entry', () => {
     expect(window.harbor).toBeUndefined();
   });
 });
+
+describe('Send now with attachments', () => {
+  it('sends the attached images with the steer message and clears them from the composer', async () => {
+    const send = vi.fn(async () => true);
+    const state = fakeState({ send, conversation: conv({ activity: { state: 'working', updated: 1 } }), messages: [message('e', Date.now(), 'hi', { conversationId: 'A' })] });
+    render(view(state, fakeWorkspace().ws));
+    await userEvent.upload(screen.getByLabelText('Choose images'), [new File(['x'], 'shot.png', { type: 'image/png' })]);
+    await screen.findByRole('list', { name: 'Images to send' });
+    await userEvent.type(screen.getByRole('textbox', { name: 'Message Harbor' }), 'look at this');
+    await userEvent.click(screen.getByRole('button', { name: 'Send now' }));
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect(send.mock.calls[0][0]).toBe('look at this');
+    expect(send.mock.calls[0][1]).toEqual([{ name: 'shot.png', mime: 'image/png', dataBase64: expect.any(String) }]);
+    expect(send.mock.calls[0][2]).toEqual({ steer: true });
+    expect(screen.queryByRole('list', { name: 'Images to send' })).not.toBeInTheDocument();
+  });
+  it('offers Send now for attachments alone and keeps them when the send fails', async () => {
+    const send = vi.fn(async () => false);
+    render(view(fakeState({ send, conversation: conv({ activity: { state: 'working', updated: 1 } }) }), fakeWorkspace().ws));
+    expect(screen.getByRole('button', { name: 'Send now' })).toBeDisabled();
+    await userEvent.upload(screen.getByLabelText('Choose images'), [new File(['x'], 'shot.png', { type: 'image/png' })]);
+    await screen.findByRole('list', { name: 'Images to send' });
+    expect(screen.getByRole('button', { name: 'Send now' })).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Send now' }));
+    await waitFor(() => expect(send).toHaveBeenCalled());
+    expect(send.mock.calls[0][1]).toEqual([{ name: 'shot.png', mime: 'image/png', dataBase64: expect.any(String) }]);
+    expect(await screen.findByRole('button', { name: 'Remove shot.png' })).toBeInTheDocument(); // put back for a retry
+    expect(screen.getByText('Your message was kept. Retry when the connection is ready.')).toBeInTheDocument();
+  });
+});
