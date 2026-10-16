@@ -1582,8 +1582,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
   }
 
   /**
-   * A lead's HARBOR_REPLY: forwarded to a helper of this conversation that waits (its answer) or was stopped (it continues in its own
-   * session, on its branch). Returns the helper's id when delivered.
+   * A lead's HARBOR_REPLY: forwarded to a helper of this conversation that waits (its answer), was stopped, or finished or failed but
+   * still has its saved session (it continues in that session, on its branch, like a resume). Returns the helper's id when delivered.
    */
   private deliverReply(projectId: Id, conversationId: Id, r: ReplyRequest): Id | undefined {
     const q = r.to.trim().toLowerCase();
@@ -1591,14 +1591,16 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const hits = mine.filter((x) => x.id.toLowerCase() === q);
     const target = hits[0] ?? (q.length >= 6 ? (mine.filter((x) => x.id.toLowerCase().startsWith(q)).length === 1 ? mine.find((x) => x.id.toLowerCase().startsWith(q)) : undefined) : undefined);
     if (!target) { this.post(conversationId, 'system', `Harbor could not deliver the lead's reply to "${clip(r.to, 60)}": no single helper of this conversation has that id.`); return undefined; }
-    if (!['waiting', 'stopped', 'working', 'queued'].includes(target.state)) {
-      this.post(conversationId, 'system', `Harbor did not deliver the lead's reply to "${target.title}": it is ${target.state}. Delegate new work (with "retryOf" to redo it) instead.`, { agentId: target.id });
+    const finished = target.state === 'done' || target.state === 'failed';
+    if (!['waiting', 'stopped', 'working', 'queued'].includes(target.state) && !(finished && this.d.store.getSession(target.id))) {
+      this.post(conversationId, 'system', `Harbor did not deliver the lead's reply to "${target.title}": it is ${target.state} and has no saved session to resume. Delegate new work (with "retryOf" to redo it) instead.`, { agentId: target.id });
       return undefined;
     }
     this.d.store.addCoordination({ projectId, kind: 'direct', from: this.d.store.mainAgent(projectId)?.id, to: target.id, text: r.text });
     this.post(conversationId, 'system', `The lead replied to "${target.title}": ${clip(r.text, 200)}`, { agentId: target.id });
     if (target.state === 'queued') { const f = this.followups.get(target.id) ?? []; f.push(r.text); this.followups.set(target.id, f); return target.id; }
-    if (target.state === 'stopped') { this.reported.delete(reportKey(target)); this.d.store.clearReportDelivery(target.id); }
+    if (target.state === 'stopped' || finished) { this.reported.delete(reportKey(target)); this.d.store.clearReportDelivery(target.id); }
+    if (finished) this.post(conversationId, 'system', `"${target.title}" had ${target.state === 'done' ? 'finished' : 'failed'}; it continues from its saved session to act on the reply.`, { agentId: target.id });
     this.followUp(target, `Message from the lead: ${r.text}`);
     return target.id;
   }

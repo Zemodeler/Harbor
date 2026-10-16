@@ -101,4 +101,35 @@ describe('helper questions', () => {
     expect(last.opts.resumeId).toBeTruthy();
     expect(h.helper('Port the ai package').state).toBe('done');
   });
+
+  it('a lead reply to a finished helper resumes its saved session; without a session it is refused', async () => {
+    let n = 0, targetId = '';
+    const h = await harness({ claude: script({
+      lead: (p) => (p.includes('User:\nport') ? delegate('go', planner)
+        : p.includes('User:\ncontinue') ? say(`Following up.\nHARBOR_REPLY: ${JSON.stringify({ to: targetId, text: 'The secret-scan finding is a fixture; keep it.' })}`) : say('ok')),
+      helper: () => (n++ === 0 ? say(done('first pass')) : say(done('second pass')))
+    }) });
+    await h.svc.send(h.conv.id, 'port the ai package');
+    await h.svc.whenIdle();
+    const a = h.helper('Port the ai package');
+    targetId = a.id;
+    expect(a.state).toBe('done');
+    await h.svc.send(h.conv.id, 'continue the port');
+    await h.svc.whenIdle();
+    const last = h.calls(isHelper).at(-1)!;
+    expect(h.calls(isHelper)).toHaveLength(2);
+    expect(last.prompt).toContain('Message from the lead: The secret-scan finding is a fixture; keep it.');
+    expect(last.opts.resumeId).toBeTruthy();
+    expect(h.helper('Port the ai package').state).toBe('done');
+    const texts = await h.texts();
+    expect(texts.some((t) => t.includes('had finished; it continues from its saved session'))).toBe(true);
+    expect(texts.some((t) => t.startsWith('Harbor did not deliver'))).toBe(false);
+
+    // The same reply to a finished helper whose session is gone: refused, with the reason.
+    h.svc.store.clearSession(a.id);
+    await h.svc.send(h.conv.id, 'continue the port');
+    await h.svc.whenIdle();
+    expect(h.calls(isHelper)).toHaveLength(2);
+    expect((await h.texts()).some((t) => t.startsWith('Harbor did not deliver the lead\'s reply') && t.includes('has no saved session to resume'))).toBe(true);
+  });
 });
