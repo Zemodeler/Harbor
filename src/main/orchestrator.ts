@@ -40,7 +40,7 @@ import { NOTES_BUDGET, notesText, selectNotes } from './knowledge';
 import { RepoMapCache } from './repoMap';
 import { calibrationSample, finishedRuns, overlapKTok, readingsDuring } from './runCalibration';
 import { effortFor, evaluate, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
-import { DEFAULT_CONCURRENCY, DEFAULT_HELPERS_PER_TURN, DEFAULT_PLANNERS_PER_TURN, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
+import { DEFAULT_CONCURRENCY, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
 import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
 import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
@@ -212,6 +212,16 @@ export function askedCounts(text: string): { helpers?: number; planners?: number
     helpers: best(new RegExp(`\\b${COUNT}\\s+(?:parallel\\s+|separate\\s+|independent\\s+)?(?:helpers?|agents?|workers?|subagents?|implementers?|reviewers?)\\b`, 'gi')),
     planners: best(new RegExp(`\\b${COUNT}\\s+(?:parallel\\s+|separate\\s+)?planners?\\b`, 'gi'))
   };
+}
+
+/**
+ * What a session resumed on `cli` did not see: user messages and other CLIs' replies after its last run (`since`, when that run
+ * reported its session id), the newest 10. The trigger message at the end is left out: the prompt already carries it.
+ */
+export function missedHistory(msgs: Message[], since: number, cli: CliId): Message[] {
+  const out = msgs.filter((m) => m.time > since && (m.role === 'user' || (m.role === 'assistant' && m.details?.cli !== cli)));
+  if (out.at(-1)?.role === 'user') out.pop();
+  return out.slice(-10);
 }
 
 /** What a message records about how it was routed: the choice and reason, plus the evidence behind it (scores, margin, ties, tier loss, skips). */
@@ -526,7 +536,7 @@ export class Orchestrator {
     for (;;) {
       // A screenshot request waiting for the user is not work in flight; one being checked or captured is.
       const busy = this.running.size > 0 || this.mainBusy > 0 || this.reportWakes.size > 0 || (this.d.screenshots?.active() ?? 0) > 0;
-      const pending = this.d.store.allAgentRecords().some((a) => a.role !== 'main' && (a.state === 'queued' || a.state === 'working'));
+      const pending = this.d.store.allAgentRecords().some((a) => a.role !== 'main' && ((a.state === 'queued' && !this.parked(a)) || a.state === 'working'));
       if (!busy && !pending) return;
       if (Date.now() - start > timeoutMs) throw new Error('whenIdle timed out');
       await new Promise((r) => setTimeout(r, 20));
@@ -1327,7 +1337,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       }
     }
     delegations = this.dedupeDelegations(delegations, conversationId);
-    delegations = this.fanOutBrake(delegations, conversationId, trigger.kind === 'user' ? trigger.text : undefined);
+    const pausedRefs = this.fanOutBrake(delegations, conversationId, trigger.kind === 'user' ? trigger.text : undefined);
     for (const text of proto.decision) this.d.store.addCoordination({ projectId: project.id, kind: 'decision', from: main.id, text, conversationId });
     for (const n of proto.note) {
       const note = this.d.store.addProjectNote(project.id, { text: n.text, topic: n.topic, conversationId });
@@ -1337,7 +1347,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const screened = await this.screenDelegations(project, delegations, conversationId);
     delegations = screened.kept;
     const pin = delegations.some((t) => t.integrate) ? await this.pinTarget(project) : undefined;
-    const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty });
+    const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty, held: pausedRefs });
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
     this.showImages(main, conversationId, proto.showImage, project.path, [project.path]);
     this.openDocuments(main, conversationId, proto.openDocument, project.path, [{ kind: 'project', path: project.path }]);
@@ -1345,7 +1355,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const replied = new Set(proto.reply.map((r) => this.deliverReply(project.id, conversationId, r)).filter((x): x is Id => !!x));
     const started = created.filter((c) => c.state !== 'failed');
     if (started.length) {
-      this.post(conversationId, 'system', 'Delegated: ' + started.map((c, i) => `${i + 1}. ${c.title}${c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
+      this.post(conversationId, 'system', 'Delegated: ' + started.map((c, i) => `${i + 1}. ${c.title}${c.paused ? ' (paused: per-turn limit)' : c.dependsOn.length ? ' (after earlier steps)' : ''}`).join('  '), { agentId: main.id });
       this.postPlanEstimate(conversationId, started, main.id);
     }
     const asking = proto.ask[0];
@@ -1402,18 +1412,20 @@ ${attachedFilesNote(others)}` : text, conversationId);
   }
 
   /**
-   * Fan-out brake: one lead turn starts at most `maxHelpersPerTurn` helpers (default 4) and `maxPlannersPerTurn` planners (default 1)
-   * unless the user's message asked for more by number. Integrators are Harbor's own git work and do not count. The rest are not
-   * started and not dropped silently: the user sees which, and the lead is told to confirm them on its next turn. A task that waits
-   * on a held-back one is held back with it (it would otherwise fail as an unresolved reference).
+   * Optional fan-out brake. Off unless the user set `maxHelpersPerTurn` or `maxPlannersPerTurn`: then one lead turn starts at most
+   * that many helpers and planners, unless the user's message asked for more by number. Integrators are Harbor's own git work and
+   * never count. Delegations past the limit are still created, paused: a record the user resumes from the card, instead of a dropped
+   * task the lead had to delegate again (the old round trip cost a lead turn). Dependents of a paused task simply wait on it.
+   * Returns the refs to create paused.
    */
-  private fanOutBrake(tasks: PlannedTask[], conversationId: Id, userText?: string): PlannedTask[] {
+  private fanOutBrake(tasks: PlannedTask[], conversationId: Id, userText?: string): Set<string> {
     const s = this.d.store.getSettings();
-    const asked = userText ? askedCounts(userText) : {};
-    const maxHelpers = Math.max(s.maxHelpersPerTurn ?? DEFAULT_HELPERS_PER_TURN, asked.helpers ?? 0);
-    const maxPlanners = Math.max(s.maxPlannersPerTurn ?? DEFAULT_PLANNERS_PER_TURN, asked.planners ?? 0);
-    let helpers = 0, planners = 0;
     const held = new Set<string>();
+    if (s.maxHelpersPerTurn === undefined && s.maxPlannersPerTurn === undefined) return held;
+    const asked = userText ? askedCounts(userText) : {};
+    const maxHelpers = s.maxHelpersPerTurn === undefined ? Infinity : Math.max(s.maxHelpersPerTurn, asked.helpers ?? 0);
+    const maxPlanners = s.maxPlannersPerTurn === undefined ? Infinity : Math.max(s.maxPlannersPerTurn, asked.planners ?? 0);
+    let helpers = 0, planners = 0;
     for (const t of tasks) {
       if (t.integrate) continue;
       if (t.role === 'planner' && planners >= maxPlanners) { held.add(t.ref); continue; }
@@ -1421,20 +1433,12 @@ ${attachedFilesNote(others)}` : text, conversationId);
       helpers++;
       if (t.role === 'planner') planners++;
     }
-    if (!held.size) return tasks;
-    // Whatever waits on a held-back task waits with it.
-    for (let grew = true; grew;) {
-      grew = false;
-      for (const t of tasks) {
-        if (held.has(t.ref)) continue;
-        if ([...t.dependsOn, ...(t.specFrom ? [t.specFrom] : []), ...(t.integrate?.sources ?? [])].some((r) => held.has(r))) { held.add(t.ref); grew = true; }
-      }
-    }
-    const heldTasks = tasks.filter((t) => held.has(t.ref));
-    const list = heldTasks.map((t) => `${t.role}: ${t.title}`).join('; ');
-    this.post(conversationId, 'system', `Harbor started ${tasks.length - heldTasks.length} of ${tasks.length} delegated helper(s) and held back ${heldTasks.length} (limit per turn: ${maxHelpers} helpers, ${maxPlanners} planner${maxPlanners === 1 ? '' : 's'}): ${clip(list, 300)}. The lead is asked to confirm them; say so if you want more at once.`);
-    this.addNote(conversationId, `Harbor did NOT start ${heldTasks.length} of your delegations (per-turn limit: ${maxHelpers} helpers, ${maxPlanners} planner(s)): ${clip(list, 180)}. Re-delegate them after the first results if they are still needed, or ask the user to confirm.`);
-    return tasks.filter((t) => !held.has(t.ref));
+    if (!held.size) return held;
+    const list = tasks.filter((t) => held.has(t.ref)).map((t) => `${t.role}: ${t.title}`).join('; ');
+    const limit = [Number.isFinite(maxHelpers) ? `${maxHelpers} helpers` : '', Number.isFinite(maxPlanners) ? `${maxPlanners} planner${maxPlanners === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ');
+    this.post(conversationId, 'system', `Harbor created ${held.size} of ${tasks.length} delegated helper(s) paused (your limit per turn: ${limit}): ${clip(list, 300)}. Resume them from their cards, or say how many helpers you want at once.`);
+    this.addNote(conversationId, `Harbor created but PAUSED ${held.size} of your delegations (the user's per-turn limit: ${limit}): ${clip(list, 180)}. They start when the user resumes them; do not delegate them again.`);
+    return held;
   }
 
   /** Identical (role, instructions) in one turn start once: a repeated line is a model stutter, not two jobs. Refs of dropped copies point at the kept one. */
@@ -1615,7 +1619,15 @@ ${attachedFilesNote(others)}` : text, conversationId);
    * rollbacks the user started are not the lead's work and never report to it, so they do not count.
    */
   private helpersActive(projectId: Id, conversationId: Id): boolean {
-    return this.registerFor(projectId, conversationId).some((x) => !x.byUser && (x.state === 'queued' || x.state === 'working' || x.state === 'waiting'));
+    return this.registerFor(projectId, conversationId).some((x) => !x.byUser && ((x.state === 'queued' && !this.parked(x)) || x.state === 'working' || x.state === 'waiting'));
+  }
+
+  /** Parked by the user: paused, or queued behind a parked one. Not work in flight: nothing happens until the user resumes it. */
+  private parked(a: AgentRecord, seen = new Set<Id>()): boolean {
+    if (a.paused) return true;
+    if (a.state !== 'queued' || seen.has(a.id)) return false;
+    seen.add(a.id);
+    return a.dependsOn.some((d) => { const dep = this.d.store.getAgent(d); return !!dep && !TERMINAL.includes(dep.state) && this.parked(dep, seen); });
   }
 
   /** Goal mode: resume the lead until it reports the goal done, asks, fails, waits for helpers (reports resume it), or the cap is hit. */
@@ -1671,7 +1683,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     return { tasks: out, refused };
   }
 
-  private createTasks(project: Project, input: PlannedTask[], conversationId: Id, requester?: Id, ctx: { pin?: { checkedOut?: string }; dirty?: 'dirty' | 'unknown' } = {}): AgentRecord[] {
+  private createTasks(project: Project, input: PlannedTask[], conversationId: Id, requester?: Id, ctx: { pin?: { checkedOut?: string }; dirty?: 'dirty' | 'unknown'; held?: Set<string> } = {}): AgentRecord[] {
     const { store } = this.d;
     const { tasks, refused: unbound } = this.bindReviewers(project, input, conversationId);
     const refToId = new Map<string, Id>(tasks.map((t) => [t.ref, newId()]));
@@ -1749,6 +1761,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
         // A clear edit goes straight to one implementer; its instructions are the spec.
         spec: t.role === 'implementer' && !specFromId ? t.instructions : undefined,
         ...(ctx.dirty && t.access === 'edit' && !t.integrate ? { dirtyAtStart: ctx.dirty } : {}),
+        // Past the user's per-turn limit (fanOutBrake): created as a record, started when the user resumes it.
+        ...(ctx.held?.has(t.ref) && !t.integrate ? { paused: true, summary: 'Paused: past your per-turn helper limit. Resume it from this card.' } : {}),
         ...(!t.integrate ? { estimatedMinutes: Math.round(this.estimateFor(project, t, !!specFromId, difficulty).minutes * 10) / 10 } : {})
       };
       const bad = unresolved.get(t.ref);
@@ -2543,7 +2557,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const { store } = this.d;
     // User-started integrations and rollbacks are left out: they never report, so they must not hold back the lead's report either.
     const agents = store.listAgentRecords(a.projectId).filter((x) => x.role !== 'main' && !x.byUser && x.parentConversationId === a.parentConversationId);
-    const active = agents.some((x) => x.state === 'queued' || x.state === 'working' || x.state === 'waiting');
+    // A parked helper (paused by the user, or queued behind one) is not work in flight: the lead hears about the finished ones now.
+    const active = agents.some((x) => (x.state === 'queued' && !this.parked(x)) || x.state === 'working' || x.state === 'waiting');
     const needsMain = wake || a.state === 'failed' || !active;
     if (!needsMain) return;
     const open = agents.filter((x) => TERMINAL.includes(x.state) && !this.reported.has(reportKey(x)));
@@ -3628,9 +3643,11 @@ ${attachedFilesNote(others)}` : text, conversationId);
         const generic = !clis.length || clis.every((c) => !c.installed) ? ' Open Settings to install or sign in to a supported CLI.' : '';
         return { ok: false, text: '', error: attempt === 0 ? `No eligible CLI is available. ${why}${generic}` : `${lastError} (no remaining CLI to fall back to). ${why}`, started, nonce: o.nonce };
       }
+      let switchedFrom: CliId | undefined;
       if (o.resume) {
         const prev = this.sessionCli.get(key) ?? (link ? { cli: link.cli } : undefined);
-        this.sessionCli.set(key, prev && prev.cli !== decision.cli ? { cli: decision.cli, left: { cli: prev.cli, at: clock() } } : prev ?? { cli: decision.cli });
+        if (prev && prev.cli !== decision.cli) switchedFrom = prev.cli;
+        this.sessionCli.set(key, switchedFrom ? { cli: decision.cli, left: { cli: switchedFrom, at: clock() } } : prev ?? { cli: decision.cli });
       }
       const adapter = this.d.adapterFor(decision.cli)!;
       // One session per (key, CLI): a fallback never replaces the session the other CLI could still resume.
@@ -3644,6 +3661,12 @@ ${attachedFilesNote(others)}` : text, conversationId);
       }
       if (attempt > 0 && decision.cli !== retrying) this.post(o.conversationId, 'system', `Falling back to ${decision.cli}: ${lastError}`, { agentId: agent.id });
       let prompt = o.prompt;
+      // A session resumed after another CLI carried the conversation: its native history stops where it left, so the turns it
+      // missed come in the prompt (the other CLI's session is kept too, for the way back).
+      if (resumeId && switchedFrom) {
+        const missed = missedHistory(store.listMessages(o.conversationId), store.getSession(key, decision.cli)?.updated ?? 0, decision.cli);
+        if (missed.length) prompt = `While this session was idle the conversation went on with ${switchedFrom} (your own history does not have these turns):\n${historyText(missed)}\n\n${prompt}`;
+      }
       if (!resumeId && o.contextIfNoResume) {
         // Built only now that the session cannot be resumed: the handoff costs git calls.
         const ctx = typeof o.contextIfNoResume === 'function' ? await o.contextIfNoResume() : o.contextIfNoResume;

@@ -35,7 +35,7 @@ Helpers never use the reserve, but the lead and the concierge may (you are waiti
 
 ## Settings
 
-Settings are global, with per-project overrides: enabled CLIs, CLI paths, allowed models, role preferences, effort policy (adaptive, conserve, quality), low-allowance policy (unset = price routing; `reduceEffort`; `switch`), subscription reserve (0 to 50%), concurrency (1 to 8, default 4), helpers per turn (default 4), planners per turn (default 1), editor, and free-reset prompts. The catalog can be edited through `capabilities.json` in the data folder. Not built: overrides per conversation or per task, and an API fallback. `routing: manual` has no effect.
+Settings are global, with per-project overrides: enabled CLIs, CLI paths, allowed models, role preferences, effort policy (adaptive, conserve, quality), low-allowance policy (unset = price routing; `reduceEffort`; `switch`), subscription reserve (0 to 50%), concurrency (1 to 8, default 4), helpers and planners per turn (optional; unset = no limit, set = the rest are created paused), editor, and free-reset prompts. The catalog can be edited through `capabilities.json` in the data folder. Not built: overrides per conversation or per task, and an API fallback. `routing: manual` has no effect.
 
 ## Usage readings
 
