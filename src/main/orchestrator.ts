@@ -3276,7 +3276,9 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const tool = req.tool || 'unknown tool';
     // The journal gets the tool name only: inputs can hold paths, commands or secrets.
     const journal = (text: string) => this.log({ kind: 'permission', projectId, conversationId, agentId: agent.id, text: `${tool}: ${text}` });
-    if (!opts.noRules && this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input))) {
+    // A leading `cd` into the project (or the helper's own worktree) is not chaining: rules are made and matched on what runs there.
+    const roots = [this.project(projectId).path, ...(agent.worktree ? [agent.worktree] : [])];
+    if (!opts.noRules && this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input, roots))) {
       journal('allowed by a project rule');
       return Promise.resolve({ allow: true });
     }
@@ -3291,7 +3293,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       return Promise.resolve({ allow: false, message: 'Harbor denied this tool call because the run was stopping.' });
     }
     const requestId = newId();
-    const rule = opts.noRules ? undefined : toolRuleFor(req.tool, req.input);
+    const rule = opts.noRules ? undefined : toolRuleFor(req.tool, req.input, roots);
     const timeoutMs = this.d.toolPermissionTimeoutMs ?? TOOL_PERMISSION_TIMEOUT_MS;
     const n = timeoutMs >= 60_000 ? Math.round(timeoutMs / 60_000) : Math.max(1, Math.round(timeoutMs / 1000));
     const minutes = `${n} ${timeoutMs >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`;
