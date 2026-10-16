@@ -22,7 +22,7 @@ export function QueueControls({ api, agent, agents }: { api: HarborApi; agent: A
       {agent.paused ? <button disabled={busy} onClick={() => void run(() => api.resumeAgent(agent.id))}>Resume</button> : <button disabled={busy} onClick={() => void run(() => api.pauseAgent(agent.id))}>Pause</button>}
       <label className={s.fxRow}>Priority<input type="number" step={1} value={draft} disabled={busy} onChange={e => setDraft(e.target.value)} onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}/></label>
       <button disabled={busy || priority > top} title="Start this before the other queued work" onClick={() => void run(() => api.setAgentPriority(agent.id, top + 1))}>Do this next</button>
-      <button disabled={busy} aria-label={`Cancel ${agent.title}`} onClick={() => void run(() => api.stopAgent(agent.id))}>Cancel</button>
+      <button disabled={busy} aria-label={`Cancel ${agent.title}`} onClick={() => void run(() => api.stopAgent(agent.id, agent.conversationId))}>Cancel</button>
     </div>
     {agent.summary ? <p className={s.fxNote}>{agent.summary}</p> : null}
     {error ? <p className={s.fxError} role="alert">{error}</p> : null}

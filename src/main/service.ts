@@ -839,7 +839,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (c) return c;
       return store.addConversation({ id: newId(), projectId: a.projectId, title: `${a.role}: ${a.title}`, updated: Date.now(), agentId });
     },
-    async stopAgent(agentId) { orchestrator.stop(agentId); },
+    async stopAgent(agentId, conversationId) {
+      if (conversationId !== undefined && conversationId !== null && (typeof conversationId !== 'string' || !conversationId || conversationId.length > 200)) throw new Error('Invalid conversation id.');
+      orchestrator.stop(agentId, conversationId ?? undefined);
+    },
     async setAgentPriority(agentId, priority) { orchestrator.setPriority(agentId, priority); },
     async pauseAgent(agentId) { orchestrator.pause(agentId); },
     async resumeAgent(agentId) { orchestrator.resume(agentId); },

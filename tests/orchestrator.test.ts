@@ -459,6 +459,31 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect((await h.texts()).at(-1)).toBe('Stopped.');
   });
 
+  it('stopping an idle lead stops only the helpers of the conversation named, never those of another conversation', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const claude = script({
+      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Slow', role: 'implementer', instructions: 'slow', complexity: 'low', files: ['x.ts'] }) : say('ack')),
+      helper: async () => { await gate; return say('late'); }
+    });
+    const h = await harness({ claude }, { ids: ['claude'], git: false });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(second.id, 'go');
+    const main = h.svc.store.mainAgent(h.project.id)!;
+    // The lead's turn ends once it has delegated; the helper of `second` runs on while no lead turn is running.
+    for (let i = 0; i < 300 && !(helpers(h).some((a) => a.state === 'working') && h.svc.store.getAgent(main.id)!.state === 'waiting'); i++) await new Promise((r) => setTimeout(r, 10));
+    const slow = helpers(h).find((x) => x.title === 'Slow')!;
+    expect(slow.state).toBe('working');
+    await h.svc.stopAgent(main.id, h.conv.id); // the first conversation is open: nothing of it runs, nothing else is touched
+    await h.svc.stopAgent(main.id); // no conversation named and no lead turn running: nothing to stop either
+    expect(h.svc.store.getAgent(slow.id)!.state).toBe('working');
+    await h.svc.stopAgent(main.id, second.id);
+    release();
+    await h.svc.whenIdle();
+    expect(h.svc.store.getAgent(slow.id)!.state).toBe('stopped');
+    await expect(h.svc.stopAgent(main.id, 'nope')).rejects.toThrow(/no longer available/);
+  });
+
   it('stopping a session prevents stopped helpers restarting its lead', async () => {
     let release!: () => void;
     const gate = new Promise<void>(r => { release = r; });
