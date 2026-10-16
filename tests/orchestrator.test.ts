@@ -548,6 +548,26 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(h.adapters.claude!.calls).toHaveLength(0);
     await h.svc.whenIdle(); // the startup git work of recover() ends before the folder is removed
   });
+
+  it('recover() stops a helper left waiting for an answer (the question is gone) so it no longer counts as active', async () => {
+    const h = await harness({ claude: script(oneHelper()) }, { ids: ['claude'] });
+    const main = h.svc.store.mainAgent(h.project.id)!;
+    const base = { ...main, role: 'implementer' as const, parentConversationId: h.conv.id, dependsOn: [], revision: 1, attempts: 0, created: 1 };
+    h.svc.store.upsertAgent({ ...base, id: 'asked', title: 'Asked', state: 'waiting', error: 'Waiting for your answer.' });
+    h.svc.store.upsertAgent({ ...base, id: 'after', title: 'After', state: 'queued', dependsOn: ['asked'] });
+    h.svc.orchestrator.recover();
+    const asked = h.svc.store.getAgent('asked')!;
+    expect(asked.state).toBe('stopped');
+    expect(asked.stopKind).toBe('restart');
+    expect(asked.error).toMatch(/waiting for an answer, and that question is gone/);
+    expect(h.svc.store.getAgent(main.id)!.state).toBe('waiting'); // the lead itself is not a stranded helper
+    expect((await h.texts()).some((t) => t.startsWith('Harbor restarted while "Asked" was waiting for an answer'))).toBe(true);
+    // Its dependent waits for a resume instead of failing, like after any restart (recover() pumps the queue itself).
+    expect(h.svc.store.getAgent('after')!).toMatchObject({ state: 'queued', error: expect.stringContaining('stopped when Harbor restarted') });
+    expect(h.adapters.claude!.calls).toHaveLength(0);
+    await h.svc.stopAgent('after'); // a queued helper would keep whenIdle waiting
+    await h.svc.whenIdle();
+  });
 });
 
 describe('file conflicts', () => {
