@@ -120,7 +120,7 @@ export function Conversation({ state, openProject, workspace, review, dock, show
         </>}
         {showCrew && crew.length ? <section className={s.crew} aria-label="Subagents"><h3>{crew.length === 1 ? '1 subagent' : `${crew.length} subagents`}</h3><div className={s.crewList}>{crew.map(a => <div key={a.id}><div className={s.crewCard}>
           <button className={s.crewOpen} onClick={() => void state.openAgent(a.id)}><span className={s.dot} data-state={a.state}/><span>{a.title}<small>{a.role} · {a.state} · {a.cli} / {a.model}</small></span></button>
-          {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop</button> : null}
+          {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c.id))}>Stop</button> : null}
         </div><HelperDetails state={state} agent={a}/></div>)}</div></section> : null}
         {busy ? <div className={s.workingNotice} role="status"><span className={s.dot} data-state="working"/><span>Harbor is still working.<small>You can keep writing or queue your next message.</small></span></div> : null}
         {status === 'done' || crew.length ? <button className={s.reviewAction} onClick={review}>Review current changes</button> : null}

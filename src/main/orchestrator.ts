@@ -871,18 +871,24 @@ ${attachedFilesNote(others)}` : text, conversationId);
     this.pump(conv.projectId);
   }
 
-  stop(agentId: Id): void {
+  /**
+   * For the lead, `conversationId` is the conversation the caller is looking at: its lead turn (if one runs) and its helpers stop,
+   * and other conversations of the project are left alone. Without one, the project's running lead turns and their helpers stop;
+   * with no turn running there is nothing of the lead's to stop (stopping an idle lead used to kill every helper of the project).
+   */
+  stop(agentId: Id, conversationId?: Id): void {
     const a = this.d.store.getAgent(agentId);
     if (!a) return;
     if (a.role === 'main') {
-      // Stop the conversations whose lead is running; with none running, stop every helper of the project.
-      const active = [...this.leads].filter(([, l]) => l.projectId === a.projectId);
-      const convs = new Set(active.map(([c]) => c));
+      if (conversationId !== undefined && this.d.store.getConversation(conversationId)?.projectId !== a.projectId) throw new Error('This conversation is no longer available.');
+      const active = [...this.leads].filter(([c, l]) => l.projectId === a.projectId && (conversationId === undefined || c === conversationId));
+      const convs = new Set(conversationId === undefined ? active.map(([c]) => c) : [conversationId]);
+      if (!convs.size) return;
       for (const s of this.d.store.listAgentRecords(a.projectId)) {
-        if (s.role !== 'main' && (!convs.size || convs.has(s.parentConversationId))) this.stop(s.id);
+        if (s.role !== 'main' && convs.has(s.parentConversationId)) this.stop(s.id);
       }
       this.denyToolAsks((p) => p.agentId === a.id && convs.has(p.conversationId), 'the lead was stopped');
-      this.d.screenshots?.cancel((r) => r.agentId === a.id && (!convs.size || convs.has(r.sessionId)), 'the lead was stopped');
+      this.d.screenshots?.cancel((r) => r.agentId === a.id && convs.has(r.sessionId), 'the lead was stopped');
       for (const [, l] of active) l.ctl.abort();
       return;
     }
