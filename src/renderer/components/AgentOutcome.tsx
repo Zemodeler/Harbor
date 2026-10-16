@@ -17,7 +17,7 @@ export function AgentOutcome({ agent }: { agent: Agent }) {
   const r = agent.result, checks = agent.checks ?? [], claimed = r?.checks ?? [], stale = agent.outdated === true;
   const noVerdict = agent.role === 'reviewer' && FINISHED.includes(agent.state) && !r?.verdict;
   if (!r && !checks.length && !noVerdict && !stale) return null;
-  return <div className={s.fxBlock} data-stale={stale || undefined} aria-label={`Results for ${agent.title}`}>
+  return <div className={s.fxBlock} data-stale={stale || undefined} data-outcome={r?.outcome} aria-label={`Results for ${agent.title}`}>
     {r ? <div className={s.fxHead}>
       <span>Outcome: {outcomeLabel[r.outcome] ?? r.outcome}</span>
       {r.verdict ? <span className={s.fxBadge} data-tone={r.verdict === 'approve' ? 'ok' : 'bad'} data-stale={stale || undefined}>{r.verdict === 'approve' ? 'Approve' : 'Changes requested'}{r.commit ? <span className={s.fxMono}> @ {shortHash(r.commit)}</span> : null}</span> : null}
