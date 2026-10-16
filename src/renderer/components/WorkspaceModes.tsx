@@ -45,7 +45,7 @@ export function LiveActivity({ state, close, review }: { state: HarborState; clo
   const latest = state.messages.filter(m => m.details).at(-1);
   const cli = c?.activity?.cli || latest?.details?.cli || owner?.cli;
   const recent = state.messages.filter(m => m.role === 'tool').slice(-4).reverse();
-  const helper = (a: typeof crew[number]) => <div className={s.activityAgent} key={a.id}><button onClick={() => void state.openAgent(a.id)}><strong>{a.title}</strong><small>{a.role} / {a.cli}</small></button><SessionStatus status={a.state}/>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button className={s.activityStop} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id))}>Stop agent</button> : null}<HelperDetails state={state} agent={a}/></div>;
+  const helper = (a: typeof crew[number]) => <div className={s.activityAgent} key={a.id}><button onClick={() => void state.openAgent(a.id)}><strong>{a.title}</strong><small>{a.role} / {a.cli}</small></button><SessionStatus status={a.state}/>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button className={s.activityStop} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c?.id))}>Stop agent</button> : null}<HelperDetails state={state} agent={a}/></div>;
   if (details) return <SessionPanel state={state} close={() => setDetails(false)}/>;
   return <>
     <div className={s.panelHeading}><h2>Live activity</h2><button className={s.iconButton} aria-label="Close live activity" onClick={close}><CloseIcon size={18} aria-hidden="true"/></button></div>

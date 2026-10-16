@@ -8,7 +8,7 @@ import { FakeAdapter, type FakeScript } from '../src/main/adapters/fake';
 import type { Chunk, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from '../src/main/adapters/types';
 import type { ResolvedCli } from '../src/main/clis/discovery';
 import { createHarborService } from '../src/main/service';
-import { matchesToolRule, neverAlwaysAllow, Store, toolRuleFor } from '../src/main/store';
+import { matchesToolRule, neverAlwaysAllow, Store, stripLeadingCd, toolRuleFor } from '../src/main/store';
 import { calmReported } from './fixtures/calmReadings';
 
 const dirs: string[] = [];
@@ -299,5 +299,63 @@ describe('tool rule policy (pure)', () => {
     expect(matchesToolRule({ tool: 'Bash', prefix: 'git' }, 'Bash', { command: 'git push' })).toBe(false);
     expect(matchesToolRule({ tool: 'mcp__srv__lookup' }, 'mcp__srv__lookup', {})).toBe(true);
     expect(matchesToolRule({ tool: 'WebFetch' }, 'WebFetch', { url: 'https://x' })).toBe(false);
+  });
+});
+
+describe('leading cd into the project (pure)', () => {
+  const roots = ['C:\\Users\\me\\proj'];
+  const wt = 'C:\\Users\\me\\AppData\\Roaming\\Harbor\\worktrees\\p\\harbor-x';
+
+  it('strips `cd <inside a root> &&` in every path spelling and leaves everything else alone', () => {
+    expect(stripLeadingCd('cd C:\\Users\\me\\proj && npm test', roots)).toBe('npm test');
+    expect(stripLeadingCd('cd /c/Users/me/proj/src && npm test -- --x', roots)).toBe('npm test -- --x');
+    expect(stripLeadingCd('cd "C:/Users/me/proj/a b" && ls', roots)).toBe('ls');
+    expect(stripLeadingCd("cd 'c:/users/ME/PROJ' && ls", roots)).toBe('ls');
+    expect(stripLeadingCd('cd /c/Users/me/proj&&ls', roots)).toBe('ls');
+    expect(stripLeadingCd(`cd ${wt}\\sub && npm test`, [...roots, wt])).toBe('npm test');
+    // Outside, a sibling with the same prefix, relative, no roots, another chain, or not a leading cd: unchanged.
+    expect(stripLeadingCd('cd C:\\Users\\me\\other && npm test', roots)).toBe('cd C:\\Users\\me\\other && npm test');
+    expect(stripLeadingCd('cd C:\\Users\\me\\projx && npm test', roots)).toBe('cd C:\\Users\\me\\projx && npm test');
+    expect(stripLeadingCd('cd src && npm test', roots)).toBe('cd src && npm test');
+    expect(stripLeadingCd('cd C:\\Users\\me\\proj && npm test', [])).toBe('cd C:\\Users\\me\\proj && npm test');
+    expect(stripLeadingCd('cd C:\\Users\\me\\proj ; npm test', roots)).toBe('cd C:\\Users\\me\\proj ; npm test');
+    expect(stripLeadingCd('echo cd C:\\Users\\me\\proj && npm test', roots)).toBe('echo cd C:\\Users\\me\\proj && npm test');
+  });
+
+  it('judges, stores and matches the command that runs after the cd; the rest of a chain is still refused', () => {
+    const inside = 'cd /c/Users/me/proj && npm test';
+    expect(neverAlwaysAllow('Bash', { command: inside }, roots)).toBe(false);
+    expect(toolRuleFor('Bash', { command: inside }, roots)).toEqual({ tool: 'Bash', prefix: 'npm test' });
+    expect(matchesToolRule({ tool: 'Bash', prefix: 'npm test' }, 'Bash', { command: 'cd C:\\Users\\me\\proj\\pkg && npm test -- --watch=false' }, roots)).toBe(true);
+    // Without roots (older callers) nothing changes: the chain counts as chaining.
+    expect(neverAlwaysAllow('Bash', { command: inside })).toBe(true);
+    expect(toolRuleFor('Bash', { command: inside })).toBeUndefined();
+    expect(matchesToolRule({ tool: 'Bash', prefix: 'npm test' }, 'Bash', { command: inside })).toBe(false);
+    // Still never: a cd elsewhere, a second chain link, or a dangerous command after the cd.
+    for (const command of ['cd C:\\Users\\me\\other && npm test', 'cd /c/Users/me/proj && npm test && rm -rf dist', 'cd /c/Users/me/proj && git push', 'cd /c/Users/me/proj && cd .. && ls']) {
+      expect(neverAlwaysAllow('Bash', { command }, roots), command).toBe(true);
+      expect(toolRuleFor('Bash', { command }, roots), command).toBeUndefined();
+      expect(matchesToolRule({ tool: 'Bash', prefix: 'npm test' }, 'Bash', { command }, roots), command).toBe(false);
+    }
+  });
+
+  it('end to end: an always-allowed `cd <project> && make build` is stored as `make build` and covers the next cd-prefixed call', async () => {
+    const cmds: string[] = [];
+    const t = await setup({ nextLeadTool: () => bash(cmds.shift()!) });
+    const repo = t.svc.store.getProject(t.project.id)!.path;
+    cmds.push(`cd ${repo} && make build`, `cd ${repo.replace(/\\/g, '/')}/sub && make build --verbose`, `cd ${join(repo, '..')} && make build`);
+    t.svc.onEvent((e) => { if (e.type === 'permission' && e.kind === 'tool') void t.svc.answerPermission(e.requestId, true, { always: true }); });
+    await t.svc.send(t.conv.id, 'build it');
+    await t.svc.whenIdle();
+    expect(await t.svc.listToolRules(t.project.id)).toMatchObject([{ tool: 'Bash', prefix: 'make build' }]);
+    await t.svc.send(t.conv.id, 'build it again');
+    await t.svc.whenIdle();
+    expect(t.events).toHaveLength(1); // covered by the rule: no second prompt
+    expect(t.journal()).toContain('Bash: allowed by a project rule');
+    // A cd to the parent folder is not inside the project: asked again, allow-once only.
+    await t.svc.send(t.conv.id, 'and outside');
+    await t.svc.whenIdle();
+    expect(t.events).toHaveLength(2);
+    expect(t.events[1]!.alwaysAllow).toBe(false);
   });
 });
