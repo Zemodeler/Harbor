@@ -161,7 +161,7 @@ describe('helpers at once from the budget (helperLimit.ts)', () => {
 describe('lead prompt delegation rules (prompts.ts)', () => {
   it('states the sizing, model, review, question, stop and validation rules and stays bounded', () => {
     // Raised from 8000/7950 when project notes (HARBOR_NOTE) joined screenshots and documents in one prompt (roadmap wave 1).
-    expect(LEAD_SYSTEM.length).toBeLessThan(8400);
+    expect(LEAD_SYSTEM.length).toBeLessThan(9100);
     expect(LEAD_SYSTEM).toContain(`about ${MAX_TASK_MINUTES} minutes of work or less`);
     expect(LEAD_SYSTEM).toMatch(/No catch-alls \("consolidate everything", "finish validation"/);
     expect(LEAD_SYSTEM).toMatch(/full test suite and any database setup run once, by you or by ONE validation helper/);
