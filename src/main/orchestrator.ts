@@ -192,6 +192,8 @@ export interface OrphanSweep { killed: number[]; skipped: number[] }
 
 /** The error of an agent `recover()` stopped; persisted, so it also marks restart-stopped agents after a later restart. */
 const RESTART_ERROR = 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.';
+/** A helper that was waiting for an answer when Harbor restarted: the question lived in memory only, so nothing could ever answer it. */
+const RESTART_WAITING_ERROR = 'Harbor restarted while this agent was waiting for an answer, and that question is gone. Its worktree and any commits are preserved; resume it (it asks again) or send a message to continue.';
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
 /** Difficulty of a /deep lead turn: above what a weaker model reaches by effort alone (see budgetCost.REQUIRED_LEVEL_KNOTS). */
@@ -673,13 +675,18 @@ export class Orchestrator {
     }
     // The pump below must not fail dependents of these agents (or start a lead turn): they wait until the user resumes or stops.
     const interrupted: AgentRecord[] = [];
+    const stranded: AgentRecord[] = [];
     for (const a of this.d.store.allAgentRecords()) {
       if (a.state === 'working') { this.setState(a, 'stopped', { error: RESTART_ERROR, stopKind: 'restart' }); if (a.role !== 'main') interrupted.push(a); }
+      // A helper waiting for an answer (the user's, the lead's, a screenshot, a requested helper): the question and its default timer
+      // were in memory only. Left 'waiting' it would count as active forever and the lead would never be woken.
+      else if (a.state === 'waiting' && a.role !== 'main') { this.setState(a, 'stopped', { error: RESTART_WAITING_ERROR, stopKind: 'restart' }); stranded.push(a); }
       if (a.role === 'main') this.setState(a, 'waiting');
     }
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     this.noticeUncertainReports();
     this.noticeInterrupted(interrupted);
+    this.noticeStranded(stranded);
     for (const p of this.d.store.listProjects()) this.pump(p.id);
     this.startup = this.startupGit(interrupted).catch(() => {});
   }
@@ -740,9 +747,19 @@ export class Orchestrator {
     }
   }
 
+  /** One note per helper the restart found waiting for an answer; the lead hears of it at its next turn (no turn is started). */
+  private noticeStranded(items: AgentRecord[]): void {
+    for (const a of items) {
+      if (!this.d.store.getConversation(a.parentConversationId)) continue;
+      const ref = `"${clip(a.title, 50)}"${a.branch ? ` (${a.branch})` : ''}`;
+      this.post(a.parentConversationId, 'system', `Harbor restarted while ${ref} was waiting for an answer, and that question is gone. It is stopped; resume it to continue from its saved session (it will ask again), or leave it.`, { agentId: a.id });
+      this.addNote(a.parentConversationId, `Restart: ${ref} was waiting for an answer and is stopped now; its work so far is on its branch. Resume it (HARBOR_REPLY) if its question still matters.`);
+    }
+  }
+
   /** Stopped by a restart (not by the user), and not resumed since: its dependents keep waiting instead of failing. */
   private restartStopped(a: AgentRecord): boolean {
-    return a.state === 'stopped' && a.error === RESTART_ERROR;
+    return a.state === 'stopped' && (a.error === RESTART_ERROR || a.error === RESTART_WAITING_ERROR);
   }
 
   /**
