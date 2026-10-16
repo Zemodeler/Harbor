@@ -96,8 +96,8 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
                 {editTags ? <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); editTags(c); }}>Edit tags</button> : null}
                 {c.archived ? <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { archived: false }); }}>Restore</button>
                   : <button disabled={['working', 'queued', 'waiting'].includes(sessionStatus(c, state.agents, state.sending))} onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { archived: true }); }}>Archive</button>}
+                <button className={s.menuDelete} aria-label={`Delete conversation ${c.title}`} disabled={isBusy(c)} title={isBusy(c) ? 'Stop this session or clear its queue before deleting it' : 'Delete conversation'} onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); setDeleting(c); }}>Delete…</button>
               </div></details>
-              <button className={s.deleteConversation} aria-label={`Delete conversation ${c.title}`} disabled={isBusy(c)} title={isBusy(c) ? 'Stop this session or clear its queue before deleting it' : 'Delete conversation'} onClick={() => setDeleting(c)}><CloseIcon size={14} aria-hidden="true"/></button>
             </div>)}
           </div>)}
           {activeFilter && !groups.length ? <p className={s.panelSub}>No conversation has #{activeFilter}.</p> : null}

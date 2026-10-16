@@ -675,3 +675,18 @@
 .activityActions button:first-child { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
 .activityActions button:first-child:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
 .activityActions button:last-child { border-color: transparent; color: var(--muted); }
+
+.sidebar .conversationLink { padding-right: 36px; }
+.conversationMenu { right: 6px; }
+.conversationMenuItems button { border: 0; padding: 6px 10px; min-height: 32px; }
+.conversationMenuItems .menuDelete { color: var(--bad); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-sm) var(--r-sm); margin-top: var(--sp-1); }
+.conversationMenuItems .menuDelete:hover:not(:disabled) { background: var(--bad-wash); }
+.conversationRow:has(.conversationMenu[open]) { padding-bottom: 170px; }
+
+.verification { flex: 0 0 100%; margin-top: var(--sp-1); }
+.verification > summary { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); margin-bottom: var(--sp-2); }
+.activityAgent > .activityStop:hover:not(:disabled) { color: var(--bad); }
+
+/* High contrast keeps every control outlined: quiet buttons are only borderless in the normal themes. */
+:global(:root[data-contrast]) .headerActions > button, :global(:root[data-contrast]) .quiet, :global(:root[data-contrast]) .settingsLayout .tabs button { border: 1px solid var(--line); }
+:global(:root[data-contrast]) .settingsLayout .tabs .tabActive { border-color: var(--accent); }
