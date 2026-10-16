@@ -21,6 +21,7 @@ The standalone renderer dependencies are isolated to avoid changing the core eng
 - `components/`: sidebar, compact agents, conversation and composer, Markdown/code copying, Settings, native HTML modal, and shared brand.
 - `mock/`: complete in-memory implementation, demo data, streaming, queued/working/done events, usage updates, and one optional reset request. Stops cancel future streaming and completion.
 - `assets/harbor-logo.png`: supplied anchor identity, used in the sidebar, assistant avatar, and favicon.
+- `components/Switch.tsx`: checkbox rendered as a switch (`role=switch`). Semantic design tokens (type, spacing, radius, elevation, status tones) and the `.primary`, `.quiet`, `.danger`, `.pill` button variants live at the top of `Harbor.module.css`.
 - `Harbor.module.css`: mockup-based light/dark system themes, responsive navigation, scroll areas, focus rings, and short-window layout.
 - `tests/`: project onboarding, streaming, agent chats, login, Settings, keyboard shortcuts, draft isolation, errors, untrusted Markdown, cancellation, and permission outcomes.
 - `../../build/`: installer tool and scripts, multi-size icon converter, and browser visual check.

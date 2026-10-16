@@ -54,7 +54,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
       const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];
       return <AttachmentThumb key={i} a={a} src={src} agentId={m.agentId}/>;
     })}</ul> : null}
-    {m.details ? <details className={s.execution}><summary>Execution details · why this model</summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
+    {m.details ? <details className={s.execution}><summary><span className={s.pill} data-tone="accent">{m.details.cli} · {m.details.model}</span><span>Execution details · why this model</span></summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
   </article>;
 });
 
@@ -108,7 +108,7 @@ export function Conversation({ state, openProject, workspace, review, dock, show
   return <>
     <div className={s.stream} ref={stream} onScroll={() => { const el = stream.current; if (el) follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90; }}>
       <div className={s.messageColumn}>
-        {state.messagesLoading ? <p role="status">Loading conversation…</p> : state.messagesError ? <div className={s.hqLoadError} role="alert"><p>This conversation could not be loaded: {state.messagesError}</p><button onClick={() => void state.retryMessages()}>Retry</button></div> : !state.messages.length ? <div className={s.emptyConversation}><Brand/><h2>What shall we work on?</h2><p>Describe the next step for {project.name}.</p></div> : <>
+        {state.messagesLoading ? <p role="status">Loading conversation…</p> : state.messagesError ? <div className={s.hqLoadError} role="alert"><p>This conversation could not be loaded: {state.messagesError}</p><button onClick={() => void state.retryMessages()}>Retry</button></div> : !state.messages.length ? <div className={s.emptyConversation}><Brand/><h2>What shall we work on?</h2><p>Describe the next step for {project.name}, or start from one of these.</p><div className={s.starters}>{['Explain how this project is structured', 'Find and fix the failing tests', 'Review the current changes and list the risks'].map(t => <button key={t} className={s.starter} onClick={() => workspace.setDraft(c.id, d => d ? d : t)}>{t}</button>)}</div></div> : <>
           {hidden ? <button className={s.hqEarlier} onClick={showEarlier}>Show earlier messages ({hidden} more)</button> : null}
           {shown.map(group => {
             const m = group[0];
@@ -123,7 +123,7 @@ export function Conversation({ state, openProject, workspace, review, dock, show
           {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c.id))}>Stop</button> : null}
         </div><HelperDetails state={state} agent={a}/></div>)}</div></section> : null}
         {busy ? <div className={s.workingNotice} role="status"><span className={s.dot} data-state="working"/><span>Harbor is still working.<small>You can keep writing or queue your next message.</small></span></div> : null}
-        {status === 'done' || crew.length ? <button className={s.reviewAction} onClick={review}>Review current changes</button> : null}
+        {status === 'done' || crew.length ? <button className={`${s.reviewAction} ${status === 'done' ? s.primary : s.quiet}`} onClick={review}>Review current changes</button> : null}
       </div>
     </div>
     {c.imported ? <div className={s.composerArea}><ImportedNotice key={c.id} state={state} conversation={c}/></div> : <Composer key={c.id} state={state} workspace={workspace} c={c} agent={agent} projectName={project.name} status={status} busy={busy} dock={dock} rememberImages={rememberImages}/>}

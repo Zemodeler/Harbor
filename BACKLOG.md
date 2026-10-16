@@ -269,3 +269,9 @@ Core requests (from UI):
 - **Pool state in `getUsage`**: the router computes spend / neutral / conserve / protect per pool (`budget.ts`), but the UI only sees it inside reason text. An optional `UsageWindow.poolState` (or a `getBudget()` listing pools, their windows, state and pace) would let the usage panel show it; the panel's pace is a UI-side straight line today.
 - **Question expiry**: helper questions that reach the user get a safe default after 10 minutes, but the `question` event has no `expiresAt`, so the card cannot show a countdown.
 - **Held helpers**: a typed `Agent.heldUntil` (quota hold) instead of the "Waiting: too little quota ..." text the UI matches.
+UI polish follow-ups (from the 2026-10-16 pass, see PLAN-ui-polish.md):
+- Resizable and pinnable Live activity panel (fixed at 320px now).
+- Sidebar: move the hover delete button into the row menu; per-project attention dot on the rail (needs a per-project "has a waiting agent" signal; check whether `listProjects` can carry it before asking core).
+- Live activity: collapse outcome/checks into a "Verification" section and per-agent Stop as an icon button.
+- Empty-state starter prompts (`Conversation.tsx`) are placeholder copy; the owner should approve or replace them.
+- Pre-existing: `src/renderer/tests/Hardening.test.tsx` lines 441-455 fail `tsc --noEmit` in the renderer (tuple index on `[]`), so `npm --prefix src/renderer run build` stops before vite. Root `npm run build` and `npm run typecheck` pass.
