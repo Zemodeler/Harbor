@@ -862,16 +862,45 @@ const NEVER_ALWAYS_COMMANDS: RegExp[] = [
 ];
 const INTERPRETER = /^(?:bash|sh|zsh|dash|cmd|powershell|pwsh|node|deno|bun|python[\d.]*|py|perl|ruby|php|wsl|npx|env)(?:\.exe)?$/i;
 
-const bashCommand = (input: unknown): string | undefined => {
-  const c = (input as { command?: unknown } | null)?.command;
-  return typeof c === 'string' ? c.trim().replace(/\s+/g, ' ') : undefined;
+/**
+ * A folder path as Claude Code writes it on Windows (`/c/Users/...`, `C:\Users\...`, `C:/Users/...`), in one comparable form.
+ * Only absolute paths: a relative `cd` depends on a working directory this code does not know.
+ */
+const canonicalDir = (p: string): string | undefined => {
+  const slashes = p.replace(/\\/g, '/');
+  const msys = /^\/([a-zA-Z])(?:\/|$)/.exec(slashes);
+  const abs = msys ? `${msys[1]}:${slashes.slice(2) || '/'}` : slashes;
+  return /^[a-zA-Z]:\//.test(abs) || abs.startsWith('//') || (abs.startsWith('/') && !msys) ? normPath(abs) : undefined;
 };
 
-/** True when this call may be allowed once only (never stored or matched as a project rule). */
-export function neverAlwaysAllow(tool: string, input: unknown): boolean {
+/**
+ * Claude Code issues almost every command as `cd <dir> && <cmd>`. When <dir> is inside one of `roots` (the project folder,
+ * the helper's worktree) the `cd` changes nothing the rule needs to describe, so the call is judged, stored and matched as
+ * <cmd>. Any other leading `cd`, and every other chain, is left as is (and refused by the shell-meta check).
+ */
+export function stripLeadingCd(cmd: string, roots: readonly string[]): string {
+  if (!roots.length) return cmd;
+  const m = /^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*&&\s*(\S.*)$/.exec(cmd);
+  if (!m) return cmd;
+  const dir = canonicalDir(m[1] ?? m[2] ?? m[3]!);
+  if (!dir) return cmd;
+  const inside = roots.some((r) => { const root = canonicalDir(r); return !!root && (dir === root || dir.startsWith(`${root}/`)); });
+  return inside ? m[4]! : cmd;
+}
+
+const bashCommand = (input: unknown, roots: readonly string[] = []): string | undefined => {
+  const c = (input as { command?: unknown } | null)?.command;
+  return typeof c === 'string' ? stripLeadingCd(c.trim().replace(/\s+/g, ' '), roots) : undefined;
+};
+
+/**
+ * True when this call may be allowed once only (never stored or matched as a project rule). `roots`: folders a leading
+ * `cd` may point into without counting as chaining (see stripLeadingCd).
+ */
+export function neverAlwaysAllow(tool: string, input: unknown, roots: readonly string[] = []): boolean {
   if (NEVER_ALWAYS_TOOLS.has(tool) || !tool) return true;
   if (tool !== 'Bash') return false;
-  const cmd = bashCommand(input);
+  const cmd = bashCommand(input, roots);
   return !cmd || SHELL_META.test(cmd) || NEVER_ALWAYS_COMMANDS.some((re) => re.test(cmd));
 }
 
@@ -879,10 +908,10 @@ export function neverAlwaysAllow(tool: string, input: unknown): boolean {
  * The rule "always allow" would store for this call, or undefined when it may only be allowed once. Bash rules are the
  * first one or two plain words of the command (`npm test`, `ls`), never the bare tool: Bash itself is never always-allowed.
  */
-export function toolRuleFor(tool: string, input: unknown): ToolRuleDraft | undefined {
-  if (neverAlwaysAllow(tool, input)) return undefined;
+export function toolRuleFor(tool: string, input: unknown, roots: readonly string[] = []): ToolRuleDraft | undefined {
+  if (neverAlwaysAllow(tool, input, roots)) return undefined;
   if (tool !== 'Bash') return { tool };
-  const words = bashCommand(input)!.split(' ');
+  const words = bashCommand(input, roots)!.split(' ');
   const plain = (w: string | undefined) => !!w && /^[\w./:@=+-]+$/.test(w) && !w.startsWith('-');
   if (!plain(words[0])) return undefined;
   if (plain(words[1])) return { tool, prefix: `${words[0]} ${words[1]}` };
@@ -891,11 +920,11 @@ export function toolRuleFor(tool: string, input: unknown): ToolRuleDraft | undef
 }
 
 /** Whether a stored rule covers this call. The never-always checks run again, so no rule can allow a dangerous call. */
-export function matchesToolRule(rule: ToolRuleDraft, tool: string, input: unknown): boolean {
-  if (rule.tool !== tool || neverAlwaysAllow(tool, input)) return false;
+export function matchesToolRule(rule: ToolRuleDraft, tool: string, input: unknown, roots: readonly string[] = []): boolean {
+  if (rule.tool !== tool || neverAlwaysAllow(tool, input, roots)) return false;
   if (tool !== 'Bash') return !rule.prefix;
   if (!rule.prefix) return false;
-  const cmd = bashCommand(input)!;
+  const cmd = bashCommand(input, roots)!;
   return cmd === rule.prefix || cmd.startsWith(`${rule.prefix} `);
 }
 

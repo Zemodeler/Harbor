@@ -375,6 +375,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       bus.emit(event);
     });
 
+  /** Conflict asks raised for a helper of this conversation (free-reset asks belong to no conversation and never block one). */
+  const pendingFor = (conversationId: Id): boolean =>
+    [...pending.values()].some(({ event }) => event.conversationId === conversationId || (!!event.agentId && store.getAgent(event.agentId)?.parentConversationId === conversationId));
+
   const freeReset = new FreeResetCoordinator({
     ledger, store,
     backlog: () => store.allAgentRecords().filter((a) => a.role !== 'main' && a.state === 'queued').length,
@@ -708,7 +712,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async updateConversation(id, patch) {
       const c = store.getConversation(id);
       if (!c) throw new Error('This conversation is no longer available.');
-      if (patch.archived && (c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['queued', 'working', 'waiting'].includes(a.state)))) throw new Error('Finish or stop the session and answer pending requests before archiving.');
+      if (patch.archived && (c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state) || pendingFor(id) || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['queued', 'working', 'waiting'].includes(a.state)))) throw new Error('Finish or stop the session and answer pending requests before archiving.');
       if (patch.title !== undefined && (typeof patch.title !== 'string' || !patch.title.trim() || patch.title.length > 160)) throw new Error('Use a conversation name between 1 and 160 characters.');
       const update: Partial<typeof c> = {};
       if (patch.title !== undefined) { update.title = patch.title.trim(); update.customTitle = true; }
@@ -793,7 +797,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async deleteConversation(id) {
       const c = store.getConversation(id);
       if (!c) return;
-      if (c.activity && ['working', 'queued', 'waiting'].includes(c.activity.state) || pending.size || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['working', 'queued', 'waiting'].includes(a.state))) throw new Error('Stop the running session and answer pending requests before deleting this conversation.');
+      if (c.activity && ['working', 'queued', 'waiting'].includes(c.activity.state) || pendingFor(id) || store.listAgentRecords(c.projectId).some(a => a.parentConversationId === id && ['working', 'queued', 'waiting'].includes(a.state))) throw new Error('Stop the running session and answer pending requests before deleting this conversation.');
       store.removeConversation(id);
       try { rmSync(attachmentDir(dataRoot, id),{ recursive: true, force: true }); } catch { /* best effort: only Harbor's own copies */ }
       for (const k of [`lead:${id}`, `concierge:${id}`]) store.clearSession(k);
@@ -839,7 +843,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (c) return c;
       return store.addConversation({ id: newId(), projectId: a.projectId, title: `${a.role}: ${a.title}`, updated: Date.now(), agentId });
     },
-    async stopAgent(agentId) { orchestrator.stop(agentId); },
+    async stopAgent(agentId, conversationId) {
+      if (conversationId !== undefined && conversationId !== null && (typeof conversationId !== 'string' || !conversationId || conversationId.length > 200)) throw new Error('Invalid conversation id.');
+      orchestrator.stop(agentId, conversationId ?? undefined);
+    },
     async setAgentPriority(agentId, priority) { orchestrator.setPriority(agentId, priority); },
     async pauseAgent(agentId) { orchestrator.pause(agentId); },
     async resumeAgent(agentId) { orchestrator.resume(agentId); },

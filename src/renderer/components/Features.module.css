@@ -18,6 +18,8 @@
 .fxNote { margin: 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .fxStale { opacity: .7; }
 .fxPrimary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+/* The global button:hover wash would win over .fxPrimary alone and leave --on-accent text on a --wash background (unreadable in dark palettes). */
+.fxPrimary:hover:not(:disabled) { background: var(--accent); filter: brightness(.92); }
 .fxConfirm { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--error); border-radius: 8px; font-size: 12.5px; line-height: 1.5; }
 .fxConfirm p { margin: 0 0 8px; }
 .fxDialog { display: grid; gap: 12px; font-size: 13px; }

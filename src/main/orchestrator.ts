@@ -192,6 +192,8 @@ export interface OrphanSweep { killed: number[]; skipped: number[] }
 
 /** The error of an agent `recover()` stopped; persisted, so it also marks restart-stopped agents after a later restart. */
 const RESTART_ERROR = 'Harbor restarted while this agent was running. Its worktree and any commits are preserved; send a message to continue.';
+/** A helper that was waiting for an answer when Harbor restarted: the question lived in memory only, so nothing could ever answer it. */
+const RESTART_WAITING_ERROR = 'Harbor restarted while this agent was waiting for an answer, and that question is gone. Its worktree and any commits are preserved; resume it (it asks again) or send a message to continue.';
 
 const EDIT_ROLES: AgentRole[] = ['implementer', 'other'];
 /** Difficulty of a /deep lead turn: above what a weaker model reaches by effort alone (see budgetCost.REQUIRED_LEVEL_KNOTS). */
@@ -414,6 +416,10 @@ export class Orchestrator {
   /** Urgent wake-ups of an idle lead since the user last wrote to it; bounded so two leads cannot wake each other forever. */
   private peerWakes = new Map<Id, number>();
   private sessionGeneration = new Map<Id, number>();
+  /** Conversations told "Paused automatic coordination" since the user's last message: the notice is posted once, not per capped caller. */
+  private autoPaused = new Set<Id>();
+  /** Helper id -> revision whose "Assignment" message is already in its conversation (a run held for quota re-enters runAgent). */
+  private assignmentPosted = new Map<Id, number>();
   private stoppedSessions = new Set<Id>();
   /** Conversations whose running lead turn was aborted to make room for a newer user message (not a user stop). */
   private steered = new Set<Id>();
@@ -683,13 +689,18 @@ export class Orchestrator {
     }
     // The pump below must not fail dependents of these agents (or start a lead turn): they wait until the user resumes or stops.
     const interrupted: AgentRecord[] = [];
+    const stranded: AgentRecord[] = [];
     for (const a of this.d.store.allAgentRecords()) {
       if (a.state === 'working') { this.setState(a, 'stopped', { error: RESTART_ERROR, stopKind: 'restart' }); if (a.role !== 'main') interrupted.push(a); }
+      // A helper waiting for an answer (the user's, the lead's, a screenshot, a requested helper): the question and its default timer
+      // were in memory only. Left 'waiting' it would count as active forever and the lead would never be woken.
+      else if (a.state === 'waiting' && a.role !== 'main') { this.setState(a, 'stopped', { error: RESTART_WAITING_ERROR, stopKind: 'restart' }); stranded.push(a); }
       if (a.role === 'main') this.setState(a, 'waiting');
     }
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     this.noticeUncertainReports();
     this.noticeInterrupted(interrupted);
+    this.noticeStranded(stranded);
     for (const p of this.d.store.listProjects()) this.pump(p.id);
     this.startup = this.startupGit(interrupted).catch(() => {});
   }
@@ -750,9 +761,19 @@ export class Orchestrator {
     }
   }
 
+  /** One note per helper the restart found waiting for an answer; the lead hears of it at its next turn (no turn is started). */
+  private noticeStranded(items: AgentRecord[]): void {
+    for (const a of items) {
+      if (!this.d.store.getConversation(a.parentConversationId)) continue;
+      const ref = `"${clip(a.title, 50)}"${a.branch ? ` (${a.branch})` : ''}`;
+      this.post(a.parentConversationId, 'system', `Harbor restarted while ${ref} was waiting for an answer, and that question is gone. It is stopped; resume it to continue from its saved session (it will ask again), or leave it.`, { agentId: a.id });
+      this.addNote(a.parentConversationId, `Restart: ${ref} was waiting for an answer and is stopped now; its work so far is on its branch. Resume it (HARBOR_REPLY) if its question still matters.`);
+    }
+  }
+
   /** Stopped by a restart (not by the user), and not resumed since: its dependents keep waiting instead of failing. */
   private restartStopped(a: AgentRecord): boolean {
-    return a.state === 'stopped' && a.error === RESTART_ERROR;
+    return a.state === 'stopped' && (a.error === RESTART_ERROR || a.error === RESTART_WAITING_ERROR);
   }
 
   /**
@@ -816,6 +837,7 @@ export class Orchestrator {
     if (conv.title === DEFAULT_TITLE && !conv.customTitle) this.d.store.touchConversation(conv.id, { title: titleFrom(text) });
     if (agent.role === 'main') {
       this.autoTurns.set(conversationId, 0);
+      this.autoPaused.delete(conversationId);
       this.peerWakes.delete(conversationId);
       if (opts.steer) this.interruptLead(conversationId);
       const isImage = (a: Attachment) => a.mime.startsWith('image/');
@@ -881,19 +903,27 @@ ${attachedFilesNote(others)}` : text, conversationId);
     this.pump(conv.projectId);
   }
 
-  stop(agentId: Id): void {
+  /**
+   * For the lead, `conversationId` is the conversation the caller is looking at: its lead turn (if one runs) and its helpers stop,
+   * and other conversations of the project are left alone. Without one, the project's running lead turns and their helpers stop;
+   * with no turn running there is nothing of the lead's to stop (stopping an idle lead used to kill every helper of the project).
+   */
+  stop(agentId: Id, conversationId?: Id): void {
     const a = this.d.store.getAgent(agentId);
     if (!a) return;
     if (a.role === 'main') {
-      // Stop the conversations whose lead is running; with none running, stop every helper of the project.
-      const active = [...this.leads].filter(([, l]) => l.projectId === a.projectId);
-      const convs = new Set(active.map(([c]) => c));
+      if (conversationId !== undefined && this.d.store.getConversation(conversationId)?.projectId !== a.projectId) throw new Error('This conversation is no longer available.');
+      const active = [...this.leads].filter(([c, l]) => l.projectId === a.projectId && (conversationId === undefined || c === conversationId));
+      const convs = new Set(conversationId === undefined ? active.map(([c]) => c) : [conversationId]);
+      if (!convs.size) return;
       for (const s of this.d.store.listAgentRecords(a.projectId)) {
-        if (s.role !== 'main' && (!convs.size || convs.has(s.parentConversationId))) this.stop(s.id);
+        if (s.role !== 'main' && convs.has(s.parentConversationId)) this.stop(s.id);
       }
       this.denyToolAsks((p) => p.agentId === a.id && convs.has(p.conversationId), 'the lead was stopped');
-      this.d.screenshots?.cancel((r) => r.agentId === a.id && (!convs.size || convs.has(r.sessionId)), 'the lead was stopped');
-      for (const [, l] of active) l.ctl.abort();
+      this.d.screenshots?.cancel((r) => r.agentId === a.id && convs.has(r.sessionId), 'the lead was stopped');
+      // Turns already chained behind the aborted one (reports, goal steps) are dropped too, as on stopConversation: a stop must not
+      // be followed by a lead turn that spends quota. Their reports stay held for the user's next message.
+      for (const [c, l] of active) { this.sessionGeneration.set(c, (this.sessionGeneration.get(c) ?? 0) + 1); l.ctl.abort(); }
       return;
     }
     this.denyToolAsks((p) => p.agentId === a.id, 'the agent was stopped');
@@ -1070,7 +1100,10 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const turns = (this.autoTurns.get(conversationId) ?? 0) + 1;
     this.autoTurns.set(conversationId, turns);
     if (turns > (this.d.maxAutoTurns ?? 12)) {
-      this.post(conversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
+      if (!this.autoPaused.has(conversationId)) {
+        this.autoPaused.add(conversationId);
+        this.post(conversationId, 'system', 'Paused automatic coordination after many consecutive steps. Send a message to continue.');
+      }
       return false;
     }
     return true;
@@ -1563,8 +1596,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
   }
 
   /**
-   * A lead's HARBOR_REPLY: forwarded to a helper of this conversation that waits (its answer) or was stopped (it continues in its own
-   * session, on its branch). Returns the helper's id when delivered.
+   * A lead's HARBOR_REPLY: forwarded to a helper of this conversation that waits (its answer), was stopped, or finished or failed but
+   * still has its saved session (it continues in that session, on its branch, like a resume). Returns the helper's id when delivered.
    */
   private deliverReply(projectId: Id, conversationId: Id, r: ReplyRequest): Id | undefined {
     const q = r.to.trim().toLowerCase();
@@ -1572,14 +1605,16 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const hits = mine.filter((x) => x.id.toLowerCase() === q);
     const target = hits[0] ?? (q.length >= 6 ? (mine.filter((x) => x.id.toLowerCase().startsWith(q)).length === 1 ? mine.find((x) => x.id.toLowerCase().startsWith(q)) : undefined) : undefined);
     if (!target) { this.post(conversationId, 'system', `Harbor could not deliver the lead's reply to "${clip(r.to, 60)}": no single helper of this conversation has that id.`); return undefined; }
-    if (!['waiting', 'stopped', 'working', 'queued'].includes(target.state)) {
-      this.post(conversationId, 'system', `Harbor did not deliver the lead's reply to "${target.title}": it is ${target.state}. Delegate new work (with "retryOf" to redo it) instead.`, { agentId: target.id });
+    const finished = target.state === 'done' || target.state === 'failed';
+    if (!['waiting', 'stopped', 'working', 'queued'].includes(target.state) && !(finished && this.d.store.getSession(target.id))) {
+      this.post(conversationId, 'system', `Harbor did not deliver the lead's reply to "${target.title}": it is ${target.state} and has no saved session to resume. Delegate new work (with "retryOf" to redo it) instead.`, { agentId: target.id });
       return undefined;
     }
     this.d.store.addCoordination({ projectId, kind: 'direct', from: this.d.store.mainAgent(projectId)?.id, to: target.id, text: r.text });
     this.post(conversationId, 'system', `The lead replied to "${target.title}": ${clip(r.text, 200)}`, { agentId: target.id });
     if (target.state === 'queued') { const f = this.followups.get(target.id) ?? []; f.push(r.text); this.followups.set(target.id, f); return target.id; }
-    if (target.state === 'stopped') { this.reported.delete(reportKey(target)); this.d.store.clearReportDelivery(target.id); }
+    if (target.state === 'stopped' || finished) { this.reported.delete(reportKey(target)); this.d.store.clearReportDelivery(target.id); }
+    if (finished) this.post(conversationId, 'system', `"${target.title}" had ${target.state === 'done' ? 'finished' : 'failed'}; it continues from its saved session to act on the reply.`, { agentId: target.id });
     this.followUp(target, `Message from the lead: ${r.text}`);
     return target.id;
   }
@@ -2024,7 +2059,11 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const { store, git } = this.d;
     const conv = this.convFor(a);
     this.setState(a, 'working', { error: undefined, stopKind: undefined });
-    this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+    // Once per revision: a run that routing held for quota comes back through here when the hold ends.
+    if (this.assignmentPosted.get(a.id) !== a.revision) {
+      this.assignmentPosted.set(a.id, a.revision);
+      this.post(conv, 'system', `Assignment (${a.role}, rev ${a.revision}): ${a.title}\n\n${a.task}`, { agentId: a.id });
+    }
 
     // Workspace: edit helpers get an isolated worktree; read-only helpers read the project (or the change under review).
     let cwd = project.path;
@@ -2481,6 +2520,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
   private finished(a: AgentRecord): void {
     const { store } = this.d;
     this.conflictAsked.delete(a.id);
+    this.assignmentPosted.delete(a.id);
     this.withdrawConflictAsk(a.id);
     const parent = a.parentConversationId;
     const verb = a.state === 'done' ? 'finished' : a.state === 'stopped' ? 'was stopped' : 'failed';
@@ -3291,7 +3331,9 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const tool = req.tool || 'unknown tool';
     // The journal gets the tool name only: inputs can hold paths, commands or secrets.
     const journal = (text: string) => this.log({ kind: 'permission', projectId, conversationId, agentId: agent.id, text: `${tool}: ${text}` });
-    if (!opts.noRules && this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input))) {
+    // A leading `cd` into the project (or the helper's own worktree) is not chaining: rules are made and matched on what runs there.
+    const roots = [this.project(projectId).path, ...(agent.worktree ? [agent.worktree] : [])];
+    if (!opts.noRules && this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input, roots))) {
       journal('allowed by a project rule');
       return Promise.resolve({ allow: true });
     }
@@ -3306,7 +3348,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       return Promise.resolve({ allow: false, message: 'Harbor denied this tool call because the run was stopping.' });
     }
     const requestId = newId();
-    const rule = opts.noRules ? undefined : toolRuleFor(req.tool, req.input);
+    const rule = opts.noRules ? undefined : toolRuleFor(req.tool, req.input, roots);
     const timeoutMs = this.d.toolPermissionTimeoutMs ?? TOOL_PERMISSION_TIMEOUT_MS;
     const n = timeoutMs >= 60_000 ? Math.round(timeoutMs / 60_000) : Math.max(1, Math.round(timeoutMs / 1000));
     const minutes = `${n} ${timeoutMs >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`;

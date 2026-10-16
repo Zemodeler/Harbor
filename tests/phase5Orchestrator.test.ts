@@ -55,3 +55,32 @@ describe('a helper held for quota', () => {
     h.svc.store.patchAgent('held-3', { state: 'stopped', stopKind: 'user' });
   });
 });
+
+describe('a helper released from a quota hold', () => {
+  it('posts its Assignment message once, not again when the hold ends and the run starts', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    let clock = Date.now();
+    const h = await harness({}, { git: false, service: { now: () => clock, setTimer: (fn, ms) => { timers.push({ fn, ms }); return () => {}; } } });
+    const now = clock;
+    const weekReset = now + 100 * 3_600_000;
+    h.svc.store.addUsage({ id: 'u1', time: now - 60_000, cli: 'claude', model: 'claude-sonnet-5-5', projectId: h.project.id, agentId: 'x', durationMs: 1, ok: true,
+      limits: [{ period: 'weekly', usedPct: 84.5, resetsAt: weekReset, asOf: now - 60_000 }, { period: 'session', usedPct: 10, resetsAt: now + 3_600_000, asOf: now - 60_000 }] });
+    h.svc.store.upsertAgent({
+      id: 'held-4', projectId: h.project.id, role: 'other', readOnly: true, title: 'Trace the lease race', state: 'queued', cli: 'auto', model: 'auto', effort: 'high',
+      task: 'find the root cause of the race in the lease code', dependsOn: [], revision: 1, parentConversationId: h.conv.id, attempts: 0, created: now,
+      difficulty: 8, size: 'large', complexity: 'high'
+    } satisfies AgentRecord);
+    h.svc.orchestrator.pump(h.project.id);
+    await until(() => /^Waiting: too little quota is left above the reserve/.test(h.svc.store.getAgent('held-4')!.error ?? ''));
+    expect((await h.texts()).filter((t) => t.startsWith('Assignment (other'))).toHaveLength(1);
+    // The week resets: a fresh reading shows room, the clock passes the hold, and the reset timer pumps the queue.
+    clock = weekReset + 60_000;
+    h.svc.store.addUsage({ id: 'u2', time: clock, cli: 'claude', model: 'claude-sonnet-5-5', projectId: h.project.id, agentId: 'x', durationMs: 1, ok: true,
+      limits: [{ period: 'weekly', usedPct: 1, resetsAt: clock + 7 * 24 * 3_600_000, asOf: clock }, { period: 'session', usedPct: 1, resetsAt: clock + 3_600_000, asOf: clock }] });
+    for (const t of timers.splice(0)) t.fn();
+    h.svc.orchestrator.pump(h.project.id);
+    await until(() => h.svc.store.getAgent('held-4')!.state === 'done', 8000);
+    expect(h.calls(isHelper)).toHaveLength(1);
+    expect((await h.texts()).filter((t) => t.startsWith('Assignment (other'))).toHaveLength(1);
+  });
+});

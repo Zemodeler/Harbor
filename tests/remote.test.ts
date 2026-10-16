@@ -277,7 +277,7 @@ describe('remote server: validation parity with IPC', () => {
   // The same malformed calls tests/ipcValidate.test.ts sends over IPC.
   const rejected: Array<[string, unknown[]]> = [
     ['send', [42, 'hi']], ['send', ['c1', 7]], ['send', ['c1', 'x'.repeat(200_001)]], ['send', ['c1', 'hi', 'img']], ['send', ['c1', 'hi', [{ name: 'a' }]]],
-    ['send', ['c1', 'hi', Array.from({ length: 7 }, () => ({ name: 'a.png', mime: 'image/png', dataBase64: 'AA==' }))]],
+    ['send', ['c1', 'hi', Array.from({ length: 11 }, () => ({ name: 'a.txt', mime: 'text/plain', dataBase64: 'AA==' }))]],
     ['answerQuestion', ['', 'yes']], ['answerQuestion', ['r1', { a: 1 }]], ['answerQuestion', ['r1', 'x'.repeat(20_001)]],
     ['setAgentPriority', ['a1', '5']], ['setAgentPriority', ['a1', 1.5]], ['setAgentPriority', [{}, 1]],
     ['integrateBranches', ['p1', []]], ['integrateBranches', ['p1', 'a1']], ['integrateBranches', ['p1', ['a1'], 'x\ny']],

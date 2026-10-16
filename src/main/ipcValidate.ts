@@ -19,7 +19,8 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!isId(id)) bad('conversation id must be a short non-empty string');
       if (typeof text !== 'string' || text.length > MAX_TEXT) bad(`text must be a string of at most ${MAX_TEXT} characters`);
       if (attachments !== undefined && attachments !== null) {
-        if (!Array.isArray(attachments) || attachments.length > 6) bad('attachments must be a list of at most 6 images');
+        // The service enforces the finer rule (6 images, 10 files in total); this only keeps absurd lists out.
+        if (!Array.isArray(attachments) || attachments.length > 10) bad('attachments must be a list of at most 6 images or 10 files');
         for (const a of attachments as unknown[]) {
           const o = a as { name?: unknown; mime?: unknown; dataBase64?: unknown } | null;
           if (!o || typeof o !== 'object' || typeof o.name !== 'string' || o.name.length > 260 || typeof o.mime !== 'string' || o.mime.length > 100 || typeof o.dataBase64 !== 'string') bad('each attachment needs a name, mime type and base64 data');

@@ -459,6 +459,31 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect((await h.texts()).at(-1)).toBe('Stopped.');
   });
 
+  it('stopping an idle lead stops only the helpers of the conversation named, never those of another conversation', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const claude = script({
+      lead: (prompt) => (prompt.includes('User:') ? delegate('go', { ref: 'a', title: 'Slow', role: 'implementer', instructions: 'slow', complexity: 'low', files: ['x.ts'] }) : say('ack')),
+      helper: async () => { await gate; return say('late'); }
+    });
+    const h = await harness({ claude }, { ids: ['claude'], git: false });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(second.id, 'go');
+    const main = h.svc.store.mainAgent(h.project.id)!;
+    // The lead's turn ends once it has delegated; the helper of `second` runs on while no lead turn is running.
+    for (let i = 0; i < 300 && !(helpers(h).some((a) => a.state === 'working') && h.svc.store.getAgent(main.id)!.state === 'waiting'); i++) await new Promise((r) => setTimeout(r, 10));
+    const slow = helpers(h).find((x) => x.title === 'Slow')!;
+    expect(slow.state).toBe('working');
+    await h.svc.stopAgent(main.id, h.conv.id); // the first conversation is open: nothing of it runs, nothing else is touched
+    await h.svc.stopAgent(main.id); // no conversation named and no lead turn running: nothing to stop either
+    expect(h.svc.store.getAgent(slow.id)!.state).toBe('working');
+    await h.svc.stopAgent(main.id, second.id);
+    release();
+    await h.svc.whenIdle();
+    expect(h.svc.store.getAgent(slow.id)!.state).toBe('stopped');
+    await expect(h.svc.stopAgent(main.id, 'nope')).rejects.toThrow(/no longer available/);
+  });
+
   it('stopping a session prevents stopped helpers restarting its lead', async () => {
     let release!: () => void;
     const gate = new Promise<void>(r => { release = r; });
@@ -474,6 +499,21 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(h.calls(isLead)).toHaveLength(1);
     expect(h.svc.store.getConversation(h.conv.id)?.activity?.state).toBe('stopped');
     expect(helpers(h).every(a => a.state === 'stopped')).toBe(true);
+    h.svc.shutdown();
+  });
+  it('stopping the lead drops the turns chained behind the aborted one (no turn spends quota after a Stop)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const h = await harness({ claude: script({ lead: async () => { await gate; return say('Late answer'); } }) }, { ids: ['claude'], git: false });
+    await h.svc.send(h.conv.id, 'First request');
+    for (let i = 0; i < 200 && h.calls(isLead).length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    await h.svc.send(h.conv.id, 'Second request'); // chained behind the running turn
+    await h.svc.stopAgent(h.svc.store.mainAgent(h.project.id)!.id, h.conv.id);
+    release(); await h.svc.whenIdle();
+    expect(h.calls(isLead)).toHaveLength(1);
+    expect(await h.texts()).toContain('Second request');
+    expect(await h.texts()).not.toContain('Late answer');
+    expect((await h.texts()).at(-1)).toBe('Stopped.');
     h.svc.shutdown();
   });
   it('stopping a session cancels its queued lead turns while retaining user messages', async () => {
@@ -523,6 +563,26 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(h.adapters.claude!.calls).toHaveLength(0);
     await h.svc.whenIdle(); // the startup git work of recover() ends before the folder is removed
   });
+
+  it('recover() stops a helper left waiting for an answer (the question is gone) so it no longer counts as active', async () => {
+    const h = await harness({ claude: script(oneHelper()) }, { ids: ['claude'] });
+    const main = h.svc.store.mainAgent(h.project.id)!;
+    const base = { ...main, role: 'implementer' as const, parentConversationId: h.conv.id, dependsOn: [], revision: 1, attempts: 0, created: 1 };
+    h.svc.store.upsertAgent({ ...base, id: 'asked', title: 'Asked', state: 'waiting', error: 'Waiting for your answer.' });
+    h.svc.store.upsertAgent({ ...base, id: 'after', title: 'After', state: 'queued', dependsOn: ['asked'] });
+    h.svc.orchestrator.recover();
+    const asked = h.svc.store.getAgent('asked')!;
+    expect(asked.state).toBe('stopped');
+    expect(asked.stopKind).toBe('restart');
+    expect(asked.error).toMatch(/waiting for an answer, and that question is gone/);
+    expect(h.svc.store.getAgent(main.id)!.state).toBe('waiting'); // the lead itself is not a stranded helper
+    expect((await h.texts()).some((t) => t.startsWith('Harbor restarted while "Asked" was waiting for an answer'))).toBe(true);
+    // Its dependent waits for a resume instead of failing, like after any restart (recover() pumps the queue itself).
+    expect(h.svc.store.getAgent('after')!).toMatchObject({ state: 'queued', error: expect.stringContaining('stopped when Harbor restarted') });
+    expect(h.adapters.claude!.calls).toHaveLength(0);
+    await h.svc.stopAgent('after'); // a queued helper would keep whenIdle waiting
+    await h.svc.whenIdle();
+  });
 });
 
 describe('file conflicts', () => {
@@ -539,6 +599,26 @@ describe('file conflicts', () => {
     await h.svc.whenIdle();
     return h;
   };
+
+  it('an open conflict question blocks archiving and deleting only its own conversation, not others of the project', async () => {
+    const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
+    const other = await h.svc.newConversation(h.project.id);
+    const third = await h.svc.newConversation(h.project.id);
+    let ask: string | undefined;
+    h.svc.onEvent((e) => { if (e.type === 'permission' && !ask) ask = e.requestId; });
+    await h.svc.send(h.conv.id, 'go');
+    for (let i = 0; i < 300 && !ask; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(ask).toBeTruthy();
+    await expect(h.svc.updateConversation(h.conv.id, { archived: true })).rejects.toThrow(/pending requests/);
+    await expect(h.svc.deleteConversation(h.conv.id)).rejects.toThrow(/pending requests/);
+    // The ask belongs to the first conversation's helpers: idle conversations of the same project are not held up by it.
+    await h.svc.updateConversation(other.id, { archived: true });
+    expect(h.svc.store.getConversation(other.id)!.archived).toBe(true);
+    await h.svc.deleteConversation(third.id);
+    expect(h.svc.store.getConversation(third.id)).toBeUndefined();
+    await h.svc.answerPermission(ask!, false);
+    await h.svc.whenIdle();
+  });
 
   it('withdraws an unanswered conflict question once the waiting agent got its files', async () => {
     const h = await harness({ claude: twoEditors }, { ids: ['claude'], git: false, reported: 'calm' });
