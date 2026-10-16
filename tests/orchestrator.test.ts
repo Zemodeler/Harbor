@@ -501,6 +501,21 @@ describe('helpers: direct prompts, help requests, stop, recovery', () => {
     expect(helpers(h).every(a => a.state === 'stopped')).toBe(true);
     h.svc.shutdown();
   });
+  it('stopping the lead drops the turns chained behind the aborted one (no turn spends quota after a Stop)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const h = await harness({ claude: script({ lead: async () => { await gate; return say('Late answer'); } }) }, { ids: ['claude'], git: false });
+    await h.svc.send(h.conv.id, 'First request');
+    for (let i = 0; i < 200 && h.calls(isLead).length === 0; i++) await new Promise(r => setTimeout(r, 10));
+    await h.svc.send(h.conv.id, 'Second request'); // chained behind the running turn
+    await h.svc.stopAgent(h.svc.store.mainAgent(h.project.id)!.id, h.conv.id);
+    release(); await h.svc.whenIdle();
+    expect(h.calls(isLead)).toHaveLength(1);
+    expect(await h.texts()).toContain('Second request');
+    expect(await h.texts()).not.toContain('Late answer');
+    expect((await h.texts()).at(-1)).toBe('Stopped.');
+    h.svc.shutdown();
+  });
   it('stopping a session cancels its queued lead turns while retaining user messages', async () => {
     let release!: () => void;
     const gate = new Promise<void>(r => { release = r; });
