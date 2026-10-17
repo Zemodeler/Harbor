@@ -374,6 +374,14 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       void pause().then(() => { agent.state = 'done'; agent.summary = 'Merged; checks passed.'; agent.testedCommit = demoCommits[0].hash; agent.checks = [{ cmd: 'npm test', ok: true, exitCode: 0, durationMs: 18000 }]; Object.assign(agent.integration!, { branch: 'harbor/integrate-demo-0a1b2c', head: demoCommits[0].hash }); agent.integration!.sources.forEach(src => { src.state = 'merged'; }); updateAgent(copy(agent)); });
       return copy(agent);
     },
+    async mergeSession(conversationId) {
+      await pause();
+      const c = data.conversations.find(x => x.id === conversationId);
+      if (!c?.workspace) throw new Error('This session works in the project folder itself: there is nothing to merge.');
+      if (c.workspace.mergedHead) return { merged: true, target: 'main', head: c.workspace.mergedHead, message: "Nothing to merge: main already contains this session's work." };
+      c.workspace = { ...c.workspace, mergedAt: Date.now(), mergedHead: demoCommits[0].hash };
+      return { merged: true, target: 'main', head: demoCommits[0].hash, message: `main fast-forwarded to ${demoCommits[0].hash.slice(0, 10)}: this session's work is in your project folder. Nothing was pushed.` };
+    },
     async applyIntegration(agentId) {
       const a = data.agents.find(x => x.id === agentId);
       const target = a?.integration ?? a?.rollback;
