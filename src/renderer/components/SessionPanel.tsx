@@ -5,7 +5,7 @@ import { ComplexityBadge, SessionStatus } from './SessionStatus';
 import { modes } from './ModePicker';
 import { CloseIcon } from './Icons';
 import { HelperDetails } from './HelperDetails';
-import { IntegrateAction } from './IntegrationPanel';
+import { IntegrateAction, MergeSessionAction } from './IntegrationPanel';
 import { DeadlineControl } from './DeadlineControl';
 import { RoutingReason } from './RoutingDetails';
 import s from '../Harbor.module.css';
@@ -47,6 +47,7 @@ export function SessionPanel({ state, close }: { state: HarborState; close: () =
     {agent?.role !== 'main' && agent ? null : <DeadlineControl api={state.api} conversation={c}/>}
     <h3 className={s.resultHeading}>Subagents · {crew.length}</h3>
     {!crew.length ? <p className={s.muted}>The lead is handling this session directly.</p> : crew.map(a => <div className={s.agentEntry} key={a.id}><button className={s.agentEntryTitle} onClick={() => void state.openAgent(a.id)}>{a.title}</button><SessionStatus status={a.state}/><small>{a.role} · {a.cli} / {a.model}</small>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button onClick={() => void state.run(() => state.api.stopAgent(a.id, c?.id))}>Stop this agent</button> : null}<HelperDetails state={state} agent={a}/></div>)}
+    <MergeSessionAction key={c.id} api={state.api} conversation={c} working={['working', 'queued'].includes(status)}/>
     <IntegrateAction api={state.api} projectId={c.projectId} helpers={crew}/>
     {['working', 'queued', 'waiting'].includes(status) ? <button className={s.stopSession} onClick={() => void state.run(() => state.api.stopConversation(c.id))}>Stop this session</button> : null}
   </>;

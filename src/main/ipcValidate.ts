@@ -41,6 +41,9 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!isId(args[0])) bad('agent id must be a short non-empty string');
       if (typeof args[1] !== 'number' || !Number.isInteger(args[1]) || Math.abs(args[1]) > 1_000_000) bad('priority must be a whole number');
       break;
+    case 'mergeSession':
+      if (!isId(args[0])) bad('conversation id must be a short non-empty string');
+      break;
     case 'integrateBranches':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       if (!Array.isArray(args[1]) || args[1].length < 1 || args[1].length > 50 || !args[1].every(isId)) bad('agentIds must be a list of 1 to 50 agent ids');
