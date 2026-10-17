@@ -1399,7 +1399,6 @@ ${attachedFilesNote(others)}` : text, conversationId);
   /** The working agent: reads, edits, runs commands, and delegates through HARBOR_DELEGATE lines when that pays off. */
   private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal, batch?: ReportBatch, work?: SessionWork): Promise<void> {
     const notes = [...(this.notes.get(conversationId) ?? [])];
-    const repoDir = work?.worktree ?? project.path;
     if (work) notes.push(`You work in this session's own git worktree on branch ${work.branch}, because another session of this project edits the project folder. Harbor commits your edits to this branch after each turn (do not run git commands that write). Other sessions cannot see your edits, and yours reach the project folder only when the user merges this session. Do not touch other directories. node_modules is linked from the main checkout: never run npm install or delete it.`);
     this.notes.delete(conversationId);
     // What the user was told by the front desk since this lead last ran: it cannot know, and would contradict or repeat it.
@@ -1413,7 +1412,6 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const mode = conv?.mode ?? 'default';
     const goal = mode === 'goal' ? conv?.goal : undefined;
     const goalMode = !!goal;
-    const headBefore = await this.d.git.head(repoDir).catch(() => undefined);
     await this.probeRepo(project).catch(() => false);
     const writableDirs = work && mode !== 'plan' ? await this.d.git.worktreeWritableDirs(work.worktree).catch(() => []) : [];
     const checkCmds = this.checkCommands(project);
@@ -1466,7 +1464,6 @@ ${attachedFilesNote(others)}` : text, conversationId);
     }
     // Notes count as shown only once a CLI actually took the prompt.
     if ((out.ok || out.started) && fresh.picked.length) this.notesShown.set(conversationId, new Set([...seenNotes, ...fresh.picked.map((n) => n.id)]));
-    await this.detectLeadMerge(project, main, conversationId, headBefore, repoDir);
     // Before any helper is created from this turn's delegations: they start from the session branch and must find the lead's edits on it.
     if (work && mode !== 'plan') await this.commitSession(work.worktree, conversationId);
     if (!out.ok && out.stopped && this.steered.has(conversationId)) {
@@ -1752,31 +1749,6 @@ ${attachedFilesNote(others)}` : text, conversationId);
   /** The checked-out branch now: an integrator queued without a target is pinned to it, and refuses to run once the folder is on another branch. */
   private async pinTarget(project: Project): Promise<{ checkedOut?: string }> {
     return { checkedOut: await this.d.git.currentBranch(project.path).catch(() => undefined) };
-  }
-
-  /**
-   * Backstop for the rule that only the integrator lands harbor/* branches: if a harbor/* head became reachable from the
-   * project's HEAD during the lead's turn, the lead merged (or fast-forwarded to) one itself. Works for every CLI.
-   */
-  private async detectLeadMerge(project: Project, main: AgentRecord, conversationId: Id, before: string | undefined, repoDir = project.path): Promise<void> {
-    if (!before) return;
-    try {
-      const { git } = this.d;
-      const after = await git.head(repoDir);
-      if (!after || after === before) return;
-      const merged: string[] = [];
-      const seen = new Set<string>();
-      for (const r of this.d.store.listAgentRecords(project.id)) {
-        if (!r.branch?.startsWith('harbor/') || seen.has(r.branch)) continue;
-        seen.add(r.branch);
-        const head = await git.branchHead(project.path, r.branch);
-        if (head && head !== before && !(await git.isAncestor(project.path, head, before)) && await git.isAncestor(project.path, head, after)) merged.push(r.branch);
-      }
-      if (!merged.length) return;
-      const list = merged.join(', ');
-      this.post(conversationId, 'system', `Warning: the lead merged ${list} into the project itself. Branches should land through an integrator helper so they are gated and applied by you. Check the project's history before building on it.`, { agentId: main.id });
-      this.log({ kind: 'protocol', projectId: project.id, conversationId, agentId: main.id, text: `Lead merged helper branch(es) itself: ${list}` });
-    } catch { /* detection must never break a lead turn */ }
   }
 
   /**

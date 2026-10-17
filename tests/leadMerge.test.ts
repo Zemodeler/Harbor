@@ -50,23 +50,8 @@ async function setup(afterReport: (cwd: string, branch: string) => void) {
   return { svc, project, seen, warnings };
 }
 
-it('warns and journals when the lead merges a harbor/* branch into the project', async () => {
+it('lets the lead merge a harbor/* branch into the project without a warning or a journal entry', async () => {
   const { svc, project, warnings } = await setup((cwd, branch) => { git(cwd, 'merge', '--no-ff', '-q', '-m', 'merge helper', branch); });
-  const w = await warnings();
-  expect(w).toHaveLength(1);
-  expect(w[0]!.text).toMatch(/harbor\/write-a/);
-  const entries = svc.orchestrator.journal.list(project.id).filter((e) => e.text.includes('Lead merged'));
-  expect(entries).toHaveLength(1);
-  expect(entries[0]).toMatchObject({ kind: 'protocol' });
-});
-
-it('also catches a fast-forward to a helper branch', async () => {
-  const { warnings } = await setup((cwd, branch) => { git(cwd, 'merge', '--ff-only', '-q', branch); });
-  expect(await warnings()).toHaveLength(1);
-});
-
-it('stays quiet when the lead only commits its own work', async () => {
-  const { svc, project, warnings } = await setup((cwd) => { writeFileSync(join(cwd, 'own.txt'), 'x'); git(cwd, 'add', '.'); git(cwd, 'commit', '-q', '-m', 'own'); });
   expect(await warnings()).toHaveLength(0);
   expect(svc.orchestrator.journal.list(project.id).filter((e) => e.text.includes('Lead merged'))).toHaveLength(0);
 });
@@ -77,14 +62,15 @@ it('asks the adapter to deny git writes on lead runs only', async () => {
   expect(seen.every((o) => o.denyGitWrites === true)).toBe(true);
 });
 
-it('claude denies git merge/rebase/cherry-pick/reset only when asked, and never plain push', () => {
+it('claude denies git reset on lead runs only, and never merge, rebase, cherry-pick or plain push', () => {
   const base: RunOptions = { cwd: '.', model: 'sonnet', effort: 'medium', permission: 'edit' };
   const on = claudeArgs({ ...base, denyGitWrites: true }).join('|');
-  for (const c of ['merge', 'rebase', 'cherry-pick', 'reset']) expect(on).toContain(`Bash(git ${c} *)`);
+  expect(on).toContain('Bash(git reset *)');
+  for (const c of ['merge', 'rebase', 'cherry-pick']) expect(on).not.toContain(`Bash(git ${c} *)`);
   expect(on).not.toContain('Bash(git push *)');
   expect(on).toContain('Bash(git push --force *)');
-  expect(on).toMatch(/--disallowedTools\|Task\|Agent\|Bash\(git merge \*\)/);
-  expect(claudeArgs(base).join('|')).not.toContain('Bash(git merge');
+  expect(on).toMatch(/--disallowedTools\|Task\|Agent\|Bash\(git reset \*\)/);
+  expect(claudeArgs(base).join('|')).not.toContain('Bash(git reset *)'); // helpers only get the destructive `git reset --hard`
 });
 
 it('claude gets a settings file that switches off the Co-Authored-By trailer', () => {
@@ -95,8 +81,9 @@ it('claude gets a settings file that switches off the Co-Authored-By trailer', (
   expect(claudeArgs(base)).not.toContain('--settings');
 });
 
-it('tells the lead to delegate an integrator instead of merging', () => {
-  expect(LEAD_SYSTEM).toMatch(/Never merge, rebase, cherry-pick, reset or push harbor\/\* branches/);
+it('tells the lead it may merge itself, but never reset, and still offers the integrator', () => {
+  expect(LEAD_SYSTEM).toMatch(/Never reset or force-push/);
+  expect(LEAD_SYSTEM).toMatch(/Merging into the project's branch is allowed/);
   expect(LEAD_SYSTEM).toContain('"role":"integrator"');
   expect(LEAD_SYSTEM).not.toMatch(/merge finished harbor/);
 });
