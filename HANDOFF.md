@@ -33,7 +33,7 @@
 - Everything open in `BACKLOG.md`. Most important: a real signed-in end-to-end run, queue/priority UI, API fallback, Gemini adapter, skills/plugins discovery, real provider allowance readings, and the wave 2 hardening items. Integration/merge of `harbor/*` branches and task rollback exist (contracts 0.1.15-0.1.18).
 - Permission requests live in memory; after a restart a conflict-waiting agent stays `queued` until the next scheduling pass.
 - Worktrees are created from the repository's **committed HEAD**. Uncommitted changes in the project folder (for example the docs edits currently in this repo) are not visible to agents. Commit first.
-- No worktree or branch is ever deleted automatically. `Git.removeWorktree` exists, refuses paths outside Harbor's root, and is unused by the app.
+- Worktrees and branches are deleted only on purpose (contract 0.1.47): the 14-day stale prune removes clean worktrees but keeps their branches; `deleteProject(id, 'worktrees' | 'folder', confirmName)` removes a project's Harbor worktrees and `harbor/*` branches (and the folder at the last level); Settings > Folders & storage (`cleanupWorktrees`) removes merged, stale and orphaned ones. `Git.removeWorktree` refuses paths outside Harbor's root and `Git.deleteBranch` refuses anything but `harbor/*`. Harbor now also pushes, but only from the owner's click (`pushBranch`, plain `git push`, never forced, default branch behind a named confirmation, secret scan of the pushed commits).
 - Projects that are not git repos with commits run implementers directly in the project folder under a whole-project lock.
 
 ## Could not verify (needs a signed-in machine)
