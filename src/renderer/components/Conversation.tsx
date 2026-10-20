@@ -58,7 +58,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
   </article>;
 });
 
-export function Conversation({ state, openProject, workspace, review, dock, showCrew = true }: { state: HarborState; openProject: () => void; workspace: WorkspaceState; review: () => void; dock?: ReactNode; showCrew?: boolean }) {
+export function Conversation({ state, openProject, newProject, workspace, review, dock, showCrew = true }: { state: HarborState; openProject: () => void; newProject?: () => void; workspace: WorkspaceState; review: () => void; dock?: ReactNode; showCrew?: boolean }) {
   const stream = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const scrollAnchor = useRef<{ height: number; top: number }>(undefined);
@@ -102,7 +102,7 @@ export function Conversation({ state, openProject, workspace, review, dock, show
     if (el) { scrollAnchor.current = { height: el.scrollHeight, top: el.scrollTop }; follow.current = false; }
     setVisible(v => v + MESSAGE_WINDOW);
   }
-  if (!project) return <div className={s.empty}><Brand/><h1 tabIndex={-1}>A home for your projects.</h1><p>Open a project, start a conversation, and let Harbor coordinate the work.</p><button className={s.primary} onClick={openProject}>Open a project</button></div>;
+  if (!project) return <div className={s.empty}><Brand/><h1 tabIndex={-1}>A home for your projects.</h1><p>Open a project, start a conversation, and let Harbor coordinate the work.</p><button className={s.primary} onClick={openProject}>Open a project</button>{newProject ? <> <button onClick={newProject}>Start a new project</button></> : null}</div>;
   if (!c) return <div className={s.empty}><h1 tabIndex={-1}>{project.name}</h1><p>{state.projectLoading ? 'Loading conversations…' : 'Start a conversation to begin working in this project.'}</p><button className={s.primary} disabled={state.projectLoading} onClick={() => void state.newConversation()}>New conversation</button></div>;
   let previousTime: number | undefined;
   return <>

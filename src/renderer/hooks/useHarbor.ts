@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { mergeFetched, mergeMessages, upsertById, upsertByTime } from '../listOps';
-import type { Agent, CliStatus, Conversation, ConversationMode, HarborEvent, Message, Project, Settings, UsageWindow } from '../../shared/api';
+import type { Agent, CliStatus, Conversation, ConversationMode, CreateProjectResult, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
 
 export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
@@ -302,6 +302,27 @@ export function useHarbor() {
     if (removed) await reload();
     return removed;
   }
+  /** Starts a project (folder, template, git, optional GitHub repo) and opens it; undefined when it failed (the reason is in `area`). */
+  async function createProject(draft: NewProjectDraft, area?: string) {
+    let result: CreateProjectResult | undefined;
+    await run(async () => {
+      if (!api.createProject) throw new Error('Starting a project is available in the desktop app.');
+      const r = await api.createProject(draft);
+      setProjects(await api.listProjects()); await selectProject(r.project.id);
+      result = r;
+    }, area);
+    return result;
+  }
+  /** Deletes a project at the chosen level (records, plus worktrees and branches, plus the folder) and reloads. */
+  async function deleteProject(id: string, scope: DeleteScope, confirmName: string | undefined, area?: string) {
+    let result: DeleteResult | undefined;
+    await run(async () => {
+      if (!api.deleteProject) throw new Error('Deleting a project is available in the desktop app.');
+      result = await api.deleteProject(id, scope, confirmName);
+    }, area);
+    if (result?.removed.records) await reload();
+    return result;
+  }
   async function renameProject(id: string, name: string, area?: string) {
     let renamed = false;
     await run(async () => { await api.renameProject!(id, name); setProjects(await api.listProjects()); renamed = true; }, area);
@@ -402,7 +423,7 @@ export function useHarbor() {
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),
     sending, run, reload, selectProject, selectConversation, clearProject, retryMessages: () => conversation ? selectConversation(conversation) : Promise.resolve(),
-    newConversation, deleteConversation, openAgent, addProject, removeProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
+    newConversation, deleteConversation, openAgent, addProject, removeProject, createProject, deleteProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

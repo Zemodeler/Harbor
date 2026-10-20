@@ -24,6 +24,7 @@ import { DocumentViewer } from './documents/DocumentViewer';
 import s from './Harbor.module.css';
 import dc from './documents/Documents.module.css';
 import { Onboarding } from './components/Onboarding';
+import { NewProject } from './components/NewProject';
 import { TagEditor } from './components/TagEditor';
 import { Toasts } from './components/Toasts';
 import { useConversationMeta } from './hooks/useConversationMeta';
@@ -77,6 +78,7 @@ export default function App() {
   const [view, setView] = useState<'conversation' | 'settings' | 'git'>('conversation');
   const [dialog, setDialog] = useState<'switch' | 'history' | 'add' | 'remove'>();
   const [menu, setMenu] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState('');
   const [path, setPath] = useState('');
   const [pending, setPending] = useState(false);
@@ -115,7 +117,7 @@ export default function App() {
   function search(history = false) { setMenu(false); setDialog(history ? 'history' : 'switch'); }
   const editTags = (c: ConversationRecord) => { setMenu(false); setTagging(c); };
   const forget = (id: string) => { workspace.forgetConversation(id); meta.forget(id); };
-  const sideProps = { state, add: openProject, settings: () => { setMenu(false); setView('settings'); }, close: () => { setMenu(false); setView('conversation'); }, search: () => search(), history: () => search(true), rename, queuedFor: (id: string) => (workspace.preferences.queue[id] || []).length, forget, tags: meta.tags, editTags, archivedOpen, setArchivedOpen };
+  const sideProps = { state, add: openProject, newProject: state.api.createProject ? openNew : undefined, settings: () => { setMenu(false); setView('settings'); }, close: () => { setMenu(false); setView('conversation'); }, search: () => search(), history: () => search(true), rename, queuedFor: (id: string) => (workspace.preferences.queue[id] || []).length, forget, tags: meta.tags, editTags, archivedOpen, setArchivedOpen };
   // First run: offer the guide once Harbor has loaded with no projects (a start-up failure is not a first run).
   const offerWelcome = shouldOfferOnboarding({ loading: state.loading, startupError: state.startupError, projects: state.projects.length, done: onboardingDone() });
   useEffect(() => { if (offerWelcome) setWelcome(true); }, [offerWelcome]);
@@ -129,7 +131,7 @@ export default function App() {
     setTimeout(focusWorkspace, 0);
   }
   const paletteActions = {
-    settings: () => setView('settings'), add: openProject, review: () => setPanel('review'), activity: () => setPanel('activity'), git: () => setView('git'),
+    settings: () => setView('settings'), add: openProject, newProject: state.api.createProject ? openNew : undefined, review: () => setPanel('review'), activity: () => setPanel('activity'), git: () => setView('git'),
     rename, editTags, welcome: () => setWelcome(true), showArchived: () => { setView('conversation'); setArchivedOpen(true); },
     deep: () => toDraft(d => d.startsWith('/deep') ? d : `/deep ${d}`),
     insertPrompt: (text: string) => { const t = fillTemplate(text, { project: project?.name, conversation: state.conversation?.title }); toDraft(d => d ? `${d}\n\n${t}` : t); },
@@ -143,10 +145,13 @@ export default function App() {
       if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); setQuery(''); setDialog('switch'); }
       // Ctrl+Shift+F: search every message of this project's conversations.
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setDialog('history'); }
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'n' && state.api.createProject) { e.preventDefault(); if (!dialog) openNew(); return; }
+      // Alt+1 to Alt+9 open the project at that place in the rail (not while typing, where AltGr produces characters).
+      if (e.altKey && !e.ctrlKey && !e.shiftKey && /^[1-9]$/.test(e.key) && !(e.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) { const target = state.projects[Number(e.key) - 1]; if (target) { e.preventDefault(); void state.selectProject(target.id); setView('conversation'); } return; }
       if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); if (!dialog) { setView('conversation'); void state.newConversation(); } }
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
-  }, [state.newConversation, dialog]);
+  }, [state.newConversation, state.selectProject, state.projects, state.api, dialog]);
   // Drop a file anywhere to view it (images dropped on the message box still attach there: that handler marks the event handled).
   useEffect(() => {
     const files = (e: DragEvent) => !!e.dataTransfer?.types?.includes('Files');
@@ -167,6 +172,7 @@ export default function App() {
   async function add(native: boolean) {
     setPending(true); const added = await state.addProject(native ? undefined : path, 'dialog'); setPending(false); if (added) { setDialog(undefined); setView('conversation'); }
   }
+  function openNew() { setMenu(false); setDialog(undefined); setCreating(true); }
   // Go straight to the native folder picker; failures show in the error banner.
   async function openProject() {
     setMenu(false); setDialog(undefined);
@@ -190,7 +196,7 @@ export default function App() {
           {showBoard ? <MissionBoard state={state} select={c => { void state.selectConversation(c); if (!veryWide) setMissionFull(true); }} openConversation={() => setMissionFull(true)}/> : null}
           <div className={s.conversationSurface} data-board-detail={showBoard || undefined}>
             {showBoard ? <div className={s.selectedTaskHeading}><small>Selected conversation</small><strong>{state.conversation?.title || 'Choose a conversation'}</strong></div> : null}
-            <Conversation state={state} openProject={openProject} workspace={workspace} review={() => setPanel('review')} dock={layout === 'focus' ? <AgentDock state={state} expand={toggleActivity}/> : undefined} showCrew={layout !== 'focus' && !(layout === 'command' && wide && visiblePanel === 'activity')}/>
+            <Conversation state={state} openProject={openProject} newProject={state.api.createProject ? openNew : undefined} workspace={workspace} review={() => setPanel('review')} dock={layout === 'focus' ? <AgentDock state={state} expand={toggleActivity}/> : undefined} showCrew={layout !== 'focus' && !(layout === 'command' && wide && visiblePanel === 'activity')}/>
           </div>
           {showViewer && wide && view === 'conversation' && !showBoard ? <aside className={dc.viewerPane} aria-label="Documents"><DocumentViewer docs={docs} api={state.api} projectId={state.projectId} agentTitle={id => state.agents.find(a => a.id === id)?.title} close={docs.hide}/></aside> : null}
           {visiblePanel && wide ? <aside className={`${s.infoPanel} ${visiblePanel === 'review' ? s.reviewPanel : ''}`} aria-label={visiblePanel === 'activity' ? 'Session information' : 'Change review'}>{visiblePanel === 'activity' ? layout === 'command' ? <LiveActivity state={state} close={closePanel} review={() => setPanel('review')}/> : <SessionPanel state={state} close={closePanel}/> : <ReviewPanel state={state} close={closePanel}/>}</aside> : null}
@@ -206,8 +212,9 @@ export default function App() {
       {dialog === 'switch' || dialog === 'history' ? <CommandMenu state={state} history={dialog === 'history'} close={() => { setDialog(undefined); setView('conversation'); }} actions={paletteActions} meta={meta} templates={workspace.preferences.templates}/> : dialog === 'add' ? <><p>Choose a local folder for your project.</p><label className={s.field}>Project folder<input autoFocus value={path} placeholder="C:\Projects\My project" onChange={e => setPath(e.target.value)}/></label><div className={s.actions}><button disabled={pending} onClick={() => void add(true)}>Browse folders…</button><button disabled={pending || !path.trim()} className={s.primary} onClick={() => void add(false)}>{pending ? 'Opening…' : 'Open project'}</button></div></> : <><p>Remove {project?.name} from Harbor? Local project files remain on disk.</p><div className={s.actions}><button onClick={() => setDialog(undefined)}>Keep project</button><button disabled={pending} onClick={() => { if (!project) return; setPending(true); void state.removeProject(project.id, 'dialog').then(ok => { if (ok) setDialog(undefined); }).finally(() => setPending(false)); }}>Remove entry</button></div></>}
       {state.areaErrors.dialog ? <p className={s.error} role="alert">{state.areaErrors.dialog}</p> : null}
     </Modal> : null}
+    {creating ? <NewProject state={state} close={() => { setCreating(false); setView('conversation'); }}/> : null}
     {tagging && !dialog ? <TagEditor conversation={tagging} tags={meta.tags[tagging.id] || []} known={tagCounts(meta.tags).map(t => t.tag)} save={tags => meta.setTags(tagging.id, tags)} close={() => setTagging(undefined)}/> : null}
-    {welcome && !dialog && !tagging && !renaming ? <Onboarding state={state} finish={finishWelcome}/> : null}
+    {welcome && !dialog && !tagging && !renaming && !creating ? <Onboarding state={state} finish={finishWelcome}/> : null}
     <Toasts toasts={toasts}/>
   </div></DocumentLinks.Provider>;
 }
