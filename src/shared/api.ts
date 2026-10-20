@@ -66,7 +66,7 @@ export type DeleteScope = 'forget'|'worktrees'|'folder';   // forget = Harbor's 
 export interface DeletePreview { projectId: Id; path: string; running: number; worktrees: { path: string; branch?: string; dirty: boolean; unmergedCommits: number }[]; branches: { name: string; unpushed: number; merged: boolean }[]; folder: { exists: boolean; dirty: boolean; unpushedCommits: number; hasRemote: boolean; sizeBytes?: number; outsideProjectsDir: boolean }; blockers: string[]; needsTypedName: { worktrees: boolean; folder: boolean } }   // read-only; running = agents that would be stopped; branches are harbor/* only; blockers refuse the folder level; needsTypedName = the scope that must be confirmed with the project name
 export interface DeleteResult { removed: { records: boolean; worktrees: number; branches: number; folder: boolean }; warnings: string[] }
 export interface PushSecretFinding { type: string; file: string; line: number }   // type, file and line only, never the value
-export interface SecretScanSummary { findings: PushSecretFinding[]; total: number; allowed: number; truncated?: boolean; failed?: boolean }
+export interface SecretScanSummary { findings: PushSecretFinding[]; total: number; allowed: number; fingerprint?: string; truncated?: boolean; failed?: boolean }   // findings = those the allowlist does not cover; fingerprint = identity of exactly these findings on this head (pass it back as pushBranch opts.secretOverride to push anyway)
 export interface PushPreview { branch: string; remote?: string; upstream?: string; ahead: number; behind: number; isDefaultBranch: boolean; commits: { hash: string; subject: string }[]; secretScan?: SecretScanSummary; needsRemote: boolean; busy?: boolean }   // busy = an agent is running on this branch
 export interface PushResult { ok: boolean; output: string; remote: string; branch: string; pullRequestUrl?: string }
 export interface PullRequestDraft { branch: string; base?: string; title: string; body?: string; draft?: boolean }
@@ -225,9 +225,10 @@ export interface HarborApi {
  previewDeleteProject?(id: Id): Promise<DeletePreview>;   // read-only
  deleteProject?(id: Id, scope: DeleteScope, confirmName?: string): Promise<DeleteResult>;   // 'forget' is removeProject; the other scopes need confirmName = the project name when the preview says so (always for 'folder'). Never touches the GitHub remote
  previewPush?(projectId: Id, branch: string): Promise<PushPreview>;
- pushBranch?(projectId: Id, branch: string, opts?: { setUpstream?: boolean; allowDefaultBranch?: boolean }): Promise<PushResult>;   // plain push, never forced; the default branch needs allowDefaultBranch; blocked by unallowlisted secret findings
+ pushBranch?(projectId: Id, branch: string, opts?: { setUpstream?: boolean; allowDefaultBranch?: boolean; secretOverride?: string }): Promise<PushResult>;   // plain push, never forced; the default branch needs allowDefaultBranch; blocked by unallowlisted secret findings
  createPullRequest?(projectId: Id, draft: PullRequestDraft): Promise<{ url: string }>;   // pushes the branch if needed, then gh pr create
  setRemote?(projectId: Id, url: string, opts?: { replace?: boolean }): Promise<void>;   // adds origin (https or ssh URL only); changing an existing origin needs replace
+ browseFolder?(): Promise<string | null>;   // folder picker (Settings > Projects folder); null when cancelled. Desktop only
  getGithubStatus?(): Promise<GithubStatus>;   // is gh installed and signed in (no token is read)
  listProjectNotes?(projectId: Id): Promise<ProjectNote[]>; removeProjectNote?(projectId: Id, noteId: Id): Promise<ProjectNote[]>;   // project knowledge notes, oldest first; remove returns the remaining notes (unknown note id = no-op; both reject an unknown project). CHANGELOG 0.1.40
  exportDiagnostics?(): Promise<string>;   // redacted plain-text support bundle (versions, CLI states, counts, journal and log tails); contains no message text, prompts or credentials

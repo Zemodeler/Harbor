@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
@@ -32,6 +32,10 @@ import { Journal } from './journal';
 import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
+import { GitHub } from './github';
+import { createProjectFolder } from './projectCreate';
+import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
+import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
 import type { RepoMapCache } from './repoMap';
@@ -46,7 +50,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -172,6 +176,14 @@ export interface ServiceOptions {
   spendTimer?: (fn: () => void, ms: number) => () => void;
   /** Replace the repo map cache of helper prompts (tests). */
   repoMaps?: RepoMapCache;
+  /** The `gh` wrapper (tests inject one with a fake runner; default runs the real gh). */
+  github?: GitHub;
+  /** Where new projects go when Settings.projectsDir is unset (default Documents\Harbor Projects; tests use a temp folder). */
+  defaultProjectsDir?: string;
+  /** Folders Harbor itself runs from: a project that is or contains one can never have its folder deleted. */
+  appRoots?: string[];
+  /** Pause between retries of a locked file when deleting a folder (tests shorten it). */
+  deleteSleep?: (ms: number) => Promise<void>;
 }
 
 /** Journal project id for entries that belong to Harbor itself (startup notices, failed saves), not to a project. */
@@ -504,6 +516,23 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     if (!p) throw new Error(`Unknown project ${id}`);
     return p;
   };
+  const gh = opts.github ?? new GitHub();
+  const projectsDir = () => store.getSettings().projectsDir ?? opts.defaultProjectsDir ?? join(homedir(), 'Documents', 'Harbor Projects');
+  const deleteDeps = () => ({
+    git, store, worktreesRoot, projectsDir: projectsDir(),
+    protectedRoots: [dataRoot, worktreesRoot, ...(opts.appRoots ?? [])],
+    running: (projectId: Id) => store.listAgentRecords(projectId).filter((a) => ['queued', 'working', 'waiting'].includes(a.state) && a.role !== 'main').length + store.listConversations(projectId).filter((c) => !!c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state)).length,
+    stopAll: (projectId: Id) => { for (const a of store.listAgentRecords(projectId)) orchestrator.stop(a.id); },
+    ...(opts.deleteSleep ? { sleep: opts.deleteSleep } : {})
+  });
+  const publishDeps = () => ({
+    git, gh, store,
+    notify: (projectId: Id, branch: string, text: string) => {
+      const agent = store.listAgentRecords(projectId).find((a) => a.branch && git.sameBranch(a.branch, branch) && a.parentConversationId);
+      const conv = (agent?.parentConversationId ? store.getConversation(agent.parentConversationId) : undefined) ?? store.listConversations(projectId).find((c) => !c.imported && !c.archived);
+      if (conv) orchestrator.notice(conv.id, text);
+    }
+  });
   // ---- document viewer (plan section 4b): files the user picked in the dialog this session (exact files, never their folders).
   const pickedDocuments = new Set<string>();
   /** Where a document of this project may come from, and the folder relative paths resolve against (the helper's worktree, else the project). */
@@ -704,6 +733,43 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
       store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.
     },
+
+    // ---- project lifecycle and publish (contract 0.1.47). The folder is only ever deleted at the user's typed confirmation.
+    async createProject(draft) {
+      const created = await createProjectFolder(draft, { git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p) => !!store.findProjectByPath(p) });
+      let project: Project;
+      try {
+        project = store.upsertProject({ id: newId(), name: created.name, path: created.path, lastOpened: clock() });
+        orchestrator.ensureProject(project);
+      } catch (e) {
+        created.undo();
+        throw new Error(`The project was not registered: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      const warnings = [...created.warnings];
+      let conversationId: Id | undefined;
+      const first = typeof draft.firstPrompt === 'string' ? draft.firstPrompt.trim() : '';
+      if (first) {
+        try {
+          const c = orchestrator.newConversation(project.id);
+          conversationId = c.id;
+          // Not awaited: the first lead turn can take minutes and the project already exists.
+          void ready.then(() => orchestrator.userMessage(c.id, first, [], {})).catch(() => { /* shown in the conversation by the orchestrator */ });
+        } catch (e) { warnings.push(`The first prompt was not sent: ${e instanceof Error ? e.message : String(e)}`); }
+      }
+      return { project, path: created.path, ...(created.remote ? { remote: created.remote } : {}), ...(conversationId ? { conversationId } : {}), warnings };
+    },
+    async previewDeleteProject(id) { return previewDelete(needProject(id), deleteDeps()); },
+    async deleteProject(id, scope, confirmName) {
+      const p = needProject(id);
+      if (scope !== 'forget' && scope !== 'worktrees' && scope !== 'folder') throw new Error('Unknown delete level.');
+      return deleteProjectImpl(p, scope, confirmName, deleteDeps());
+    },
+    async previewPush(projectId, branch) { return previewPushImpl(needProject(projectId), branch, publishDeps()); },
+    async pushBranch(projectId, branch, o) { return pushBranchImpl(needProject(projectId), branch, o && typeof o === 'object' ? o : undefined, publishDeps()); },
+    async createPullRequest(projectId, draft) { return createPullRequestImpl(needProject(projectId), draft, publishDeps()); },
+    async setRemote(projectId, url, o) { await git.setRemote(needProject(projectId).path, url, { replace: o?.replace === true }); },
+    async getGithubStatus() { return gh.status(); },
+    async browseFolder() { return (await opts.pickFolder?.()) ?? null; },
 
     async listConversations(projectId) {
       const main = store.mainAgent(needProject(projectId).id);

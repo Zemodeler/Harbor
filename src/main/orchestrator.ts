@@ -514,6 +514,11 @@ export class Orchestrator {
     return m;
   }
 
+  /** A system line from outside the orchestrator (the owner published a branch from the Git view). */
+  notice(conversationId: Id, text: string): void {
+    if (this.d.store.getConversation(conversationId)) this.post(conversationId, 'system', text);
+  }
+
   private publish(a: AgentRecord): void { this.emit({ type: 'agent', agent: toAgent(a) }); }
 
   private setState(a: AgentRecord, state: AgentState, patch: Partial<AgentRecord> = {}): void {

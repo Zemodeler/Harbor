@@ -581,6 +581,12 @@ export class Git {
     return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
   }
 
+  /** How many commits on any local branch exist on no remote-tracking branch: work that lives only in this folder. */
+  async unpushedOnAnyBranch(repo: string): Promise<number> {
+    const r = await this.git(repo, ['rev-list', '--count', '--branches', '--not', '--remotes']);
+    return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
+  }
+
   async hasRemotes(repo: string): Promise<boolean> {
     const r = await this.git(repo, ['remote']);
     return r.code === 0 && !!r.stdout.trim();
