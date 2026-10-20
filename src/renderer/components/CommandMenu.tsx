@@ -14,6 +14,7 @@ import n from './Navigation.module.css';
 export interface PaletteActions {
   settings: () => void;
   add: () => void;
+  newProject?: () => void;
   review: () => void;
   activity: () => void;
   git?: () => void;
@@ -92,6 +93,7 @@ export function CommandMenu({ state, history, close, actions, meta, templates = 
     const list: Array<Entry | false | undefined> = [
       { id: 'cmd:new', kind: 'action', title: 'New conversation', shortcut: 'Ctrl N', disabled: none, keywords: ['chat', 'start'] },
       { id: 'cmd:open-project', kind: 'action', title: 'Open a project', keywords: ['add project', 'folder'] },
+      ...(actions.newProject ? [{ id: 'cmd:new-project', kind: 'action' as const, title: 'New project', keywords: ['create project', 'start project', 'new repository'] }] : []),
       { id: 'cmd:settings', kind: 'action', title: 'Open Settings', keywords: ['preferences', 'connections', 'sign in', 'usage'] },
       actions.openFile && { id: 'cmd:open-file', kind: 'action', title: 'Open file…', detail: 'Show a file in the viewer', disabled: none, keywords: ['document', 'viewer', 'view file'] },
       actions.git && { id: 'cmd:git', kind: 'action', title: 'Git branches and changes', disabled: none, keywords: ['branches', 'commits', 'diff'] },
@@ -115,7 +117,7 @@ export function CommandMenu({ state, history, close, actions, meta, templates = 
     ];
     return list.filter((e): e is Entry => !!e);
   }, [history, state.projectId, state.api.openWorkspace, c, busy, actions, templates]);
-  const projects = useMemo<Entry[]>(() => history ? [] : state.projects.map(p => ({ id: `project:${p.id}`, kind: 'project', title: p.name, detail: p.path })), [history, state.projects]);
+  const projects = useMemo<Entry[]>(() => history ? [] : [...state.projects].sort((a, b) => b.lastOpened - a.lastOpened).map(p => ({ id: `project:${p.id}`, kind: 'project', title: p.name, detail: p.path })), [history, state.projects]);
   const conversations = useMemo<Entry[]>(() => {
     const tags = meta?.tags || {};
     const describe = (conv: Conversation, project: string, excerpt?: string): Entry => ({ id: `conv:${conv.id}`, kind: 'conversation', conversation: conv, title: conv.title, excerpt,
@@ -182,6 +184,7 @@ export function CommandMenu({ state, history, close, actions, meta, templates = 
     switch (id) {
       case 'cmd:new': void state.newConversation(); break;
       case 'cmd:open-project': actions.add(); break;
+      case 'cmd:new-project': actions.newProject?.(); break;
       case 'cmd:settings': actions.settings(); break;
       case 'cmd:open-file': actions.openFile?.(); break;
       case 'cmd:git': actions.git?.(); break;
