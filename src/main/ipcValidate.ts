@@ -297,6 +297,9 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (d['body'] !== undefined && (typeof d['body'] !== 'string' || d['body'].length > 65000)) bad('body must be text');
       break;
     }
+    case 'cleanupWorktrees':
+      if (args[0] !== undefined && args[0] !== null && (!Array.isArray(args[0]) || args[0].length > 500 || !args[0].every((x) => typeof x === 'string' && x.length >= 1 && x.length <= MAX_PATH && !x.includes(' ')))) bad('paths must be a list of folder paths');
+      break;
     case 'setRemote':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 500 || CONTROL.test(args[1])) bad('url must be an https or ssh URL');

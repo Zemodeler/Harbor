@@ -33,6 +33,7 @@ import { buildDiagnostics, startupNotices } from './diagnostics';
 import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { GitHub } from './github';
+import { cleanupWorktrees as cleanupWorktreesImpl, listHarborWorktrees } from './housekeeping';
 import { createProjectFolder } from './projectCreate';
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
@@ -50,7 +51,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -769,6 +770,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async createPullRequest(projectId, draft) { return createPullRequestImpl(needProject(projectId), draft, publishDeps()); },
     async setRemote(projectId, url, o) { await git.setRemote(needProject(projectId).path, url, { replace: o?.replace === true }); },
     async getGithubStatus() { return gh.status(); },
+    async listWorktrees() { return listHarborWorktrees({ git, store, worktreesRoot, now: clock() }); },
+    async cleanupWorktrees(paths) { return cleanupWorktreesImpl({ git, store, worktreesRoot, now: clock() }, Array.isArray(paths) ? paths.filter((p) => typeof p === 'string') : undefined); },
     async browseFolder() { return (await opts.pickFolder?.()) ?? null; },
 
     async listConversations(projectId) {

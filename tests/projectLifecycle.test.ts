@@ -347,3 +347,51 @@ describe('publishing', () => {
     await expect(service.setRemote(r.project.id, 'file:///x', { replace: true })).rejects.toThrow();
   });
 });
+
+describe('worktree housekeeping', () => {
+  it('lists worktrees across projects and removes only merged, stale or orphaned ones that are idle and clean', async () => {
+    const { service, worktreesRoot } = setup();
+    const r = await service.createProject({ name: 'Keeper' });
+    const git = new Git();
+    const key = r.project.id.slice(0, 8);
+    const commit = (cwd: string, f: string) => { writeFileSync(join(cwd, f), f); sh(cwd, 'add', '.'); sh(cwd, '-c', 'user.name=T', '-c', 'user.email=t@x.invalid', 'commit', '-m', f); };
+    const merged = await git.createWorktree(r.path, worktreesRoot, key, 'merged', 'aaaaaa');           // no commits of its own: already merged
+    const unmerged = await git.createWorktree(r.path, worktreesRoot, key, 'unmerged', 'bbbbbb'); commit(unmerged.path, 'u.txt');
+    const dirty = await git.createWorktree(r.path, worktreesRoot, key, 'dirty', 'cccccc'); writeFileSync(join(dirty.path, 'wip.txt'), 'wip');
+    const busy = await git.createWorktree(r.path, worktreesRoot, key, 'busy', 'dddddd');
+    service.store.upsertAgent({ id: 'busy', projectId: r.project.id, role: 'implementer', title: 'busy', state: 'working', cli: 'claude', model: 'm', effort: 'low', task: 't', dependsOn: [], revision: 0, attempts: 0, created: 1, parentConversationId: 'c', branch: busy.branch, worktree: busy.path });
+    const orphanDir = join(worktreesRoot, 'deadbeef', 'old-task'); mkdirSync(orphanDir, { recursive: true }); writeFileSync(join(orphanDir, 'x.txt'), 'x');
+    const outside = temp('harbor-outside-'); writeFileSync(join(outside, 'keep.txt'), 'keep');
+    symlinkSync(outside, join(orphanDir, 'node_modules'), 'junction');
+
+    const list = await service.listWorktrees();
+    const by = (p: string) => list.find((w) => w.path.toLowerCase() === p.toLowerCase())!;
+    expect(by(merged.path)).toMatchObject({ merged: true, removable: true, orphan: false, projectName: 'Keeper' });
+    expect(by(unmerged.path)).toMatchObject({ merged: false, removable: false });
+    expect(by(dirty.path)).toMatchObject({ dirty: true, removable: false });
+    expect(by(busy.path)).toMatchObject({ active: true, removable: false });
+    expect(by(orphanDir)).toMatchObject({ orphan: true, removable: true });
+
+    const out = await service.cleanupWorktrees();
+    expect(out.removed).toBe(2);
+    expect(out.branchesDeleted).toBe(1);
+    expect(existsSync(merged.path)).toBe(false);
+    expect(existsSync(orphanDir)).toBe(false);
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep');
+    for (const kept of [unmerged, dirty, busy]) expect(existsSync(kept.path)).toBe(true);
+    const branches = sh(r.path, 'branch', '--format=%(refname:short)').split(/\r?\n/).filter(Boolean);
+    expect(branches).not.toContain(merged.branch);
+    expect(branches).toEqual(expect.arrayContaining([unmerged.branch, dirty.branch, busy.branch]));
+  });
+  it('removes only the paths asked for', async () => {
+    const { service, worktreesRoot } = setup();
+    const r = await service.createProject({ name: 'Two' });
+    const git = new Git(), key = r.project.id.slice(0, 8);
+    const a = await git.createWorktree(r.path, worktreesRoot, key, 'a', 'aaaaaa'), b = await git.createWorktree(r.path, worktreesRoot, key, 'b', 'bbbbbb');
+    expect((await service.cleanupWorktrees([a.path])).removed).toBe(1);
+    expect(existsSync(a.path)).toBe(false);
+    expect(existsSync(b.path)).toBe(true);
+    expect((await service.cleanupWorktrees([join(r.path)])).removed).toBe(0); // not a listed worktree: ignored
+    expect(existsSync(r.path)).toBe(true);
+  });
+});
