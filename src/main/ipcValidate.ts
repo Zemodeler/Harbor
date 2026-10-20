@@ -258,6 +258,49 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       if (!isId(args[1])) bad('note id must be a short non-empty string');
       break;
+    case 'createProject': {
+      const d = (args[0] ?? {}) as Record<string, unknown>;
+      if (!args[0] || typeof d !== 'object' || Array.isArray(d)) bad('the new project must be an object');
+      if (typeof d['name'] !== 'string' || !d['name'].trim() || d['name'].length > 80 || CONTROL.test(d['name'])) bad('name must be 1 to 80 characters');
+      if (d['parentDir'] !== undefined && (typeof d['parentDir'] !== 'string' || !d['parentDir'].trim() || d['parentDir'].length > MAX_PATH || d['parentDir'].includes('\0'))) bad('parentDir must be a folder path');
+      if (d['template'] !== undefined && !['empty', 'node-ts', 'python', 'static-web'].includes(d['template'] as string)) bad('unknown template');
+      if (d['firstPrompt'] !== undefined && (typeof d['firstPrompt'] !== 'string' || d['firstPrompt'].length > 20000)) bad('firstPrompt must be text of at most 20000 characters');
+      const g = (d['github'] ?? {}) as Record<string, unknown>;
+      if (g !== undefined) {
+        if (d['github'] === null || typeof g !== 'object' || Array.isArray(g) || typeof g['create'] !== 'boolean') bad('github must say whether to create a repository');
+        if (g['create'] && g['visibility'] !== 'private' && g['visibility'] !== 'public') bad('visibility must be private or public');
+        if (g['owner'] !== undefined && (typeof g['owner'] !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(g['owner']))) bad('owner must be a GitHub account name');
+      }
+      break;
+    }
+    case 'previewDeleteProject':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'deleteProject':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (args[1] !== 'forget' && args[1] !== 'worktrees' && args[1] !== 'folder') bad('scope must be forget, worktrees or folder');
+      if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'string' || args[2].length > 200)) bad('confirmName must be text');
+      break;
+    case 'previewPush':
+    case 'pushBranch':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 250 || args[1].startsWith('-') || CONTROL.test(args[1])) bad('branch must be a branch name');
+      if (method === 'pushBranch' && args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'object' || Array.isArray(args[2]))) bad('options must be an object');
+      break;
+    case 'createPullRequest': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const d = (args[1] ?? {}) as Record<string, unknown>;
+      if (!args[1] || typeof d !== 'object' || Array.isArray(d)) bad('the pull request must be an object');
+      if (typeof d['branch'] !== 'string' || !d['branch'].trim() || d['branch'].length > 250 || d['branch'].startsWith('-') || CONTROL.test(d['branch'])) bad('branch must be a branch name');
+      if (d['base'] !== undefined && (typeof d['base'] !== 'string' || !d['base'].trim() || d['base'].length > 250 || d['base'].startsWith('-') || CONTROL.test(d['base']))) bad('base must be a branch name');
+      if (typeof d['title'] !== 'string' || !d['title'].trim() || d['title'].length > 256 || CONTROL.test(d['title'])) bad('title must be one line of 1 to 256 characters');
+      if (d['body'] !== undefined && (typeof d['body'] !== 'string' || d['body'].length > 65000)) bad('body must be text');
+      break;
+    }
+    case 'setRemote':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 500 || CONTROL.test(args[1])) bad('url must be an https or ssh URL');
+      break;
     case 'addProject':
       if (args[0] !== undefined && args[0] !== null && (typeof args[0] !== 'string' || !args[0].trim() || args[0].length > MAX_PATH || args[0].includes('\0'))) bad('path must be a folder path');
       break;
