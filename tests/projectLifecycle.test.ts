@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Git } from '../src/main/git';
 import { GitHub } from '../src/main/github';
 import { runProcess, type RunResult, type Runner } from '../src/main/proc';
@@ -13,6 +13,8 @@ import { INVOKE_METHODS } from '../src/shared/ipc';
 import { METHOD_SCOPE, scopeAllows } from '../src/main/remote/scopes';
 import { validateInvoke } from '../src/main/ipcValidate';
 
+// Each case spawns many git processes; under a parallel full run the default 20 s is not always enough.
+vi.setConfig({ testTimeout: 90_000, hookTimeout: 90_000 });
 const dirs: string[] = [], services: HarborService[] = [];
 const temp = (p = 'harbor-life-') => { const d = mkdtempSync(join(tmpdir(), p)); dirs.push(d); return d; };
 afterEach(async () => { for (const s of services.splice(0)) await s.shutdown(); dirs.splice(0).forEach((p) => rmSync(p, { recursive: true, force: true, maxRetries: 3 })); });
