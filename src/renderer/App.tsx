@@ -28,6 +28,7 @@ import { TagEditor } from './components/TagEditor';
 import { Toasts } from './components/Toasts';
 import { useConversationMeta } from './hooks/useConversationMeta';
 import { useToasts } from './hooks/useToasts';
+import { ReadyToApplyPrompt } from './components/ReadyToApply';
 import { markOnboardingDone, onboardingDone, shouldOfferOnboarding } from './onboarding';
 import { tagCounts } from './conversationMeta';
 import { fillTemplate } from './slashCommands';
@@ -208,6 +209,7 @@ export default function App() {
     </Modal> : null}
     {tagging && !dialog ? <TagEditor conversation={tagging} tags={meta.tags[tagging.id] || []} known={tagCounts(meta.tags).map(t => t.tag)} save={tags => meta.setTags(tagging.id, tags)} close={() => setTagging(undefined)}/> : null}
     {welcome && !dialog && !tagging && !renaming ? <Onboarding state={state} finish={finishWelcome}/> : null}
+    {state.projectId && !dialog && !menu && !renaming && !tagging && !welcome && !viewerModal ? <ReadyToApplyPrompt api={state.api} agents={state.agents} projectId={state.projectId}/> : null}
     <Toasts toasts={toasts}/>
   </div></DocumentLinks.Provider>;
 }

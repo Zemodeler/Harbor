@@ -6,6 +6,7 @@ import type { Agent, Conversation, HarborApi } from '../../shared/api';
 import App from '../App';
 import { HelperDetails } from '../components/HelperDetails';
 import { IntegrateAction, MergeSessionAction } from '../components/IntegrationPanel';
+import { ReadyToApplyPrompt, readyToApply } from '../components/ReadyToApply';
 import { ModePicker } from '../components/ModePicker';
 import { ToolRules } from '../components/ToolRules';
 import { UsageWindows } from '../components/UsageWindows';
@@ -167,6 +168,34 @@ describe('Integration', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: /Implement account page/ }));
     await userEvent.click(screen.getByRole('button', { name: /^Integrate 1 helper/ }));
     expect(await screen.findByRole('alert')).toHaveTextContent('no current reviewer approval');
+  });
+});
+
+describe('Ready to apply prompt', () => {
+  const base = { projectId: 'store', role: 'other', state: 'done', cli: 'harbor', model: 'git', effort: 'low' } as const;
+  const helper: Agent = { ...base, id: 'h1', title: 'Write the form', role: 'implementer' };
+  const integrator: Agent = { ...base, id: 'i1', title: 'Integrate "Write the form"', integration: { target: 'master', head: 'abcdef0123456789', sources: [{ agentId: 'h1', state: 'merged' }] } };
+  it('pops up for a finished integration and applies with one click', async () => {
+    const applyIntegration = vi.fn(async () => integrator);
+    render(<ReadyToApplyPrompt api={{ applyIntegration } as unknown as HarborApi} agents={[helper, integrator]} projectId="store"/>);
+    const dialog = await screen.findByRole('dialog', { name: 'Ready to apply' });
+    expect(dialog).toHaveTextContent('master');
+    expect(dialog).toHaveTextContent('Write the form');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Apply to master' }));
+    expect(applyIntegration).toHaveBeenCalledWith('i1');
+  });
+  it('goes away on Later', async () => {
+    render(<ReadyToApplyPrompt api={{} as HarborApi} agents={[helper, integrator]} projectId="store"/>);
+    await userEvent.click(await screen.findByRole('button', { name: 'Later' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+  it('stays quiet for work that is applied, unfinished, conflicting or in another project', () => {
+    const int = integrator.integration!;
+    expect(readyToApply({ ...integrator, integration: { ...int, applied: true } })).toBe(false);
+    expect(readyToApply({ ...integrator, state: 'working' })).toBe(false);
+    expect(readyToApply({ ...integrator, integration: { ...int, sources: [{ agentId: 'h1', state: 'conflict' }] } })).toBe(false);
+    const { container } = render(<ReadyToApplyPrompt api={{} as HarborApi} agents={[integrator]} projectId="other"/>);
+    expect(container).toBeEmptyDOMElement();
   });
 });
 
