@@ -103,6 +103,8 @@ export interface ServiceOptions {
   /** Folder picker for addProject(); injected so this module never imports electron. */
   pickFolder?: () => Promise<string | undefined>;
   openFolder?: (path: string) => Promise<void>;
+  /** Moves a folder to the Recycle Bin (shell.trashItem); injected so this module never imports electron. Absent = no Recycle Bin (headless, tests). */
+  trashItem?: (path: string) => Promise<void>;
   /** Opens a terminal or the editor on a folder (and optionally one file inside it); injected so this module never imports electron. */
   launch?: (kind: 'terminal' | 'editor', target: { dir: string; file?: string }, editor?: EditorId) => Promise<void>;
   /** Executable picker for browseCliPath(); injected so this module never imports electron. */
@@ -553,6 +555,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     protectedRoots: [dataRoot, worktreesRoot, ...(opts.appRoots ?? [])],
     running: (projectId: Id) => store.listAgentRecords(projectId).filter((a) => ['queued', 'working', 'waiting'].includes(a.state) && a.role !== 'main').length + store.listConversations(projectId).filter((c) => !!c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state)).length,
     stopAll: (projectId: Id) => { for (const a of store.listAgentRecords(projectId)) orchestrator.stop(a.id); },
+    ...(opts.trashItem ? { trash: opts.trashItem } : {}),
     ...(opts.deleteSleep ? { sleep: opts.deleteSleep } : {})
   });
   const publishDeps = () => ({
@@ -814,10 +817,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return structuredClone(r.value);
     },
     async previewDeleteProject(id) { return previewDelete(needProject(id), deleteDeps()); },
-    async deleteProject(id, scope, confirmName) {
+    async deleteProject(id, scope, confirmName, o) {
       const p = needProject(id);
       if (scope !== 'forget' && scope !== 'worktrees' && scope !== 'folder') throw new Error('Unknown delete level.');
-      return deleteProjectImpl(p, scope, confirmName, deleteDeps());
+      return deleteProjectImpl(p, scope, confirmName, deleteDeps(), o && typeof o === 'object' ? o : undefined);
     },
     async previewPush(projectId, branch) { return previewPushImpl(needProject(projectId), branch, publishDeps()); },
     async pushBranch(projectId, branch, o) { return pushBranchImpl(needProject(projectId), branch, o && typeof o === 'object' ? o : undefined, publishDeps()); },

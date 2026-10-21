@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { mergeFetched, mergeMessages, upsertById, upsertByTime } from '../listOps';
-import type { Agent, CliStatus, Conversation, ConversationMode, CloneProjectDraft, CreateProjectResult, ProjectFlagsPatch, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
+import type { Agent, CliStatus, Conversation, ConversationMode, CloneProjectDraft, CreateProjectResult, ProjectFlagsPatch, DeleteOptions, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
 
 export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
@@ -325,11 +325,11 @@ export function useHarbor() {
     return result;
   }
   /** Deletes a project at the chosen level (records, plus worktrees and branches, plus the folder) and reloads. */
-  async function deleteProject(id: string, scope: DeleteScope, confirmName: string | undefined, area?: string) {
+  async function deleteProject(id: string, scope: DeleteScope, confirmName: string | undefined, area?: string, opts?: DeleteOptions) {
     let result: DeleteResult | undefined;
     await run(async () => {
       if (!api.deleteProject) throw new Error('Deleting a project is available in the desktop app.');
-      result = await api.deleteProject(id, scope, confirmName);
+      result = await api.deleteProject(id, scope, confirmName, opts);
     }, area);
     if (result?.removed.records) await reload();
     return result;
