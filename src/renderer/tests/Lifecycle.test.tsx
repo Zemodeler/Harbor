@@ -125,12 +125,12 @@ describe('Removing a project', () => {
   it('the folder level lists what is lost, needs the name, and is disabled while pending', async () => {
     await ready();
     const dialog = await openRemove();
-    await userEvent.click(within(dialog).getByRole('radio', { name: /Also delete the folder \(174 MB, C:\\Projects\\Storefront\)/ }));
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Also move the folder to the Recycle Bin \(174 MB, C:\\Projects\\Storefront\)/ }));
     const list = within(dialog).getByLabelText('What will be deleted');
     expect(list).toHaveTextContent(/uncommitted changes that will be lost/);
     expect(list).toHaveTextContent(/2 commits exist nowhere else/);
     expect(list).toHaveTextContent(/outside your projects folder/);
-    const go = within(dialog).getByRole('button', { name: 'Delete folder and project' });
+    const go = within(dialog).getByRole('button', { name: 'Move folder to Recycle Bin and remove project' });
     expect(go).toBeDisabled();
     await userEvent.type(within(dialog).getByLabelText(/Type “Storefront” to confirm/), 'Storefront');
     await userEvent.click(go);
@@ -141,10 +141,10 @@ describe('Removing a project', () => {
     await ready();
     await userEvent.click(screen.getByRole('button', { name: 'Harbor' }));
     const dialog = await openRemove();
-    await userEvent.click(within(dialog).getByRole('radio', { name: /Also delete the folder/ }));
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Also move the folder to the Recycle Bin/ }));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(/Harbor’s own app|Harbor's own app/);
     await userEvent.type(within(dialog).getByLabelText(/Type “Harbor” to confirm/), 'Harbor');
-    expect(within(dialog).getByRole('button', { name: 'Delete folder and project' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Move folder to Recycle Bin and remove project' })).toBeDisabled();
   });
 });
 

@@ -264,13 +264,97 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (typeof d['name'] !== 'string' || !d['name'].trim() || d['name'].length > 80 || CONTROL.test(d['name'])) bad('name must be 1 to 80 characters');
       if (d['parentDir'] !== undefined && (typeof d['parentDir'] !== 'string' || !d['parentDir'].trim() || d['parentDir'].length > MAX_PATH || d['parentDir'].includes('\0'))) bad('parentDir must be a folder path');
       if (d['template'] !== undefined && !['empty', 'node-ts', 'python', 'static-web'].includes(d['template'] as string)) bad('unknown template');
+      if (d['userTemplate'] !== undefined && !isId(d['userTemplate'])) bad('userTemplate must be a template id');
       if (d['firstPrompt'] !== undefined && (typeof d['firstPrompt'] !== 'string' || d['firstPrompt'].length > 20000)) bad('firstPrompt must be text of at most 20000 characters');
       const g = (d['github'] ?? {}) as Record<string, unknown>;
-      if (g !== undefined) {
+      if (d['github'] !== undefined) {
         if (d['github'] === null || typeof g !== 'object' || Array.isArray(g) || typeof g['create'] !== 'boolean') bad('github must say whether to create a repository');
         if (g['create'] && g['visibility'] !== 'private' && g['visibility'] !== 'public') bad('visibility must be private or public');
         if (g['owner'] !== undefined && (typeof g['owner'] !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(g['owner']))) bad('owner must be a GitHub account name');
       }
+      break;
+    }
+    case 'cloneProject': {
+      const d = (args[0] ?? {}) as Record<string, unknown>;
+      if (!args[0] || typeof d !== 'object' || Array.isArray(d)) bad('the clone request must be an object');
+      if (typeof d['url'] !== 'string' || !d['url'].trim() || d['url'].length > 500 || CONTROL.test(d['url'])) bad('url must be an https or ssh URL');
+      if (d['name'] !== undefined && (typeof d['name'] !== 'string' || !d['name'].trim() || d['name'].length > 80 || CONTROL.test(d['name']))) bad('name must be 1 to 80 characters');
+      if (d['parentDir'] !== undefined && (typeof d['parentDir'] !== 'string' || !d['parentDir'].trim() || d['parentDir'].length > MAX_PATH || d['parentDir'].includes('\0'))) bad('parentDir must be a folder path');
+      if (d['firstPrompt'] !== undefined && (typeof d['firstPrompt'] !== 'string' || d['firstPrompt'].length > 20000)) bad('firstPrompt must be text of at most 20000 characters');
+      break;
+    }
+    case 'listGithubRepos': {
+      const o = args[0] as Record<string, unknown> | undefined | null;
+      if (o === undefined || o === null) break;
+      if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+      if (o['owner'] !== undefined && (typeof o['owner'] !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(o['owner']))) bad('owner must be a GitHub account name');
+      if (o['limit'] !== undefined && (typeof o['limit'] !== 'number' || !Number.isFinite(o['limit']))) bad('limit must be a number');
+      if (o['refresh'] !== undefined && typeof o['refresh'] !== 'boolean') bad('refresh must be true or false');
+      break;
+    }
+    case 'setProjectFlags': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('flags must be an object');
+      for (const k of ['archived', 'pinned']) if ((o as Record<string, unknown>)[k] !== undefined && typeof (o as Record<string, unknown>)[k] !== 'boolean') bad(`${k} must be true or false`);
+      break;
+    }
+    case 'searchAll': {
+      if (typeof args[0] !== 'string' || args[0].length > 500 || CONTROL.test(args[0])) bad('query must be short text');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (o === undefined || o === null) break;
+      if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+      for (const k of ['offset', 'limit']) if (o[k] !== undefined && (typeof o[k] !== 'number' || !Number.isFinite(o[k]))) bad(`${k} must be a number`);
+      if (o['projectId'] !== undefined && !isId(o['projectId'])) bad('projectId must be a short non-empty string');
+      break;
+    }
+    case 'previewTemplate':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'saveProjectAsTemplate':
+    case 'updateTemplate': {
+      if (!isId(args[0])) bad(method === 'updateTemplate' ? 'template id must be a short non-empty string' : 'project id must be a short non-empty string');
+      const d = args[1] as Record<string, unknown> | undefined | null;
+      if (!d || typeof d !== 'object' || Array.isArray(d)) bad('the template must be an object');
+      const t = d as Record<string, unknown>;
+      const needName = method === 'saveProjectAsTemplate';
+      if ((needName || t['name'] !== undefined) && (typeof t['name'] !== 'string' || !t['name'].trim() || t['name'].length > 60 || CONTROL.test(t['name']))) bad('name must be 1 to 60 characters');
+      if (t['description'] !== undefined && (typeof t['description'] !== 'string' || t['description'].length > 300 || t['description'].includes('\0'))) bad('description must be at most 300 characters');
+      if (t['checks'] !== undefined && (!Array.isArray(t['checks']) || t['checks'].length > 10 || !t['checks'].every((c) => typeof c === 'string' && c.length <= 500 && !CONTROL.test(c)))) bad('checks must be at most 10 one-line commands');
+      break;
+    }
+    case 'deleteTemplate':
+      if (!isId(args[0])) bad('template id must be a short non-empty string');
+      break;
+    case 'getPullRequestStatus':
+    case 'rerunFailedChecks':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 250 || args[1].startsWith('-') || CONTROL.test(args[1])) bad('branch must be a branch name');
+      break;
+    case 'mergePullRequest': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('the merge request must be an object');
+      const m = o as Record<string, unknown>;
+      if (typeof m['branch'] !== 'string' || !m['branch'].trim() || m['branch'].length > 250 || m['branch'].startsWith('-') || CONTROL.test(m['branch'])) bad('branch must be a branch name');
+      if (!Number.isInteger(m['number']) || (m['number'] as number) < 1) bad('number must be a pull request number');
+      if (!Number.isInteger(m['confirmNumber'])) bad('confirmNumber must repeat the pull request number');
+      if (m['method'] !== 'merge' && m['method'] !== 'squash' && m['method'] !== 'rebase') bad('method must be merge, squash or rebase');
+      if (m['overrideChecks'] !== undefined && typeof m['overrideChecks'] !== 'boolean') bad('overrideChecks must be true or false');
+      break;
+    }
+    case 'previewReleaseTag':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'createReleaseTag': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('the tag must be an object');
+      const t = o as Record<string, unknown>;
+      if (typeof t['name'] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(t['name'])) bad('name must be a plain tag name');
+      if (t['message'] !== undefined && (typeof t['message'] !== 'string' || t['message'].length > 500 || t['message'].includes('\0'))) bad('message must be text of at most 500 characters');
+      if (t['ref'] !== undefined && (typeof t['ref'] !== 'string' || !t['ref'].trim() || t['ref'].length > 250 || t['ref'].startsWith('-') || CONTROL.test(t['ref']))) bad('ref must be a branch or commit');
+      if (t['push'] !== undefined && typeof t['push'] !== 'boolean') bad('push must be true or false');
       break;
     }
     case 'previewDeleteProject':
@@ -280,6 +364,12 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       if (args[1] !== 'forget' && args[1] !== 'worktrees' && args[1] !== 'folder') bad('scope must be forget, worktrees or folder');
       if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'string' || args[2].length > 200)) bad('confirmName must be text');
+      if (args[3] !== undefined && args[3] !== null) {
+        const o = args[3] as Record<string, unknown>;
+        if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+        if (o['permanent'] !== undefined && typeof o['permanent'] !== 'boolean') bad('permanent must be true or false');
+        if (o['confirmPermanent'] !== undefined && (typeof o['confirmPermanent'] !== 'string' || o['confirmPermanent'].length > 200)) bad('confirmPermanent must be text');
+      }
       break;
     case 'previewPush':
     case 'pushBranch':

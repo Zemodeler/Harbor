@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
+import type { Attachment, CreateProjectResult, GithubRepo, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -34,8 +34,11 @@ import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { GitHub } from './github';
 import { cleanupWorktrees as cleanupWorktreesImpl, listHarborWorktrees } from './housekeeping';
-import { createProjectFolder } from './projectCreate';
+import { cloneProjectFolder, createProjectFolder, type CreatedFolder } from './projectCreate';
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
+import { TemplateLibrary, blockReason, collectTemplateFiles, previewOf, suggestedChecks } from './templateLibrary';
+import { buildOverview, globalUsage, searchAll as searchAllImpl } from './overview';
+import { createReleaseTag as createReleaseTagImpl, mergePullRequest as mergePullRequestImpl, previewReleaseTag as previewReleaseTagImpl, pullRequestStatus as pullRequestStatusImpl, rerunFailedChecks as rerunFailedChecksImpl } from './pullRequests';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
@@ -51,7 +54,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'getPullRequestStatus' | 'rerunFailedChecks' | 'mergePullRequest' | 'previewReleaseTag' | 'createReleaseTag' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -101,6 +104,8 @@ export interface ServiceOptions {
   /** Folder picker for addProject(); injected so this module never imports electron. */
   pickFolder?: () => Promise<string | undefined>;
   openFolder?: (path: string) => Promise<void>;
+  /** Moves a folder to the Recycle Bin (shell.trashItem); injected so this module never imports electron. Absent = no Recycle Bin (headless, tests). */
+  trashItem?: (path: string) => Promise<void>;
   /** Opens a terminal or the editor on a folder (and optionally one file inside it); injected so this module never imports electron. */
   launch?: (kind: 'terminal' | 'editor', target: { dir: string; file?: string }, editor?: EditorId) => Promise<void>;
   /** Executable picker for browseCliPath(); injected so this module never imports electron. */
@@ -519,12 +524,47 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
   const gh = opts.github ?? new GitHub();
   const projectsDir = () => store.getSettings().projectsDir ?? opts.defaultProjectsDir ?? join(homedir(), 'Documents', 'Harbor Projects');
+  const templates = new TemplateLibrary(join(dataRoot, 'templates'), clock);
+  const createDeps = () => ({ git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p: string) => !!store.findProjectByPath(p), templates });
+  const repoCache = new Map<string, { at: number; repos: GithubRepo[] }>();
+  const REPO_CACHE_MS = 5 * 60_000;
+  /** Registers a folder createProjectFolder or cloneProjectFolder made; on failure removes exactly what that call made. Optionally starts a first conversation. */
+  const registerCreated = (created: CreatedFolder, firstPrompt: string | undefined): CreateProjectResult => {
+    let project: Project;
+    try {
+      project = store.upsertProject({ id: newId(), name: created.name, path: created.path, lastOpened: clock() });
+      orchestrator.ensureProject(project);
+    } catch (e) {
+      created.undo();
+      throw new Error(`The project was not registered: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const warnings = [...created.warnings];
+    let conversationId: Id | undefined;
+    const first = typeof firstPrompt === 'string' ? firstPrompt.trim() : '';
+    if (first) {
+      try {
+        const c = orchestrator.newConversation(project.id);
+        conversationId = c.id;
+        // Not awaited: the first lead turn can take minutes and the project already exists.
+        void ready.then(() => orchestrator.userMessage(c.id, first, [], {})).catch(() => { /* shown in the conversation by the orchestrator */ });
+      } catch (e) { warnings.push(`The first prompt was not sent: ${e instanceof Error ? e.message : String(e)}`); }
+    }
+    return { project, path: created.path, ...(created.remote ? { remote: created.remote } : {}), ...(conversationId ? { conversationId } : {}), warnings };
+  };
   const deleteDeps = () => ({
     git, store, worktreesRoot, projectsDir: projectsDir(),
     protectedRoots: [dataRoot, worktreesRoot, ...(opts.appRoots ?? [])],
     running: (projectId: Id) => store.listAgentRecords(projectId).filter((a) => ['queued', 'working', 'waiting'].includes(a.state) && a.role !== 'main').length + store.listConversations(projectId).filter((c) => !!c.activity && ['queued', 'working', 'waiting'].includes(c.activity.state)).length,
     stopAll: (projectId: Id) => { for (const a of store.listAgentRecords(projectId)) orchestrator.stop(a.id); },
+    ...(opts.trashItem ? { trash: opts.trashItem } : {}),
     ...(opts.deleteSleep ? { sleep: opts.deleteSleep } : {})
+  });
+  const prDeps = () => ({
+    git, gh, store,
+    notify: (projectId: Id, text: string) => {
+      const conv = store.listConversations(projectId).find((c) => !c.imported && !c.archived);
+      if (conv) orchestrator.notice(conv.id, text);
+    }
   });
   const publishDeps = () => ({
     git, gh, store,
@@ -704,7 +744,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return discoverCliMcpServers({ home: opts.chatHomes?.home, codexHome: opts.chatHomes?.codex }, p?.path);
     },
 
-    async listProjects() { return store.listProjects(); },
+    // Pinned projects first; the rest keep the order they were added in (the sort is stable).
+    async listProjects() { return [...store.listProjects()].sort((x, y) => Number(!!y.pinned) - Number(!!x.pinned)); },
     async addProject(path) {
       const chosen = path ?? (await opts.pickFolder?.());
       if (!chosen) return null;
@@ -730,6 +771,34 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!next || next.length > 120) throw new Error('A project name needs 1 to 120 characters.');
       return store.upsertProject({ ...p, name: next });
     },
+    async listTemplates() { return templates.list(); },
+    async previewTemplate(projectId) {
+      const p = needProject(projectId);
+      return previewOf(p.id, await collectTemplateFiles(p.path, git, effectiveSettings(store.getSettings(), p.id).secretAllowlist), suggestedChecks(p.path));
+    },
+    async saveProjectAsTemplate(projectId, draft) {
+      const p = needProject(projectId);
+      if (!draft || typeof draft !== 'object') throw new Error('Name the template.');
+      // Scanned again here: the preview is only a convenience and is never trusted.
+      const c = await collectTemplateFiles(p.path, git, effectiveSettings(store.getSettings(), p.id).secretAllowlist);
+      const why = blockReason(c);
+      if (why) throw new Error(why);
+      return templates.save(draft, c.files, c.bytes, p.name);
+    },
+    async updateTemplate(id, patch) { return templates.update(String(id), patch); },
+    async deleteTemplate(id) { templates.remove(String(id)); },
+    async setProjectFlags(id, patch) {
+      const p = needProject(id);
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Choose what to change.');
+      for (const k of ['archived', 'pinned'] as const) if (patch[k] !== undefined && typeof patch[k] !== 'boolean') throw new Error(`${k} must be true or false.`);
+      if (patch.archived && !p.archived && deleteDeps().running(id) > 0) throw new Error('Agents are still running in this project. Stop them or wait until they finish, then archive it.');
+      const { archived: _a, pinned: _p, ...rest } = p;
+      const archived = patch.archived ?? p.archived, pinned = patch.pinned ?? p.pinned;
+      return store.upsertProject({ ...rest, ...(archived ? { archived: true } : {}), ...(pinned ? { pinned: true } : {}) });
+    },
+    async getProjectsOverview() { await ready; return buildOverview(store.listProjects(), { git, store, now: clock(), windows: () => ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)) }); },
+    async searchAll(query, o) { return searchAllImpl(typeof query === 'string' ? query : '', o && typeof o === 'object' ? o : undefined, { store, projects: store.listProjects() }); },
+    async getGlobalUsage() { await ready; return globalUsage({ store, projects: store.listProjects(), now: clock(), windows: ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)) }); },
     async removeProject(id) {
       for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
       store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.
@@ -737,39 +806,40 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
     // ---- project lifecycle and publish (contract 0.1.47). The folder is only ever deleted at the user's typed confirmation.
     async createProject(draft) {
-      const created = await createProjectFolder(draft, { git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p) => !!store.findProjectByPath(p) });
-      let project: Project;
-      try {
-        project = store.upsertProject({ id: newId(), name: created.name, path: created.path, lastOpened: clock() });
-        orchestrator.ensureProject(project);
-      } catch (e) {
-        created.undo();
-        throw new Error(`The project was not registered: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      const warnings = [...created.warnings];
-      let conversationId: Id | undefined;
-      const first = typeof draft.firstPrompt === 'string' ? draft.firstPrompt.trim() : '';
-      if (first) {
-        try {
-          const c = orchestrator.newConversation(project.id);
-          conversationId = c.id;
-          // Not awaited: the first lead turn can take minutes and the project already exists.
-          void ready.then(() => orchestrator.userMessage(c.id, first, [], {})).catch(() => { /* shown in the conversation by the orchestrator */ });
-        } catch (e) { warnings.push(`The first prompt was not sent: ${e instanceof Error ? e.message : String(e)}`); }
-      }
-      return { project, path: created.path, ...(created.remote ? { remote: created.remote } : {}), ...(conversationId ? { conversationId } : {}), warnings };
+      const created = await createProjectFolder(draft, createDeps());
+      return registerCreated(created, draft.firstPrompt);
+    },
+    async cloneProject(draft) {
+      if (!draft || typeof draft !== 'object') throw new Error('Enter the repository URL.');
+      const created = await cloneProjectFolder(draft, createDeps());
+      return registerCreated(created, draft.firstPrompt);
+    },
+    async listGithubRepos(o) {
+      const owner = o?.owner?.trim() || undefined;
+      const key = owner?.toLowerCase() ?? '';
+      const hit = repoCache.get(key);
+      if (hit && !o?.refresh && clock() - hit.at < REPO_CACHE_MS) return structuredClone(hit.repos);
+      const r = await gh.listRepos({ ...(owner ? { owner } : {}), ...(o?.limit !== undefined ? { limit: o.limit } : {}) });
+      if (!r.ok) throw new Error(r.message);
+      repoCache.set(key, { at: clock(), repos: r.value });
+      return structuredClone(r.value);
     },
     async previewDeleteProject(id) { return previewDelete(needProject(id), deleteDeps()); },
-    async deleteProject(id, scope, confirmName) {
+    async deleteProject(id, scope, confirmName, o) {
       const p = needProject(id);
       if (scope !== 'forget' && scope !== 'worktrees' && scope !== 'folder') throw new Error('Unknown delete level.');
-      return deleteProjectImpl(p, scope, confirmName, deleteDeps());
+      return deleteProjectImpl(p, scope, confirmName, deleteDeps(), o && typeof o === 'object' ? o : undefined);
     },
     async previewPush(projectId, branch) { return previewPushImpl(needProject(projectId), branch, publishDeps()); },
     async pushBranch(projectId, branch, o) { return pushBranchImpl(needProject(projectId), branch, o && typeof o === 'object' ? o : undefined, publishDeps()); },
     async createPullRequest(projectId, draft) { return createPullRequestImpl(needProject(projectId), draft, publishDeps()); },
     async setRemote(projectId, url, o) { await git.setRemote(needProject(projectId).path, url, { replace: o?.replace === true }); },
     async getGithubStatus() { return gh.status(); },
+    async getPullRequestStatus(projectId, branch) { return pullRequestStatusImpl(needProject(projectId), branch, prDeps()); },
+    async rerunFailedChecks(projectId, branch) { return rerunFailedChecksImpl(needProject(projectId), branch, prDeps()); },
+    async mergePullRequest(projectId, o) { return mergePullRequestImpl(needProject(projectId), o && typeof o === 'object' ? o : (undefined as never), prDeps()); },
+    async previewReleaseTag(projectId) { return previewReleaseTagImpl(needProject(projectId), prDeps()); },
+    async createReleaseTag(projectId, draft) { return createReleaseTagImpl(needProject(projectId), draft, prDeps()); },
     async listWorktrees() { return listHarborWorktrees({ git, store, worktreesRoot, now: clock() }); },
     async cleanupWorktrees(paths) { return cleanupWorktreesImpl({ git, store, worktreesRoot, now: clock() }, Array.isArray(paths) ? paths.filter((p) => typeof p === 'string') : undefined); },
     async browseFolder() { return (await opts.pickFolder?.()) ?? null; },

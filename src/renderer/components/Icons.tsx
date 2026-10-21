@@ -15,6 +15,7 @@ export { CaretRight as ChevronIcon } from '@phosphor-icons/react/dist/csr/CaretR
 export { Paperclip as AttachIcon } from '@phosphor-icons/react/dist/csr/Paperclip';
 export { Image as ImageIcon } from '@phosphor-icons/react/dist/csr/Image';
 export { TextAlignLeft as TemplateIcon } from '@phosphor-icons/react/dist/csr/TextAlignLeft';
+export { SquaresFour as OverviewIcon } from '@phosphor-icons/react/dist/csr/SquaresFour';
 export { List as MenuIcon } from '@phosphor-icons/react/dist/csr/List';
 export { ArrowUp as SendIcon } from '@phosphor-icons/react/dist/csr/ArrowUp';
 export { GitBranch as BranchIcon } from '@phosphor-icons/react/dist/csr/GitBranch';

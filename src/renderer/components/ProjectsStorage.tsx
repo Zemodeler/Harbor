@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import type { WorktreeInfo } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
+import { Templates } from './Templates';
 import s from '../Harbor.module.css';
 import l from './Lifecycle.module.css';
 
-export const canManageProjects = (api: HarborState['api']) => typeof api.createProject === 'function' || typeof api.listWorktrees === 'function';
+export const canManageProjects = (api: HarborState['api']) => typeof api.createProject === 'function' || typeof api.listWorktrees === 'function' || typeof api.listTemplates === 'function';
 
 const size = (bytes?: number) => bytes === undefined ? '—' : bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : bytes < 1024 ** 3 ? `${Math.round(bytes / 1024 / 1024)} MB` : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 const AREA = 'storage';
@@ -48,6 +49,7 @@ export function ProjectsStorage({ state }: { state: HarborState }) {
       </div>
       {saved ? <p role="status" className={l.hint}>{saved}</p> : null}
     </> : null}
+    {api.listTemplates && api.updateTemplate && api.deleteTemplate ? <Templates state={state}/> : null}
     {api.listWorktrees ? <>
       <h3>Worktrees</h3>
       <p className={s.muted}>Helpers work in separate git worktrees under Harbor’s own folder. Merged, stale (idle for two weeks) and orphaned ones can be removed; running or uncommitted work is never touched, and only merged harbor/* branches are deleted with them.</p>
