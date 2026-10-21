@@ -78,11 +78,12 @@ describe('Delete conversation', () => {
   it('removes the conversation from the sidebar after confirming', async () => {
     await ready();
     await userEvent.click(screen.getByRole('button', { name: /New conversation/ }));
-    const before = (await screen.findAllByRole('button', { name: /^Delete conversation/ })).length;
-    await userEvent.click(screen.getAllByRole('button', { name: /^Delete conversation/ })[0]);
-    const confirm = await screen.findByRole('dialog', { name: 'Delete conversation?' });
+    const before = (await screen.findAllByLabelText(/^Options for /)).length;
+    await userEvent.click(screen.getAllByLabelText(/^Options for /)[0]);
+    await userEvent.click(await screen.findByRole('menuitem', { name: /^Delete conversation/ }));
+    const confirm = await screen.findByRole('alertdialog', { name: 'Delete conversation?' });
     await userEvent.click(within(confirm).getByRole('button', { name: 'Delete' }));
-    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Delete conversation/ }).length).toBe(before - 1));
+    await waitFor(() => expect(screen.getAllByLabelText(/^Options for /).length).toBe(before - 1));
   });
   it('pops up an agent question, answers it with an option, and can be dismissed to answer in chat', async () => {
     const api = window.harbor, listeners: Array<(e: any) => void> = [], orig = api.onEvent;
