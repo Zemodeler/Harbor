@@ -29,3 +29,23 @@ export function addToast(list: Toast[], t: Toast): Toast[] {
   const rest = list.filter(x => !(x.kind === t.kind && x.conversationId && x.conversationId === t.conversationId) && x.id !== t.id);
   return [...rest, t].slice(-MAX_TOASTS);
 }
+
+/** At most this many toasts are drawn; the rest are summarised as "+N more". */
+export const MAX_VISIBLE_TOASTS = 3;
+/** Exit animation length; the toast is removed after it. */
+export const TOAST_LEAVE_MS = 160;
+/** Questions and failures need the user, so they win a visible slot over a finished toast. Original order is kept. */
+export function visibleToasts(list: Toast[], max = MAX_VISIBLE_TOASTS): { shown: Toast[]; hidden: number } {
+  if (list.length <= max) return { shown: list, hidden: 0 };
+  const ranked = list.map((t, i) => ({ t, i })).sort((a, b) => (a.t.kind === 'finished' ? 1 : 0) - (b.t.kind === 'finished' ? 1 : 0) || b.i - a.i).slice(0, max);
+  const keep = new Set(ranked.map(r => r.t.id));
+  return { shown: list.filter(t => keep.has(t.id)), hidden: list.length - max };
+}
+/**
+ * A failure is an alert. A question toast is a status with an assertive live region: the question card in the
+ * conversation is already role=alert (tests and screen readers expect one alert per question), so no second one.
+ */
+export function toastRole(kind: ToastKind): 'alert' | 'status' { return kind === 'failed' ? 'alert' : 'status'; }
+export function toastLive(kind: ToastKind): 'assertive' | 'polite' | undefined { return kind === 'question' ? 'assertive' : kind === 'finished' ? 'polite' : undefined; }
+/** Time left on an auto-dismiss timer after it ran since `startedAt`; never below a short grace so a resume is not instant. */
+export function remainingMs(total: number, startedAt: number, now: number, floor = 1500): number { return Math.max(floor, total - (now - startedAt)); }
