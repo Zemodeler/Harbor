@@ -23,7 +23,7 @@ export const INVOKE_METHODS: InvokeMethod[] = [
   'listImportSources', 'previewImport', 'importConversation', 'continueImported',
   'getSpendStatus', 'renameProject', 'listProjectNotes', 'removeProjectNote',
   'createRemoteToken', 'listRemoteTokens', 'revokeRemoteToken',
-  'createProject', 'cloneProject', 'listGithubRepos', 'previewDeleteProject', 'deleteProject', 'previewPush', 'pushBranch', 'createPullRequest', 'setRemote', 'getGithubStatus', 'browseFolder', 'listWorktrees', 'cleanupWorktrees',
+  'createProject', 'cloneProject', 'listGithubRepos', 'setProjectFlags', 'getProjectsOverview', 'searchAll', 'getGlobalUsage', 'previewDeleteProject', 'deleteProject', 'previewPush', 'pushBranch', 'createPullRequest', 'setRemote', 'getGithubStatus', 'browseFolder', 'listWorktrees', 'cleanupWorktrees',
   'getTaskReport', 'rateResult', 'listRatings', 'getRatingSummary', 'replayRouting'
 ];
 

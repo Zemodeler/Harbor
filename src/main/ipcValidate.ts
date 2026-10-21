@@ -291,6 +291,22 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (o['refresh'] !== undefined && typeof o['refresh'] !== 'boolean') bad('refresh must be true or false');
       break;
     }
+    case 'setProjectFlags': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('flags must be an object');
+      for (const k of ['archived', 'pinned']) if ((o as Record<string, unknown>)[k] !== undefined && typeof (o as Record<string, unknown>)[k] !== 'boolean') bad(`${k} must be true or false`);
+      break;
+    }
+    case 'searchAll': {
+      if (typeof args[0] !== 'string' || args[0].length > 500 || CONTROL.test(args[0])) bad('query must be short text');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (o === undefined || o === null) break;
+      if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+      for (const k of ['offset', 'limit']) if (o[k] !== undefined && (typeof o[k] !== 'number' || !Number.isFinite(o[k]))) bad(`${k} must be a number`);
+      if (o['projectId'] !== undefined && !isId(o['projectId'])) bad('projectId must be a short non-empty string');
+      break;
+    }
     case 'previewDeleteProject':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       break;

@@ -190,7 +190,7 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     // Project lifecycle and publishing (CHANGELOG 0.1.47): sample outcomes only.
     ...createMockLifecycle(() => data, pause, projectId => api.removeProject(projectId), () => settings),
     // Track B, projects 2 (CHANGELOG 0.1.48 and later): sample outcomes only.
-    ...createMockProjects2(() => data, pause, () => settings),
+    ...createMockProjects2(() => data, pause, () => settings, query => api.searchConversations(query)),
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { mergeFetched, mergeMessages, upsertById, upsertByTime } from '../listOps';
-import type { Agent, CliStatus, Conversation, ConversationMode, CloneProjectDraft, CreateProjectResult, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
+import type { Agent, CliStatus, Conversation, ConversationMode, CloneProjectDraft, CreateProjectResult, ProjectFlagsPatch, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
 
 export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
@@ -339,6 +339,15 @@ export function useHarbor() {
     await run(async () => { await api.renameProject!(id, name); setProjects(await api.listProjects()); renamed = true; }, area);
     return renamed;
   }
+  /** Archives or pins a project (nothing is deleted) and refreshes the project list; false when it failed (the reason is in `area`). */
+  async function setProjectFlags(id: string, patch: ProjectFlagsPatch, area?: string) {
+    let done = false;
+    await run(async () => {
+      if (!api.setProjectFlags) throw new Error('Archiving and pinning are available in the desktop app.');
+      await api.setProjectFlags(id, patch); setProjects(await api.listProjects()); done = true;
+    }, area);
+    return done;
+  }
   async function setProjectImage(id: string, image: string | null) {
     await run(async () => { await api.setProjectImage(id, image); setProjects(await api.listProjects()); });
   }
@@ -434,7 +443,7 @@ export function useHarbor() {
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),
     sending, run, reload, selectProject, selectConversation, clearProject, retryMessages: () => conversation ? selectConversation(conversation) : Promise.resolve(),
-    newConversation, deleteConversation, openAgent, addProject, removeProject, createProject, cloneProject, deleteProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
+    newConversation, deleteConversation, openAgent, addProject, removeProject, createProject, cloneProject, deleteProject, renameProject, setProjectFlags, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;
