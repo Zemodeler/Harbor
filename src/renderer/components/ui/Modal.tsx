@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useId, type ReactNode } from 'react';
 import { CloseIcon } from '../Icons';
 import u from './ui.module.css';
+import { OVERLAY_OPENED } from './overlayEvents';
 
 export type ModalSize = 'sm' | 'md' | 'lg' | 'full';
 const CLOSE_MS = 140;
@@ -26,7 +27,10 @@ export function Modal({ title, children, close, dismissible = true, size = 'md',
   const closing = useRef(false);
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
-    const dialog = ref.current!; dialog.showModal();
+    const dialog = ref.current!; dialog.showModal(); document.dispatchEvent(new Event(OVERLAY_OPENED));
+    // React's autoFocus runs before the dialog is open (focus fails on a closed dialog), and showModal then focuses the close button.
+    // Prefer an explicit data-autofocus target, then the first field in the body.
+    (dialog.querySelector<HTMLElement>('[data-autofocus]') ?? dialog.querySelector<HTMLElement>('input:not([type=hidden]):not(:disabled), textarea:not(:disabled), select:not(:disabled)'))?.focus();
     return () => { dialog.close(); previous?.focus(); };
   }, []);
   const request = useCallback(() => {
