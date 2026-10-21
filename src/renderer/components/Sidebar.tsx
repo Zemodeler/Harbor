@@ -7,7 +7,7 @@ import { ProjectSettings } from './ProjectSettings';
 import { initials } from './projectIcon';
 import { sessionStatus } from '../session';
 import { SessionStatus } from './SessionStatus';
-import { CloseIcon, MoreIcon, PlusIcon, SearchIcon, SettingsIcon } from './Icons';
+import { CloseIcon, MoreIcon, PlusIcon, SearchIcon, SettingsIcon, TemplateIcon } from './Icons';
 import { tagCounts } from '../conversationMeta';
 import s from '../Harbor.module.css';
 import n from './Navigation.module.css';
@@ -23,7 +23,7 @@ function listKeys(e: ReactKeyboardEvent<HTMLDivElement>) {
   e.preventDefault(); links[next]?.focus();
 }
 
-export function Sidebar({ state, settings, add, close, search, history, rename, queuedFor, forget, tags, editTags, archivedOpen, setArchivedOpen }: { state: HarborState; settings: () => void; add: () => void; close: () => void; search: () => void; history: () => void; rename: (c: Conversation) => void; queuedFor?: (conversationId: string) => number; forget?: (conversationId: string) => void; tags?: Record<string, string[]>; editTags?: (c: Conversation) => void; archivedOpen?: boolean; setArchivedOpen?: (open: boolean) => void }) {
+export function Sidebar({ state, settings, add, newProject, close, search, history, rename, queuedFor, forget, tags, editTags, archivedOpen, setArchivedOpen }: { state: HarborState; settings: () => void; add: () => void; newProject?: () => void; close: () => void; search: () => void; history: () => void; rename: (c: Conversation) => void; queuedFor?: (conversationId: string) => number; forget?: (conversationId: string) => void; tags?: Record<string, string[]>; editTags?: (c: Conversation) => void; archivedOpen?: boolean; setArchivedOpen?: (open: boolean) => void }) {
   const [tagFilter, setTagFilter] = useState<string>();
   const [deleting, setDeleting] = useState<Conversation>();
   const [deletePending, setDeletePending] = useState(false);
@@ -69,6 +69,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
       <Brand compact/>
       {state.projects.map(p => <button key={p.id} className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} title={`${p.name}\n${p.path}`} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button>)}
       <button className={s.chip} aria-label="Add project" title="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button>
+      {newProject ? <button className={s.chip} aria-label="New project" title="New project (Ctrl+Shift+N)" onClick={newProject}><TemplateIcon size={19} aria-hidden="true"/></button> : null}
       <span className={s.railSpace}/>
       <button className={s.chip} aria-label="Open settings" title="Settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button>
       <button className={s.mobileClose} onClick={close} aria-label="Close project menu"><CloseIcon size={18} aria-hidden="true"/></button>

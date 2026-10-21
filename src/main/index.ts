@@ -127,6 +127,7 @@ if (startupAction === 'start') app.whenReady().then(() => {
   const service = createHarborService({
     dataDir,
     appVersion: app.getVersion(),
+    appRoots: [app.getAppPath()],
     openFolder: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
     launch: async (kind, target, editor) => {
       if (kind === 'editor') { await shell.openExternal(editorUrl(editor, target.file ? join(target.dir, target.file) : target.dir)); return; }

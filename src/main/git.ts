@@ -39,6 +39,41 @@ const guardPath = (p: string): string => canonicalPath(p).split(String.fromCharC
 /** Whether `path` is strictly inside `root` after resolving both (so `..` segments cannot slip through). */
 export const isInside = (path: string, root: string): boolean => guardPath(path).startsWith(guardPath(root) + '/');
 
+/** Why a remote URL is refused, or undefined when it is an https or ssh URL without embedded credentials. */
+export function remoteUrlProblem(url: string): string | undefined {
+  const u = typeof url === 'string' ? url.trim() : '';
+  if (!u || u.length > 500 || /[\s\0]/.test(u)) return 'Enter the repository URL without spaces.';
+  if (u.startsWith('-')) return 'A remote URL cannot start with a dash.';
+  if (/^https:\/\//i.test(u)) {
+    if (/^https:\/\/[^/]*@/i.test(u)) return 'Do not put a user name or password in the URL; git and gh sign in on their own.';
+    return /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?\/\S+$/i.test(u) ? undefined : 'Enter a full https URL such as https://github.com/owner/name.git.';
+  }
+  if (/^ssh:\/\//i.test(u)) return /^ssh:\/\/(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9.-]+(?::\d+)?\/\S+$/i.test(u) ? undefined : 'Enter a full ssh URL such as ssh://git@github.com/owner/name.git.';
+  if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]\S*$/.test(u)) return undefined; // scp-like: git@github.com:owner/name.git
+  return 'Only https and ssh remotes are supported (not file:, ext:: or local paths).';
+}
+
+/** Arguments Harbor never gives git push: anything that rewrites or deletes remote history, or pushes more than one named branch. */
+const FORBIDDEN_PUSH_FLAGS = /^(?:--force(?:-with-lease|-if-includes)?(?:=.*)?|-f|--mirror|--delete|-d|--prune|--all|--tags|--follow-tags|--receive-pack.*|--exec.*|\+.*)$/i;
+
+/** The `git push` argv, or an Error when anything here could force, delete or mirror. Pure, so a test can pin it. */
+export function pushArgs(remote: string, branch: string, o: { setUpstream?: boolean; extra?: string[] } = {}): string[] {
+  if (!remote || remote.startsWith('-') || !branch || branch.startsWith('-') || branch.startsWith('+') || /[:\s]/.test(branch)) throw new Error('Refusing to push: the remote or branch name is not a plain name.');
+  for (const a of [remote, branch, ...(o.extra ?? [])]) if (FORBIDDEN_PUSH_FLAGS.test(a)) throw new Error(`Refusing to push with "${a}": Harbor never forces, deletes or mirrors.`);
+  // Fully qualified source and destination, so a tag of the same name can never be pushed instead.
+  return ['push', ...(o.setUpstream ? ['--set-upstream'] : []), ...(o.extra ?? []), '--', remote, `refs/heads/${branch}:refs/heads/${branch}`];
+}
+
+/** A push failure in words the owner can act on. */
+export function explainPushFailure(stderr: string): string {
+  const t = stderr || '';
+  if (/protected branch|GH006|GH013|push declined/i.test(t)) return 'The remote refuses direct pushes to this branch (it is protected). Push a harbor/* branch and open a pull request instead.';
+  if (/terminal prompts disabled|could not read (?:username|password)|authentication failed|invalid username or password|permission denied \(publickey\)|\b403\b|access denied/i.test(t)) return 'Not signed in to the remote. Sign in with git (for example `gh auth login`, or push once from a terminal so Git Credential Manager can store the login), then try again.';
+  if (/non-fast-forward|fetch first|updates were rejected/i.test(t)) return 'The remote has commits this branch does not. Merge or rebase them into the branch first (Harbor never force-pushes), then push again.';
+  if (/no configured push destination|does not appear to be a git repository|no such remote|repository not found|could not resolve host|unable to access/i.test(t)) return 'The remote repository could not be reached. Check that it exists, the URL is right and you are online.';
+  return `git push failed: ${t.trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ') || 'no details'}`;
+}
+
 /** A Harbor worktree as the retention policy sees it. `lastActivity` is epoch ms. */
 export interface WorktreeEntry { path: string; branch?: string; lastActivity: number; applied?: boolean; merged?: boolean; active?: boolean }
 
@@ -426,6 +461,147 @@ export class Git {
   async branchesContaining(repo: string, commit: string, prefix = ''): Promise<string[]> {
     const r = await this.git(repo, ['for-each-ref', '--contains', commit, '--format=%(refname:short)', `refs/heads/${prefix}`]);
     return r.code === 0 ? r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean) : [];
+  }
+
+  // ---- project lifecycle and publish (0.1.47)
+
+  /** `git init -b <branch>` in an existing folder. */
+  async init(path: string, defaultBranch = 'main'): Promise<void> {
+    if (!/^[A-Za-z0-9._/-]{1,100}$/.test(defaultBranch) || defaultBranch.startsWith('-')) throw new Error('Not a usable branch name.');
+    const r = await this.git(path, ['init', '-b', defaultBranch]);
+    if (r.code !== 0) throw new Error(`git init failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
+  }
+
+  /**
+   * Stage everything and make the first commit with the owner's git identity; when none is configured a neutral Harbor one is
+   * used and `fallbackIdentity` says so (the caller turns that into a warning).
+   */
+  async initialCommit(path: string, message: string): Promise<{ ok: boolean; head?: string; fallbackIdentity: boolean; error?: string }> {
+    const [name, email] = await Promise.all([this.git(path, ['config', 'user.name']), this.git(path, ['config', 'user.email'])]);
+    const fallbackIdentity = !name.stdout.trim() || !email.stdout.trim();
+    const add = await this.git(path, ['add', '-A'], LONG_GIT_TIMEOUT_MS);
+    if (add.code !== 0) return { ok: false, fallbackIdentity, error: `git add failed: ${(add.stderr || add.stdout).trim().split(/\r?\n/)[0] ?? ''}` };
+    const ident = fallbackIdentity ? ['-c', 'user.name=Harbor', '-c', 'user.email=harbor@localhost'] : [];
+    const c = await this.git(path, [...ident, 'commit', '-m', message], LONG_GIT_TIMEOUT_MS);
+    if (c.code !== 0) return { ok: false, fallbackIdentity, error: `git commit failed: ${(c.stderr || c.stdout).trim().split(/\r?\n/)[0] ?? ''}` };
+    return { ok: true, head: await this.head(path), fallbackIdentity };
+  }
+
+  /** URL of a remote, or undefined when there is none. */
+  async remoteUrl(repo: string, name = 'origin'): Promise<string | undefined> {
+    if (!name || name.startsWith('-')) return undefined;
+    const r = await this.git(repo, ['remote', 'get-url', name]);
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  /** Add `origin`, or with `replace` change it. The URL is validated and passed as its own argument after `--`. */
+  async setRemote(repo: string, url: string, o: { replace?: boolean } = {}): Promise<void> {
+    const problem = remoteUrlProblem(url);
+    if (problem) throw new Error(problem);
+    const had = await this.remoteUrl(repo);
+    if (had && !o.replace) throw new Error('This project already has a remote (origin). Replace it only on purpose.');
+    const r = await this.git(repo, had ? ['remote', 'set-url', '--', 'origin', url.trim()] : ['remote', 'add', '--', 'origin', url.trim()]);
+    if (r.code !== 0) throw new Error(`git remote failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}`);
+  }
+
+  /** The repository's default branch: origin/HEAD, else main or master when one exists, else the current branch. */
+  async defaultBranch(repo: string): Promise<string | undefined> {
+    const o = await this.git(repo, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+    if (o.code === 0 && o.stdout.trim().startsWith('origin/')) return o.stdout.trim().slice('origin/'.length);
+    for (const b of ['main', 'master']) if (await this.branchHead(repo, b)) return b;
+    return this.currentBranch(repo);
+  }
+
+  /** Commits of `branch` its upstream lacks (ahead) and the reverse (behind). Without an upstream: ahead = commits on no remote branch at all. */
+  async aheadBehind(repo: string, branch: string): Promise<{ upstream?: string; ahead: number; behind: number }> {
+    const u = await this.git(repo, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', `${branch}@{upstream}`]);
+    const upstream = u.code === 0 ? u.stdout.trim() || undefined : undefined;
+    if (upstream) {
+      const r = await this.git(repo, ['rev-list', '--left-right', '--count', `refs/heads/${branch}...${upstream}`]);
+      const [a, b] = r.code === 0 ? r.stdout.trim().split(/\s+/).map(Number) : [0, 0];
+      return { upstream, ahead: a || 0, behind: b || 0 };
+    }
+    return { ahead: (await this.unpushedCommits(repo, branch)).length, behind: 0 };
+  }
+
+  /** Commits on `branch` that no remote-tracking branch has (newest first): what would exist nowhere else. */
+  async unpushedCommits(repo: string, branch: string, limit = 200): Promise<{ hash: string; subject: string }[]> {
+    const r = await this.git(repo, ['log', '--format=%H%x1f%s', '-n', String(limit), `refs/heads/${branch}`, '--not', '--remotes']);
+    return this.parseCommitList(r);
+  }
+
+  /** The commits a push of `branch` would send, oldest first: those its upstream lacks, or all that no remote has. */
+  async commitsToPush(repo: string, branch: string, upstream?: string): Promise<{ hash: string; subject: string }[]> {
+    const r = await this.git(repo, ['log', '--reverse', '--format=%H%x1f%s', '-n', '200', `refs/heads/${branch}`, '--not', ...(upstream ? [upstream] : ['--remotes'])]);
+    return this.parseCommitList(r);
+  }
+
+  private parseCommitList(r: RunResult): { hash: string; subject: string }[] {
+    if (r.code !== 0) return [];
+    return r.stdout.split(/\r?\n/).filter(Boolean).map((l) => { const [hash, subject] = l.split('\x1f'); return { hash: hash ?? '', subject: subject ?? '' }; });
+  }
+
+  /**
+   * Plain `git push` of one local branch. Never `--force`, `--force-with-lease`, `--mirror` or `--delete` (pushArgs refuses them)
+   * and never any other ref. A failure is mapped to a cause the owner can act on.
+   */
+  async push(repo: string, remote: string, branch: string, o: { setUpstream?: boolean } = {}): Promise<{ ok: boolean; output: string }> {
+    const r = await this.git(repo, pushArgs(remote, branch, o), LONG_GIT_TIMEOUT_MS);
+    if (r.timedOut) return { ok: false, output: 'git push timed out. Check the connection and try again.' };
+    const out = `${r.stdout}\n${r.stderr}`.trim();
+    return r.code === 0 ? { ok: true, output: out } : { ok: false, output: explainPushFailure(out) };
+  }
+
+  /**
+   * Delete a local harbor/* branch. Refuses every other name and a branch checked out in a worktree. `-d` (merged only) unless
+   * `force`, which the caller sets only after the preview showed unmerged commits and the owner confirmed.
+   */
+  async deleteBranch(repo: string, name: string, o: { force?: boolean } = {}): Promise<boolean> {
+    if (!name.startsWith('harbor/') || /[\s:~^?*[\\]/.test(name) || name.includes('..')) throw new Error('Refusing to delete a branch that is not a harbor/* branch.');
+    if (!(await this.branchHead(repo, name))) return false;
+    if (await this.worktreeOf(repo, name)) throw new Error(`Refusing to delete ${name}: it is checked out in a worktree.`);
+    return (await this.git(repo, ['branch', o.force ? '-D' : '-d', '--', name])).code === 0;
+  }
+
+  /** Local harbor/* branches, whether each is merged into the default branch, and how many commits exist on no remote. */
+  async harborBranches(repo: string): Promise<{ name: string; merged: boolean; unpushed: number }[]> {
+    const r = await this.git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/harbor/']);
+    if (r.code !== 0) return [];
+    const base = await this.defaultBranch(repo);
+    const out: { name: string; merged: boolean; unpushed: number }[] = [];
+    for (const name of r.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)) {
+      out.push({ name, merged: base ? await this.isAncestor(repo, `refs/heads/${name}`, `refs/heads/${base}`) : false, unpushed: (await this.unpushedCommits(repo, name)).length });
+    }
+    return out;
+  }
+
+  /** Commits on `branch` that `base` lacks (what a worktree's work would lose if discarded). */
+  async commitsNotIn(repo: string, branch: string, base: string): Promise<number> {
+    const r = await this.git(repo, ['rev-list', '--count', `refs/heads/${branch}`, '--not', `refs/heads/${base}`]);
+    return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
+  }
+
+  /** How many commits on any local branch exist on no remote-tracking branch: work that lives only in this folder. */
+  async unpushedOnAnyBranch(repo: string): Promise<number> {
+    const r = await this.git(repo, ['rev-list', '--count', '--branches', '--not', '--remotes']);
+    return r.code === 0 ? Number(r.stdout.trim()) || 0 : 0;
+  }
+
+  async hasRemotes(repo: string): Promise<boolean> {
+    const r = await this.git(repo, ['remote']);
+    return r.code === 0 && !!r.stdout.trim();
+  }
+
+  /** Changed or untracked paths exist (a clean folder has none). A git failure counts as dirty. */
+  async hasLocalChanges(cwd: string): Promise<boolean> {
+    const r = await this.git(cwd, ['status', '--porcelain']);
+    return r.code !== 0 || !!r.stdout.trim();
+  }
+
+  /** Registered worktrees of the repository (path and branch), the main checkout first. */
+  async listWorktrees(repo: string): Promise<{ path: string; branch?: string; prunable?: boolean }[]> {
+    const r = await this.git(repo, ['worktree', 'list', '--porcelain']);
+    return r.code === 0 ? parseWorktrees(r.stdout).map((w) => ({ path: w.path, ...(w.branch ? { branch: w.branch } : {}), ...(w.prunable ? { prunable: true } : {}) })) : [];
   }
 
   /** Remove a worktree that Harbor created. Refuses anything outside the given Harbor root. */
