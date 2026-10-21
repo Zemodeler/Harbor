@@ -7,6 +7,8 @@ import { SessionStatus } from './SessionStatus';
 import { BranchIcon, RefreshIcon } from './Icons';
 import { OpenFileButton } from '../documents/DocumentLinks';
 import { Publish } from './Publish';
+import { PullRequestCard } from './PullRequestCard';
+import { ReleaseTag } from './ReleaseTag';
 import l from './Lifecycle.module.css';
 import s from '../Harbor.module.css';
 
@@ -50,6 +52,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
   const [shown, setShown] = useState(WINDOW);
   const [file, setFile] = useState<string>();
   const [publishing, setPublishing] = useState<'push' | 'pr'>();
+  const [tagging, setTagging] = useState(false);
   const refresh = () => setTick(t => t + 1);
 
   // A helper changing state may have committed or finished its branch, so re-read when that happens.
@@ -132,6 +135,8 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
       <div className={s.panelHeading}><h2>Changes</h2>{changes.data ? <small>{plural(changes.data.length, 'file')}</small> : null}</div>
       <p className={s.gitTarget}>{selection.kind === 'local' ? 'Uncommitted changes in the project folder.' : selection.kind === 'commit' ? <><code>{short(selection.hash)}</code> {selection.subject}</> : <><strong>{selection.name}</strong> since it split from {o.base ?? 'its base'}{chosen?.worktree && chosen.agentId ? ', including work the helper has not committed yet' : ''}.</>}</p>
       {chosen && api.pushBranch && api.previewPush ? <div className={l.publish}><button onClick={() => setPublishing('push')}>{chosen.name === o.base ? `Push ${chosen.name}…` : 'Push branch…'}</button>{chosen.name !== o.base && api.createPullRequest ? <button onClick={() => setPublishing('pr')}>Open pull request…</button> : null}</div> : null}
+      {chosen && chosen.name === o.base && api.createReleaseTag && api.previewReleaseTag ? <div className={l.publish}><button onClick={() => setTagging(true)}>Release tag…</button></div> : null}
+      {chosen && chosen.name !== o.base && api.getPullRequestStatus ? <PullRequestCard key={chosen.name} state={state} branch={chosen.name}/> : null}
       {changes.error ? <p className={s.reviewNote} role="alert">{changes.error}</p> : null}
       {changes.loading && !changes.data ? <p role="status" className={s.muted}>Reading changes…</p> : null}
       {changes.data && !changes.data.length ? <p className={s.muted}>No changes.</p> : null}
@@ -148,6 +153,7 @@ export function GitPanel({ state, openAgent }: { state: HarborState; openAgent: 
           : <Clipped key={`${targetKey}|${f.path}`} text={diff.data}>{lines => <pre className={s.gitDiff}>{lines.map((line, i) => <span key={i} className={line.startsWith('@@') ? s.gitHunk : line.startsWith('+') && !line.startsWith('+++') ? s.diffAdded : line.startsWith('-') && !line.startsWith('---') ? s.diffRemoved : undefined}>{line}{'\n'}</span>)}</pre>}</Clipped> : null}
       </li>)}</ul>
     </div>
+    {tagging ? <ReleaseTag state={state} close={() => setTagging(false)}/> : null}
     {publishing && chosen ? <Publish state={state} branch={chosen.name} mode={publishing} close={() => setPublishing(undefined)} changed={refresh}/> : null}
   </section>;
 }
