@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DeletePreview, DeleteScope, Project } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Modal } from './Modal';
+import { SaveTemplate } from './SaveTemplate';
 import { initials, toIcon } from './projectIcon';
 import s from '../Harbor.module.css';
 import p from './ProjectSettings.module.css';
@@ -15,6 +16,7 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
   const [name, setName] = useState(project.name);
   const [pending, setPending] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [templating, setTemplating] = useState(false);
   const [level, setLevel] = useState<DeleteScope>('forget');
   const [preview, setPreview] = useState<DeletePreview>();
   const [typed, setTyped] = useState('');
@@ -52,7 +54,7 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
   const actionLabel = level === 'forget' ? 'Remove project' : level === 'worktrees' ? 'Delete worktrees and branches' : 'Delete folder and project';
 
   return <Modal title="Project settings" close={dismiss} dismissible={!pending}>
-    {confirming ? <div className={p.confirm}>
+    {templating ? <SaveTemplate state={state} project={project} back={() => setTemplating(false)} done={dismiss}/> : confirming ? <div className={p.confirm}>
       <p><strong>Remove “{project.name}” from Harbor?</strong></p>
       <p className={s.muted}>Its conversations and agent records are deleted and running work is stopped. By default the folder, its files and git branches stay on disk. This cannot be undone.</p>
       {canLevels ? <fieldset className={`${l.choices} ${level !== 'forget' ? l.danger : ''}`} disabled={pending}><legend>What else should go?</legend>
@@ -97,6 +99,10 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
           <button type="submit" className={s.primary} disabled={pending || !trimmed || !dirty}>{pending ? 'Saving…' : 'Save name'}</button>
         </div>
       </form>
+      {state.api.saveProjectAsTemplate && state.api.previewTemplate ? <section className={p.danger_zone} aria-labelledby="project-template" style={{ borderColor: 'var(--line)' }}>
+        <div><h3 id="project-template">Use as a template</h3><p className={s.muted}>Copies the tracked files so new projects can start from this one.</p></div>
+        <button type="button" onClick={() => setTemplating(true)}>Save as template…</button>
+      </section> : null}
       <section className={p.danger_zone} aria-labelledby="project-danger">
         <div><h3 id="project-danger">Remove from Harbor</h3><p className={s.muted}>Forgets this project and its conversations. Your files stay where they are.</p></div>
         <button type="button" className={p.dangerOutline} onClick={() => setConfirming(true)}>Remove…</button>

@@ -264,9 +264,10 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (typeof d['name'] !== 'string' || !d['name'].trim() || d['name'].length > 80 || CONTROL.test(d['name'])) bad('name must be 1 to 80 characters');
       if (d['parentDir'] !== undefined && (typeof d['parentDir'] !== 'string' || !d['parentDir'].trim() || d['parentDir'].length > MAX_PATH || d['parentDir'].includes('\0'))) bad('parentDir must be a folder path');
       if (d['template'] !== undefined && !['empty', 'node-ts', 'python', 'static-web'].includes(d['template'] as string)) bad('unknown template');
+      if (d['userTemplate'] !== undefined && !isId(d['userTemplate'])) bad('userTemplate must be a template id');
       if (d['firstPrompt'] !== undefined && (typeof d['firstPrompt'] !== 'string' || d['firstPrompt'].length > 20000)) bad('firstPrompt must be text of at most 20000 characters');
       const g = (d['github'] ?? {}) as Record<string, unknown>;
-      if (g !== undefined) {
+      if (d['github'] !== undefined) {
         if (d['github'] === null || typeof g !== 'object' || Array.isArray(g) || typeof g['create'] !== 'boolean') bad('github must say whether to create a repository');
         if (g['create'] && g['visibility'] !== 'private' && g['visibility'] !== 'public') bad('visibility must be private or public');
         if (g['owner'] !== undefined && (typeof g['owner'] !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(g['owner']))) bad('owner must be a GitHub account name');
@@ -307,6 +308,24 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (o['projectId'] !== undefined && !isId(o['projectId'])) bad('projectId must be a short non-empty string');
       break;
     }
+    case 'previewTemplate':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'saveProjectAsTemplate':
+    case 'updateTemplate': {
+      if (!isId(args[0])) bad(method === 'updateTemplate' ? 'template id must be a short non-empty string' : 'project id must be a short non-empty string');
+      const d = args[1] as Record<string, unknown> | undefined | null;
+      if (!d || typeof d !== 'object' || Array.isArray(d)) bad('the template must be an object');
+      const t = d as Record<string, unknown>;
+      const needName = method === 'saveProjectAsTemplate';
+      if ((needName || t['name'] !== undefined) && (typeof t['name'] !== 'string' || !t['name'].trim() || t['name'].length > 60 || CONTROL.test(t['name']))) bad('name must be 1 to 60 characters');
+      if (t['description'] !== undefined && (typeof t['description'] !== 'string' || t['description'].length > 300 || t['description'].includes('\0'))) bad('description must be at most 300 characters');
+      if (t['checks'] !== undefined && (!Array.isArray(t['checks']) || t['checks'].length > 10 || !t['checks'].every((c) => typeof c === 'string' && c.length <= 500 && !CONTROL.test(c)))) bad('checks must be at most 10 one-line commands');
+      break;
+    }
+    case 'deleteTemplate':
+      if (!isId(args[0])) bad('template id must be a short non-empty string');
+      break;
     case 'previewDeleteProject':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       break;

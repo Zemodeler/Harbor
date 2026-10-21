@@ -3,7 +3,9 @@ import { dirname, join, resolve } from 'node:path';
 import type { CloneProjectDraft, NewProjectDraft, ProjectTemplate } from '../shared/api';
 import { Git, isInside, remoteUrlProblem } from './git';
 import type { GitHub } from './github';
+import { CHECKS_FILE } from './checks';
 import { projectPathRefusal } from './projectPath';
+import type { TemplateLibrary } from './templateLibrary';
 import { normPath } from './store';
 import { TEMPLATES, templateFiles } from './templates';
 
@@ -29,6 +31,8 @@ export interface CreateDeps {
   harborRoots: string[];
   /** Paths of projects already registered, so a folder one of them uses is not taken twice. */
   isRegistered: (path: string) => boolean;
+  /** The user's templates (draft.userTemplate). */
+  templates?: TemplateLibrary;
 }
 
 /** Where a new project's folder goes, after every safety check; `undo` removes exactly what the caller makes there (never a pre-existing folder). */
@@ -74,12 +78,32 @@ export async function createProjectFolder(draft: NewProjectDraft, deps: CreateDe
   if (!folder) throw new Error('That name cannot be used as a folder name. Use letters or digits.');
   const template: ProjectTemplate = draft.template ?? 'empty';
   if (!TEMPLATES.includes(template)) throw new Error('Unknown project template.');
+  // A user template wins over the built-in one; its files are read before anything is created, so a broken template fails early.
+  let userFiles: Array<{ path: string; read: () => Buffer }> | undefined, checks: string[] = [];
+  if (draft.userTemplate !== undefined) {
+    const t = typeof draft.userTemplate === 'string' ? deps.templates?.get(draft.userTemplate) : undefined;
+    if (!t || !deps.templates) throw new Error('That template no longer exists. Pick another one.');
+    userFiles = deps.templates.files(t.id);
+    checks = t.checks;
+  }
 
   const { target, undo } = prepareTarget(folder, draft.parentDir, deps);
 
   try {
     mkdirSync(target, { recursive: true });
-    for (const [rel, content] of Object.entries(templateFiles(template, typed))) {
+    if (userFiles) {
+      for (const f of userFiles) {
+        const file = join(target, ...f.path.split('/'));
+        if (f.path.split('/').includes('..') || f.path.startsWith('.git/') || f.path.startsWith('.harbor/') || !isInside(file, target)) throw new Error(`The template file ${f.path} is not allowed.`);
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, f.read());
+      }
+      // Default checks become this project's checks file. They are not approved here: the first run asks the owner, as for any checks file.
+      if (checks.length) {
+        mkdirSync(join(target, '.harbor'), { recursive: true });
+        writeFileSync(join(target, CHECKS_FILE), JSON.stringify({ checks }, null, 2) + '\n', 'utf8');
+      }
+    } else for (const [rel, content] of Object.entries(templateFiles(template, typed))) {
       const file = join(target, ...rel.split('/'));
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, content, 'utf8');

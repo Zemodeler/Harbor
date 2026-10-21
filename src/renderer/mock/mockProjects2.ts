@@ -1,6 +1,6 @@
-import type { Agent, Conversation, GithubRepo, GlobalUsage, HarborApi, Project, ProjectOverview, SearchAllHit, SearchHit } from '../../shared/api';
+import type { Agent, Conversation, TemplatePreview, UserTemplate, GithubRepo, GlobalUsage, HarborApi, Project, ProjectOverview, SearchAllHit, SearchHit } from '../../shared/api';
 
-type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage'>>;
+type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage'>>;
 interface Data { projects: Project[]; agents: Agent[]; conversations: Conversation[] }
 
 const DEMO_DIR = 'C:\Projects\Harbor Projects';
@@ -15,6 +15,8 @@ const REPOS: GithubRepo[] = [
  */
 export function createMockProjects2(data: () => Data, pause: () => Promise<void>, settings: () => { projectsDir?: string }, search: (query: string) => Promise<SearchHit[]>): Projects2Methods {
   const copy = <T,>(v: T): T => structuredClone(v);
+  let templates: UserTemplate[] = [{ id: 'web-starter-1a2b3c', name: 'Web starter', description: 'Vite and React', created: Date.parse('2026-10-10T10:00:00Z'), files: 14, bytes: 52_000, checks: ['npm test', 'npm run build'], source: 'Storefront' }];
+  const checks = (c: unknown) => { const list = Array.isArray(c) ? c.map(x => String(x).trim()).filter(Boolean) : []; if (list.length > 10) throw new Error('A template can hold at most 10 default checks.'); return list; };
   return {
     async cloneProject(draft) {
       await pause();
@@ -32,6 +34,38 @@ export function createMockProjects2(data: () => Data, pause: () => Promise<void>
       data().agents.push({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' });
       return { project: copy(p), path, remote: url, warnings: repo === 'empty' ? ['The repository has no commits yet. Make a first commit before asking an agent to work on it.'] : [] };
     },
+    async listTemplates() { await pause(); return copy(templates); },
+    async previewTemplate(projectId): Promise<TemplatePreview> {
+      await pause();
+      const p = data().projects.find(x => x.id === projectId);
+      if (!p) throw new Error('This project is no longer available.');
+      const leaky = /leak/i.test(p.name);
+      return {
+        projectId, files: 23, bytes: 410_000, sample: ['README.md', 'package.json', 'src/index.ts'],
+        excluded: [{ path: '.env', reason: 'looks like a credential file' }, { path: 'assets/video.mp4', reason: 'larger than 1 MB' }],
+        findings: leaky ? [{ type: 'github-token', file: 'src/config.ts', line: 4 }] : [], findingsTotal: leaky ? 1 : 0, suggestedChecks: ['npm test'], blocked: leaky
+      };
+    },
+    async saveProjectAsTemplate(projectId, draft) {
+      await pause();
+      const p = data().projects.find(x => x.id === projectId);
+      if (!p) throw new Error('This project is no longer available.');
+      if (/leak/i.test(p.name)) throw new Error('The secret scan found 1 possible secret in the files to copy (github-token at src/config.ts:4). Remove or allowlist them, then save again.');
+      const name = draft.name.trim();
+      if (!name || name.length > 60) throw new Error('A template name needs 1 to 60 characters.');
+      const t: UserTemplate = { id: `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${Math.random().toString(16).slice(2, 8)}`, name, ...(draft.description?.trim() ? { description: draft.description.trim() } : {}), created: Date.now(), files: 23, bytes: 410_000, checks: checks(draft.checks), source: p.name };
+      templates = [t, ...templates];
+      return copy(t);
+    },
+    async updateTemplate(id, patch) {
+      await pause();
+      const t = templates.find(x => x.id === id);
+      if (!t) throw new Error('Unknown template.');
+      if (patch.name !== undefined) t.name = patch.name.trim();
+      if (patch.checks !== undefined) t.checks = checks(patch.checks);
+      return copy(t);
+    },
+    async deleteTemplate(id) { await pause(); templates = templates.filter(x => x.id !== id); },
     async setProjectFlags(id, patch) {
       await pause();
       const p = data().projects.find(x => x.id === id);
