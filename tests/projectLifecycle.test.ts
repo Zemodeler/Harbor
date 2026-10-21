@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -16,7 +16,7 @@ import { validateInvoke } from '../src/main/ipcValidate';
 // Each case spawns many git processes; under a parallel full run the default 20 s is not always enough.
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 90_000 });
 const dirs: string[] = [], services: HarborService[] = [];
-const temp = (p = 'harbor-life-') => { const d = mkdtempSync(join(tmpdir(), p)); dirs.push(d); return d; };
+const temp = (p = 'harbor-life-') => { const d = realpathSync.native(mkdtempSync(join(tmpdir(), p))); dirs.push(d); return d; }; // git reports long paths; CI's tmpdir is the 8.3 short form
 afterEach(async () => { for (const s of services.splice(0)) await s.shutdown(); dirs.splice(0).forEach((p) => rmSync(p, { recursive: true, force: true, maxRetries: 3 })); });
 const sh = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, windowsHide: true, stdio: 'pipe' }).toString();
 
