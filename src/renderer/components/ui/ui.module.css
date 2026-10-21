@@ -1,0 +1,45 @@
+/* Shared overlay primitives. z-index scale (the dialog itself lives in the top layer): */
+:global(:root) { --z-menu: 20; --z-toast: 50; --z-skip: 100; }
+
+.dialog { background: var(--bg); color: var(--ink); border: 1px solid var(--line); box-shadow: var(--elev-2); border-radius: var(--r-lg); padding: 0; width: min(var(--dialog-w, 520px), calc(100% - 32px)); max-height: calc(100dvh - 32px); overflow: hidden; flex-direction: column; opacity: 1; transform: none; transition: opacity 160ms ease, transform 160ms cubic-bezier(.2, 0, 0, 1), overlay 160ms allow-discrete, display 160ms allow-discrete; }
+.dialog[open] { display: flex; }
+.dialog[data-size=sm] { --dialog-w: 400px; }
+.dialog[data-size=lg] { --dialog-w: 760px; }
+.dialog[data-size=full] { --dialog-w: 1100px; height: min(86dvh, 900px); }
+.dialog::backdrop { background: color-mix(in srgb, #07181b 62%, transparent); backdrop-filter: blur(2px); transition: opacity 160ms ease, overlay 160ms allow-discrete, display 160ms allow-discrete; }
+@starting-style { .dialog[open] { opacity: 0; transform: translateY(8px) scale(.98); } .dialog[open]::backdrop { opacity: 0; } }
+.dialog[data-closing] { opacity: 0; transform: translateY(6px) scale(.98); }
+.dialog[data-closing]::backdrop { opacity: 0; }
+
+.header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px 24px 12px; flex: none; }
+.header h2 { font-size: 19px; margin: 0; }
+.close { padding: 6px; min-height: 0; border-color: transparent; color: var(--muted); background: transparent; }
+.close:hover:not(:disabled) { color: var(--ink); background: var(--hover); border-color: transparent; }
+.body { padding: 4px 24px 24px; overflow: auto; min-height: 0; flex: 1 1 auto; overscroll-behavior: contain; }
+.description { margin: 0 0 14px; color: var(--muted); }
+.footer { display: flex; justify-content: flex-end; gap: 12px; flex: none; padding: 14px 24px calc(14px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--line); background: var(--surface); }
+.confirmBody > :first-child { margin-top: 0; }
+.confirmBody > :last-child { margin-bottom: 0; }
+.error { color: var(--error); margin: 12px 0 0; }
+
+.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); border-color: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
+/* The one destructive style: solid red with text that stays readable on both palettes. */
+.dangerSolid { background: var(--bad); color: var(--bg); border-color: var(--bad); font-weight: 600; }
+.dangerSolid:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 86%, var(--ink)); border-color: color-mix(in srgb, var(--bad) 86%, var(--ink)); color: var(--bg); }
+.dangerSolid:active:not(:disabled) { background: color-mix(in srgb, var(--bad) 74%, var(--ink)); }
+
+.inlineConfirm { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5; background: var(--surface); }
+.inlineConfirm[data-tone=danger] { border-color: color-mix(in srgb, var(--bad) 60%, var(--line)); background: var(--bad-wash); }
+.inlineConfirm p { margin: 0 0 8px; }
+.inlineActions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Bottom sheet on narrow windows. */
+@media (max-width: 640px) {
+  .dialog { margin: auto 0 0; width: 100%; max-width: none; border-radius: var(--r-lg) var(--r-lg) 0 0; max-height: 92dvh; }
+  .dialog[data-size=full] { height: 92dvh; }
+  @starting-style { .dialog[open] { transform: translateY(100%); } }
+  .dialog[data-closing] { transform: translateY(100%); }
+  .header { padding: 16px 18px 10px; } .body { padding: 4px 18px 18px; } .footer { padding-left: 18px; padding-right: 18px; }
+}
+@media (prefers-reduced-motion: reduce) { .dialog, .dialog::backdrop { transition: none; } }
