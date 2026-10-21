@@ -66,19 +66,22 @@ export function createMockLifecycle(data: () => Data, pause: () => Promise<void>
         branches: busy ? [{ name: SAMPLE_BRANCH, unpushed: 2, merged: false }] : [],
         folder: { exists: true, dirty: busy, unpushedCommits: busy ? 2 : 0, hasRemote: busy, sizeBytes: busy ? 182_000_000 : 4_200, outsideProjectsDir: !p.path.startsWith(DEMO_DIR) },
         blockers: projectId === 'harbor' ? ["This folder is, contains or sits inside Harbor's own app or data folder."] : [],
-        needsTypedName: { worktrees: busy, folder: true }
+        needsTypedName: { worktrees: busy, folder: true }, recycleBin: true
       };
     },
-    async deleteProject(projectId, scope, confirmName) {
+    async deleteProject(projectId, scope, confirmName, opts) {
       await pause();
       const p = project(projectId);
       const pv = await this.previewDeleteProject(projectId);
       if (scope === 'folder') {
         if (pv.blockers.length) throw new Error(`The folder cannot be deleted: ${pv.blockers[0]}`);
         if (confirmName !== p.name) throw new Error('Type the project name to confirm deleting its folder.');
+        if (opts?.permanent && opts.confirmPermanent !== p.name) throw new Error('Type the project name again to delete the folder permanently. It cannot be undone and skips the Recycle Bin.');
+        // "Internal tools" has no usable Recycle Bin in the demo, so the failure and its way out can be seen.
+        if (!opts?.permanent && /^internal tools$/i.test(p.name)) throw new Error('The folder could not be moved to the Recycle Bin: the bin is not available on this drive. Harbor’s worktrees were already removed and the project is still listed. To delete the folder permanently instead, choose permanent delete.');
       } else if (scope === 'worktrees' && pv.needsTypedName.worktrees && confirmName !== p.name) throw new Error('Some worktrees or branches hold work that exists nowhere else. Type the project name to confirm removing them.');
       await removeProject(projectId);
-      return { removed: { records: true, worktrees: scope === 'forget' ? 0 : pv.worktrees.length, branches: scope === 'forget' ? 0 : pv.branches.length, folder: scope === 'folder' }, warnings: [] };
+      return { removed: { records: true, worktrees: scope === 'forget' ? 0 : pv.worktrees.length, branches: scope === 'forget' || (scope === 'folder' && !opts?.permanent) ? 0 : pv.branches.length, folder: scope === 'folder', ...(scope === 'folder' && !opts?.permanent ? { trashed: true } : {}) }, warnings: [] };
     },
     async previewPush(projectId, branch) { await pause(); return copy(plan(projectId, branch)); },
     async pushBranch(projectId, branch, opts) {

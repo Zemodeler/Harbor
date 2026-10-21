@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DeletePreview, DeleteScope, Project } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Modal } from './Modal';
+import { SaveTemplate } from './SaveTemplate';
 import { initials, toIcon } from './projectIcon';
 import s from '../Harbor.module.css';
 import p from './ProjectSettings.module.css';
@@ -15,7 +16,9 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
   const [name, setName] = useState(project.name);
   const [pending, setPending] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [level, setLevel] = useState<DeleteScope>('forget');
+  const [templating, setTemplating] = useState(false);
+  const [level, setLevel] = useState<DeleteScope | 'permanent'>('forget');   // 'permanent' = the folder level without the Recycle Bin (second typed confirmation)
+  const [typedAgain, setTypedAgain] = useState('');
   const [preview, setPreview] = useState<DeletePreview>();
   const [typed, setTyped] = useState('');
   const [leftover, setLeftover] = useState<string[]>();
@@ -38,33 +41,36 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
     setPending(true);
     void state.renameProject(project.id, trimmed, 'project').then(ok => { if (ok) dismiss(); }).finally(() => setPending(false));
   };
-  const needsName = level === 'folder' || (level === 'worktrees' && !!preview?.needsTypedName.worktrees);
-  const blocked = level === 'folder' && !!preview?.blockers.length;
-  const nameOk = !needsName || typed === project.name;
+  const isFolder = level === 'folder' || level === 'permanent';
+  const bin = !!preview?.recycleBin;   // without a Recycle Bin (or before the preview arrives) the folder level can only delete for good
+  const needsName = isFolder || (level === 'worktrees' && !!preview?.needsTypedName.worktrees);
+  const blocked = isFolder && !!preview?.blockers.length;
+  const nameOk = (!needsName || typed === project.name) && (level !== 'permanent' || typedAgain === project.name);
   const remove = () => {
     setPending(true);
     if (level === 'forget') { void state.removeProject(project.id, 'project').then(ok => { if (ok) dismiss(); }).finally(() => setPending(false)); return; }
-    void state.deleteProject(project.id, level, needsName ? typed : undefined, 'project').then(r => {
+    void state.deleteProject(project.id, isFolder ? 'folder' : level as DeleteScope, needsName ? typed : undefined, 'project', level === 'permanent' ? { permanent: true, confirmPermanent: typedAgain } : undefined).then(r => {
       if (!r) return;
       if (r.removed.records) dismiss(); else setLeftover(r.warnings);
     }).finally(() => setPending(false));
   };
-  const actionLabel = level === 'forget' ? 'Remove project' : level === 'worktrees' ? 'Delete worktrees and branches' : 'Delete folder and project';
+  const actionLabel = level === 'forget' ? 'Remove project' : level === 'worktrees' ? 'Delete worktrees and branches' : level === 'folder' && bin ? 'Move folder to Recycle Bin and remove project' : 'Delete folder and project';
 
   return <Modal title="Project settings" close={dismiss} dismissible={!pending}>
-    {confirming ? <div className={p.confirm}>
+    {templating ? <SaveTemplate state={state} project={project} back={() => setTemplating(false)} done={dismiss}/> : confirming ? <div className={p.confirm}>
       <p><strong>Remove “{project.name}” from Harbor?</strong></p>
       <p className={s.muted}>Its conversations and agent records are deleted and running work is stopped. By default the folder, its files and git branches stay on disk. This cannot be undone.</p>
       {canLevels ? <fieldset className={`${l.choices} ${level !== 'forget' ? l.danger : ''}`} disabled={pending}><legend>What else should go?</legend>
-        <label className={`${l.choice} ${level === 'forget' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'forget'} onChange={() => setLevel('forget')}/>Remove from Harbor only<small>Your folder, files, branches and worktrees stay where they are.</small></label>
-        <label className={`${l.choice} ${level === 'worktrees' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'worktrees'} onChange={() => setLevel('worktrees')}/>Also remove Harbor’s worktrees and branches{preview ? ` (${preview.worktrees.length + preview.branches.length})` : ''}<small>Deletes the working copies and harbor/* branches Harbor made. Your own branches and the folder stay.</small></label>
-        <label className={`${l.choice} ${level === 'folder' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'folder'} onChange={() => setLevel('folder')}/>Also delete the folder{preview ? ` (${size(preview.folder.sizeBytes)}, ${preview.path})` : ''}<small>Permanently deletes every file in the project folder. GitHub is not touched.</small></label>
+        <label className={`${l.choice} ${level === 'forget' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'forget'} onChange={() => { setLevel('forget'); setTypedAgain(''); }}/>Remove from Harbor only<small>Your folder, files, branches and worktrees stay where they are.</small></label>
+        <label className={`${l.choice} ${level === 'worktrees' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'worktrees'} onChange={() => { setLevel('worktrees'); setTypedAgain(''); }}/>Also remove Harbor’s worktrees and branches{preview ? ` (${preview.worktrees.length + preview.branches.length})` : ''}<small>Deletes the working copies and harbor/* branches Harbor made. Your own branches and the folder stay.</small></label>
+        <label className={`${l.choice} ${level === 'folder' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'folder'} onChange={() => { setLevel('folder'); setTypedAgain(''); }}/>{bin ? 'Also move the folder to the Recycle Bin' : 'Also delete the folder'}{preview ? ` (${size(preview.folder.sizeBytes)}, ${preview.path})` : ''}<small>{bin ? 'You can restore it from the Recycle Bin. Harbor’s branches stay inside the folder. GitHub is not touched.' : 'Permanently deletes every file in the project folder. GitHub is not touched.'}</small></label>
+        {bin ? <label className={`${l.choice} ${level === 'permanent' ? l.choiceOn : ''}`}><input type="radio" name="delete-level" checked={level === 'permanent'} onChange={() => setLevel('permanent')}/>Delete the folder permanently<small>Skips the Recycle Bin: every file is deleted for good and cannot be restored. GitHub is not touched.</small></label> : null}
       </fieldset> : null}
       {level !== 'forget' && preview ? <div className={`${l.alert} ${l.alertWarn}`} aria-label="What will be deleted">
         {preview.running ? <p>{plural(preview.running, 'running session')} will be stopped.</p> : null}
         {preview.worktrees.length ? <><p className={l.strong}>{plural(preview.worktrees.length, 'worktree')}</p><ul className={l.list}>{preview.worktrees.map(w => <li key={w.path}><code>{w.branch ?? w.path}</code>{w.dirty ? ' · uncommitted changes' : ''}{w.unmergedCommits ? ` · ${plural(w.unmergedCommits, 'commit')} not merged` : ''}</li>)}</ul></> : <p>No Harbor worktrees.</p>}
         {preview.branches.length ? <><p className={l.strong}>{plural(preview.branches.length, 'harbor branch')}</p><ul className={l.list}>{preview.branches.map(b => <li key={b.name}><code>{b.name}</code>{b.merged ? ' · merged' : ' · not merged'}{b.unpushed ? ` · ${plural(b.unpushed, 'commit')} not on any remote` : ''}</li>)}</ul></> : null}
-        {level === 'folder' ? <>
+        {isFolder ? <>
           {preview.folder.dirty ? <p>The folder has uncommitted changes that will be lost.</p> : null}
           {preview.folder.unpushedCommits ? <p>{plural(preview.folder.unpushedCommits, 'commit')} exist nowhere else: no remote has {preview.folder.unpushedCommits === 1 ? 'it' : 'them'}.</p> : null}
           {!preview.folder.hasRemote ? <p>This project has no remote, so nothing is backed up on GitHub.</p> : null}
@@ -73,10 +79,11 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
       </div> : null}
       {blocked ? <p className={s.error} role="alert">{preview!.blockers.join(' ')}</p> : null}
       {needsName ? <label className={l.field}>Type “{project.name}” to confirm<input value={typed} autoComplete="off" disabled={pending} onChange={e => setTyped(e.target.value)}/></label> : null}
+      {level === 'permanent' ? <label className={l.field}>Type “{project.name}” again to delete it permanently<input value={typedAgain} autoComplete="off" disabled={pending} onChange={e => setTypedAgain(e.target.value)}/></label> : null}
       {failure ? <p className={s.error} role="alert">{failure}</p> : null}
       {leftover?.length ? <ul className={l.warnings} aria-label="Left behind">{leftover.map(w => <li key={w}>{w}</li>)}</ul> : null}
       <div className={s.actions}>
-        <button disabled={pending} onClick={() => { setConfirming(false); setLevel('forget'); setTyped(''); setLeftover(undefined); state.clearError('project'); }}>Keep project</button>
+        <button disabled={pending} onClick={() => { setConfirming(false); setLevel('forget'); setTyped(''); setTypedAgain(''); setLeftover(undefined); state.clearError('project'); }}>Keep project</button>
         <button className={p.danger} disabled={pending || !nameOk || blocked} onClick={remove}>{pending ? 'Removing…' : actionLabel}</button>
       </div>
     </div> : <>
@@ -97,6 +104,10 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
           <button type="submit" className={s.primary} disabled={pending || !trimmed || !dirty}>{pending ? 'Saving…' : 'Save name'}</button>
         </div>
       </form>
+      {state.api.saveProjectAsTemplate && state.api.previewTemplate ? <section className={p.danger_zone} aria-labelledby="project-template" style={{ borderColor: 'var(--line)' }}>
+        <div><h3 id="project-template">Use as a template</h3><p className={s.muted}>Copies the tracked files so new projects can start from this one.</p></div>
+        <button type="button" onClick={() => setTemplating(true)}>Save as template…</button>
+      </section> : null}
       <section className={p.danger_zone} aria-labelledby="project-danger">
         <div><h3 id="project-danger">Remove from Harbor</h3><p className={s.muted}>Forgets this project and its conversations. Your files stay where they are.</p></div>
         <button type="button" className={p.dangerOutline} onClick={() => setConfirming(true)}>Remove…</button>

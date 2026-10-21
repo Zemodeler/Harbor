@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync, rmSync, rmdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { DeletePreview, DeleteResult, DeleteScope, Project } from '../shared/api';
+import type { DeleteOptions, DeletePreview, DeleteResult, DeleteScope, Project } from '../shared/api';
 import { isInside, type Git } from './git';
 import { projectPathRefusal } from './projectPath';
 import { normPath, type Store } from './store';
@@ -17,6 +17,8 @@ export interface DeleteDeps {
   running: (projectId: string) => number;
   /** Stops every agent and lead turn of the project. */
   stopAll: (projectId: string) => void;
+  /** Moves one folder to the Windows Recycle Bin (Electron's shell.trashItem, injected so this module never imports electron). Absent = no Recycle Bin here. */
+  trash?: (path: string) => Promise<void>;
   /** Delete one path recursively; injectable so a Windows file lock can be simulated. */
   rm?: (path: string) => void;
   sleep?: (ms: number) => Promise<void>;
@@ -104,7 +106,7 @@ export async function previewDelete(project: Project, d: DeleteDeps): Promise<De
     if (other.id !== project.id && (normPath(other.path) === normPath(project.path) || isInside(other.path, project.path))) { blockers.push(`Another project (${other.name}) uses this folder or lives inside it.`); break; }
   }
   const unmergedBranch = branches.some((b) => !b.merged || b.unpushed > 0), loses = worktrees.some((w) => w.dirty || w.unmergedCommits > 0);
-  return { projectId: project.id, path: project.path, running: d.running(project.id), worktrees, branches, folder, blockers, needsTypedName: { worktrees: loses || unmergedBranch, folder: true } };
+  return { projectId: project.id, path: project.path, running: d.running(project.id), worktrees, branches, folder, blockers, needsTypedName: { worktrees: loses || unmergedBranch, folder: true }, recycleBin: !!d.trash };
 }
 
 /** Delete a folder tree: links first (never followed), then a recursive remove retried against Windows file locks. */
@@ -120,7 +122,7 @@ async function removeFolder(path: string, d: DeleteDeps): Promise<boolean> {
   return !existsSync(path);
 }
 
-export async function deleteProject(project: Project, scope: DeleteScope, confirmName: string | undefined, d: DeleteDeps): Promise<DeleteResult> {
+export async function deleteProject(project: Project, scope: DeleteScope, confirmName: string | undefined, d: DeleteDeps, opts?: DeleteOptions): Promise<DeleteResult> {
   const warnings: string[] = [];
   const removed: DeleteResult['removed'] = { records: false, worktrees: 0, branches: 0, folder: false };
   if (scope === 'forget') {
@@ -131,9 +133,13 @@ export async function deleteProject(project: Project, scope: DeleteScope, confir
   }
   const preview = await previewDelete(project, d);
   const typed = confirmName === project.name;
+  const permanent = opts?.permanent === true;
+  const trashing = scope === 'folder' && !permanent;
   if (scope === 'folder') {
     if (preview.blockers.length) throw new Error(`The folder cannot be deleted: ${preview.blockers[0]}`);
     if (!typed) throw new Error('Type the project name to confirm deleting its folder.');
+    if (permanent && opts?.confirmPermanent !== project.name) throw new Error('Type the project name again to delete the folder permanently. It cannot be undone and skips the Recycle Bin.');
+    if (!permanent && !d.trash) throw new Error('The Recycle Bin is not available here. Choose permanent delete instead (it cannot be undone).');
   } else if (preview.needsTypedName.worktrees && !typed) {
     throw new Error('Some worktrees or branches hold work that exists nowhere else. Type the project name to confirm removing them.');
   }
@@ -146,7 +152,8 @@ export async function deleteProject(project: Project, scope: DeleteScope, confir
   }
   if (isRepo) {
     await d.git.pruneWorktrees(repo);
-    for (const b of await d.git.harborBranches(repo)) {
+    // A folder going to the Recycle Bin keeps its branches: restoring it brings the work back whole.
+    if (!trashing) for (const b of await d.git.harborBranches(repo)) {
       try { if (await d.git.deleteBranch(repo, b.name, { force: !b.merged })) removed.branches++; } catch (e) { warnings.push(`Kept branch ${b.name}: ${e instanceof Error ? e.message : String(e)}`); }
     }
   }
@@ -155,7 +162,13 @@ export async function deleteProject(project: Project, scope: DeleteScope, confir
   if (scope === 'folder' && existsSync(repo)) {
     // Checked again right before deleting: the stored path must still be a real folder, never a link to somewhere else.
     try { if (lstatSync(repo).isSymbolicLink()) throw new Error('x'); } catch { throw new Error('The project folder is now a link to another folder; nothing was deleted.'); }
-    if (await removeFolder(repo, d)) removed.folder = true;
+    if (trashing) {
+      try { await d.trash!(repo); } catch (e) {
+        throw new Error(`The folder could not be moved to the Recycle Bin: ${e instanceof Error ? e.message : String(e)}. Harbor's worktrees were already removed and the project is still listed. To delete the folder permanently instead, choose permanent delete.`);
+      }
+      if (existsSync(repo)) throw new Error('The folder is still there after moving it to the Recycle Bin. It may be in use; close anything using it and try again. The project is still listed.');
+      removed.folder = true; removed.trashed = true;
+    } else if (await removeFolder(repo, d)) removed.folder = true;
     else {
       warnings.push(`Some files in ${repo} are still in use (an editor, a terminal or a sync tool may hold them). Close them and delete the project again; it stays in the list until then.`);
       return { removed, warnings };

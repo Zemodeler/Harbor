@@ -205,7 +205,7 @@ describe('deleting a project', () => {
     await expect(service.deleteProject(r.project.id, 'folder')).rejects.toThrow(/Type the project name/);
     await expect(service.deleteProject(r.project.id, 'folder', 'busy')).rejects.toThrow(/Type the project name/);
     expect(existsSync(r.path)).toBe(true);
-    const out = await service.deleteProject(r.project.id, 'folder', 'Busy');
+    const out = await service.deleteProject(r.project.id, 'folder', 'Busy', { permanent: true, confirmPermanent: 'Busy' });
     expect(out.removed).toMatchObject({ records: true, folder: true, worktrees: 1 });
     expect(existsSync(r.path)).toBe(false);
     expect(existsSync(wt.path)).toBe(false);
@@ -217,7 +217,7 @@ describe('deleting a project', () => {
     const outside = temp('harbor-outside-'); writeFileSync(join(outside, 'precious.txt'), 'do not delete');
     mkdirSync(join(outside, 'deep')); writeFileSync(join(outside, 'deep', 'also.txt'), 'nor this');
     symlinkSync(outside, join(r.path, 'node_modules'), 'junction');
-    await service.deleteProject(r.project.id, 'folder', 'Linked');
+    await service.deleteProject(r.project.id, 'folder', 'Linked', { permanent: true, confirmPermanent: 'Linked' });
     expect(existsSync(r.path)).toBe(false);
     expect(readFileSync(join(outside, 'precious.txt'), 'utf8')).toBe('do not delete');
     expect(readFileSync(join(outside, 'deep', 'also.txt'), 'utf8')).toBe('nor this');
@@ -242,12 +242,12 @@ describe('deleting a project', () => {
     const deps = { git: new Git(), store: service.store, worktreesRoot, projectsDir: temp('harbor-p-'), protectedRoots: [dataDir], running: () => 0, stopAll: () => {}, sleep: async () => {} };
     let tries = 0;
     const lockTwice = (p: string) => { if (++tries < 3) throw Object.assign(new Error('busy'), { code: 'EBUSY' }); rmSync(p, { recursive: true, force: true }); };
-    const done = await deleteProjectImpl(r.project, 'folder', 'Locked', { ...deps, rm: lockTwice });
+    const done = await deleteProjectImpl(r.project, 'folder', 'Locked', { ...deps, rm: lockTwice }, { permanent: true, confirmPermanent: 'Locked' });
     expect(done.removed.folder).toBe(true);
     expect(tries).toBe(3);
 
     const r2 = await service.createProject({ name: 'Stuck' });
-    const stuck = await deleteProjectImpl(r2.project, 'folder', 'Stuck', { ...deps, rm: () => { throw Object.assign(new Error('busy'), { code: 'EPERM' }); } });
+    const stuck = await deleteProjectImpl(r2.project, 'folder', 'Stuck', { ...deps, rm: () => { throw Object.assign(new Error('busy'), { code: 'EPERM' }); } }, { permanent: true, confirmPermanent: 'Stuck' });
     expect(stuck.removed).toMatchObject({ folder: false, records: false });
     expect(stuck.warnings.join(' ')).toMatch(/still in use/);
     expect((await service.listProjects()).map((p) => p.id)).toEqual([r2.project.id]); // still listed, retryable
