@@ -174,7 +174,7 @@ describe('Auto mode confirmation focus', () => {
     const setMode = vi.fn(async () => undefined);
     render(<ModePicker conversation={{ id: 'c', projectId: 'p', title: 't', updated: 0, agentId: 'a' }} setMode={setMode}/>);
     await userEvent.click(screen.getByRole('radio', { name: 'Auto' }));
-    expect(screen.getByRole('button', { name: 'Enable Auto mode' })).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
     await userEvent.keyboard('{Escape}');
     expect(screen.queryByRole('group', { name: 'Confirm Auto mode' })).not.toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Auto' })).toHaveFocus();
