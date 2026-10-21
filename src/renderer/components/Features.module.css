@@ -51,3 +51,8 @@
 
 .fxMore > summary { font-size: var(--fs-xs); color: var(--muted); font-weight: 600; margin-bottom: var(--sp-1); }
 .fxMore[open] > summary { color: var(--ink); }
+
+/* Ready to apply and rollback preview dialogs */
+.fxBeforeAfter { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px; font-size: 13px; }
+.fxSummary { margin: 0; font-size: 15px; font-weight: 600; }
+.fxFiles > summary { cursor: pointer; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
