@@ -63,7 +63,7 @@ A change is done only when `npm test`, `npm run typecheck` and `npm run build` p
 ## Safety rules (non-negotiable)
 
 - Never commit secrets, tokens, or `.env` files. Never read or print credentials; sign-in is always the CLI's own flow.
-- Never run destructive git commands (`reset --hard`, `clean`, `push --force`, `branch -D`, `worktree remove`) except on worktrees/branches Harbor created (`harbor/*` under Harbor's worktrees root). `Git.removeWorktree` enforces this; keep it that way.
+- Destructive git commands (`reset --hard`, `clean`, `push --force`, `branch -D`, `worktree remove`) follow Claude Code's rules: Harbor does not deny them, the user is asked first (owner decision, 2026-10-21). Run them only on worktrees/branches Harbor created (`harbor/*` under Harbor's worktrees root) unless the user said otherwise. Harbor's own cleanup (`Git.removeWorktree`) still refuses anything outside that root; keep it that way.
 - Do not push to `main`. Work on your assigned branch (`harbor/<task>` for Harbor subagents) and report; the owner merges.
 - Only touch files you own or that your assignment names. If you must edit something else, stop and ask for help.
 

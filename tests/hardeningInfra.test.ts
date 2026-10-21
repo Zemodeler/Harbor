@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { GIT_DESTRUCTIVE_DENY, HELPER_BASH_ALLOW, claudeArgs, claudeDenyRules, isGitDestructive } from '../src/main/adapters/claude';
+import { HELPER_BASH_ALLOW, claudeArgs } from '../src/main/adapters/claude';
+import { isGitDestructive } from '../src/main/gitRisk';
 import { CodexAdapter, codexArgs, codexErrorMessage, parseCodexLine } from '../src/main/adapters/codex';
 import { MAX_PARTIAL_LINE, streamLines } from '../src/main/adapters/stream';
 import type { RunOptions } from '../src/main/adapters/types';
@@ -378,24 +379,16 @@ describe('B5 store', () => {
 });
 
 describe('B6 claude helper safety', () => {
-  it('helpers get the narrowed allowlist and the destructive git deny set; the lead keeps its broad allowlist', () => {
+  it('helpers get the narrowed allowlist; the lead gets a wider one; no git command is denied outright (git asks like Claude Code)', () => {
     const helper = claudeArgs(base);
     expect(helper).toContain('Bash(git status *)');
     expect(helper).toContain('Bash(npm test *)');
     for (const broad of ['Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)']) expect(helper).not.toContain(broad);
-    const denies = helper.slice(helper.indexOf('--disallowedTools'));
-    for (const rule of ['Bash(git clean *)', 'Bash(git restore *)', 'Bash(git checkout -- *)', 'Bash(git branch -D *)', 'Bash(git update-ref *)', 'Bash(git worktree *)',
-      'Bash(git stash drop *)', 'Bash(git stash clear *)', 'Bash(git config *)', 'Bash(git remote *)', 'Bash(git push --force *)', 'Bash(git push -f *)', 'Bash(git -C *)']) expect(denies, rule).toContain(rule);
-    expect(denies).not.toContain('Bash(git push *)');
-    expect(denies).not.toContain('Bash(git merge *)'); // integrator helpers merge inside their worktree
-    const lead = claudeArgs({ ...base, denyGitWrites: true });
-    expect(lead).toContain('Bash(git *)');
-    expect(lead).toContain('Bash(git reset *)');
-    expect(lead).not.toContain('Bash(git merge *)'); // leads may land branches themselves
-    expect(lead).toContain('Bash(git clean *)');
-    expect(claudeArgs({ ...base, permission: 'read-only' })).not.toContain('Bash(git clean *)');
-    expect(claudeDenyRules({ ...base, permission: 'read-only' })).toEqual([]);
-    expect(GIT_DESTRUCTIVE_DENY.length).toBeGreaterThan(20);
+    expect(helper.slice(helper.indexOf('--disallowedTools'))).toEqual(['--disallowedTools', 'Task', 'Agent']);
+    const lead = claudeArgs({ ...base, leadAllowlist: true });
+    for (const ok of ['Bash(git merge *)', 'Bash(git rebase *)', 'Bash(git cherry-pick *)', 'Bash(git push)', 'Bash(npm *)', 'Bash(node *)']) expect(lead, ok).toContain(ok);
+    for (const asks of ['Bash(git *)', 'Bash(git reset *)', 'Bash(git clean *)', 'Bash(git push *)', 'Bash(git branch *)']) expect(lead, asks).not.toContain(asks);
+    expect(lead.slice(lead.indexOf('--disallowedTools'))).toEqual(['--disallowedTools', 'Task', 'Agent']);
     expect(HELPER_BASH_ALLOW).toContain('Bash(git commit *)');
   });
   it('project test commands and writable dirs are opt-in extras', () => {

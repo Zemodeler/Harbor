@@ -15,8 +15,8 @@ export interface RunOptions {
   images?: string[];
   /** Extra system-level instructions (role contract). Appended, never replaces CLI defaults. */
   systemPrompt?: string;
-  /** Lead runs: forbid git merge/rebase/cherry-pick/reset/push where the CLI can enforce it (the integrator lands branches). */
-  denyGitWrites?: boolean;
+  /** Lead runs: the wider auto-allowed command set (merge, rebase, cherry-pick, a bare push, npm/npx/node). Everything else still asks. */
+  leadAllowlist?: boolean;
   /**
    * Extra directories the run may write to besides its cwd (e.g. the worktree's git metadata dir under the main repo's .git,
    * without which `git add/commit` fails inside a sandboxed worktree). Codex: sandbox_workspace_write.writable_roots; Claude: --add-dir.
@@ -30,6 +30,8 @@ export interface RunOptions {
   readableDirs?: string[];
   /** Extra Bash command prefixes a Claude edit run may run unasked (the project's own test commands, e.g. `pnpm test`). */
   allowedCommands?: string[];
+  /** Command prefixes the user's project permissions file forbids. Claude gets them as deny rules; Harbor's tool handler refuses them for every CLI. */
+  deniedCommands?: string[];
   /**
    * Asked before the CLI runs a tool outside its allowlist (`edit` runs only; deny rules are applied first).
    * `signal` aborts when the CLI cancels the request or the run stops. Without it, such tools are denied silently as before.

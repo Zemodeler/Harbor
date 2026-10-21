@@ -1,3 +1,4 @@
+import { loadSharedChoices } from './shared';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -177,16 +178,21 @@ export class SkillManager {
     return this.roots(project).flatMap((r) => this.scanRoot(r.root, r.source, r.prefix, r.depth));
   }
 
-  private withChoice(s: Scanned[], projectId?: Id): Skill[] {
+  /**
+   * Order of precedence for one skill in one project: the user's own choice for the project (the app), then the project's shared
+   * `.harbor/extensions.json`, then the user's global choice, then the source default.
+   */
+  private withChoice(s: Scanned[], projectId?: Id, projectPath?: string): Skill[] {
     const prefs = this.o.state.skillPrefs();
+    const shared = projectPath ? loadSharedChoices(projectPath) : {};
     return s.map(({ skill }) => {
       const def = prefs.global[skill.id] ?? DEFAULT_ON[skill.source];
-      const chosen = projectId ? prefs.projects[projectId]?.[skill.id] ?? def : def;
+      const chosen = projectId ? prefs.projects[projectId]?.[skill.id] ?? shared[skill.id] ?? def : def;
       return { ...skill, defaultEnabled: def, enabled: chosen && !skill.problems?.length };
     });
   }
 
-  list(project?: { id: Id; path: string }): Skill[] { return this.withChoice(this.scanAll(project), project?.id); }
+  list(project?: { id: Id; path: string }): Skill[] { return this.withChoice(this.scanAll(project), project?.id, project?.path); }
 
   private find(skillId: string, project?: { id: Id; path: string }): Scanned {
     const s = this.scanAll(project).find((x) => x.skill.id === skillId);
@@ -196,7 +202,7 @@ export class SkillManager {
 
   read(skillId: string, project?: { id: Id; path: string }): SkillDetail {
     const s = this.find(skillId, project);
-    const [skill] = this.withChoice([s], project?.id);
+    const [skill] = this.withChoice([s], project?.id, project?.path);
     const w = walk(skill!.path, 1000);
     const fileList: SkillFile[] = w.files.sort((a, b) => a.path.localeCompare(b.path)).map((f) => ({ path: f.path, bytes: f.bytes, ...(isScriptPath(f.path) ? { script: true } : {}) }));
     let currentHash: string | undefined;
@@ -244,7 +250,7 @@ export class SkillManager {
     const cached = this.runCache.get(key);
     const scanned = cached && this.now() - cached.at < 3000 ? cached.skills : this.scanAll(project);
     if (!cached || cached.skills !== scanned) this.runCache.set(key, { at: this.now(), skills: scanned });
-    const enabled = new Set(this.withChoice(scanned, project.id).filter((s) => s.enabled).map((s) => s.id));
+    const enabled = new Set(this.withChoice(scanned, project.id, project.path).filter((s) => s.enabled).map((s) => s.id));
     const usable = scanned.filter((s) => enabled.has(s.skill.id));
     if (!usable.length) return undefined;
     // A project skill (or Claude project skill) also present in the run's own checkout (a worktree of a commit that has it) is used from there.

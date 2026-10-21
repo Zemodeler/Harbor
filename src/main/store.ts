@@ -281,6 +281,7 @@ export class Store {
     this.state.agents = this.state.agents.filter((a) => a.projectId !== id);
     this.state.locks = this.state.locks.filter((l) => l.projectId !== id);
     if (this.state.toolRules?.[id]) { const { [id]: _gone, ...rest } = this.state.toolRules; this.state.toolRules = rest; }
+    if (this.state.permissionsApproved?.[id]) { const { [id]: _g, ...rest } = this.state.permissionsApproved; this.state.permissionsApproved = rest; }
     if (this.state.checksApproved?.[id]) { const { [id]: _gone, ...rest } = this.state.checksApproved; this.state.checksApproved = rest; }
     if (this.state.skills?.projects?.[id]) { const { [id]: _gone, ...rest } = this.state.skills.projects; this.state.skills = { ...this.state.skills, projects: rest }; }
     if (this.state.notes?.[id]) { const { [id]: _gone, ...rest } = this.state.notes; this.state.notes = rest; }
@@ -550,6 +551,11 @@ export class Store {
     this.flush();
   }
 
+  getPermissionsApproval(projectId: Id): string | undefined { return this.state.permissionsApproved?.[projectId]; }
+  setPermissionsApproval(projectId: Id, hash: string): void {
+    this.state.permissionsApproved = { ...(this.state.permissionsApproved ?? {}), [projectId]: hash };
+    this.flush();
+  }
   getChecksApproval(projectId: Id): string | undefined { return this.state.checksApproved?.[projectId]; }
   setChecksApproval(projectId: Id, hash: string): void {
     this.state.checksApproved = { ...(this.state.checksApproved ?? {}), [projectId]: hash };

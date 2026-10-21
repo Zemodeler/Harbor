@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isGitDestructive } from '../src/main/adapters/claude';
+import { isGitDestructive } from '../src/main/gitRisk';
 import { isInside } from '../src/main/git';
 import { newProtocolNonce, nonceInstruction, parseProtocol } from '../src/main/prompts';
 

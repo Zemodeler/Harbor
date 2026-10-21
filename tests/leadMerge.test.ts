@@ -56,21 +56,21 @@ it('lets the lead merge a harbor/* branch into the project without a warning or 
   expect(svc.orchestrator.journal.list(project.id).filter((e) => e.text.includes('Lead merged'))).toHaveLength(0);
 });
 
-it('asks the adapter to deny git writes on lead runs only', async () => {
+it('marks lead runs for the wider allowlist', async () => {
   const { seen } = await setup(() => {});
   expect(seen.length).toBeGreaterThan(0);
-  expect(seen.every((o) => o.denyGitWrites === true)).toBe(true);
+  expect(seen.every((o) => o.leadAllowlist === true)).toBe(true);
 });
 
-it('claude denies git reset on lead runs only, and never merge, rebase, cherry-pick or plain push', () => {
+it('claude lets leads merge, rebase, cherry-pick and push bare, and denies no git command', () => {
   const base: RunOptions = { cwd: '.', model: 'sonnet', effort: 'medium', permission: 'edit' };
-  const on = claudeArgs({ ...base, denyGitWrites: true }).join('|');
-  expect(on).toContain('Bash(git reset *)');
-  for (const c of ['merge', 'rebase', 'cherry-pick']) expect(on).not.toContain(`Bash(git ${c} *)`);
+  const on = claudeArgs({ ...base, leadAllowlist: true }).join('|');
+  for (const c of ['merge', 'rebase', 'cherry-pick']) expect(on).toContain(`Bash(git ${c} *)`);
+  expect(on).toContain('Bash(git push)');
   expect(on).not.toContain('Bash(git push *)');
-  expect(on).toContain('Bash(git push --force *)');
-  expect(on).toMatch(/--disallowedTools\|Task\|Agent\|Bash\(git reset \*\)/);
-  expect(claudeArgs(base).join('|')).not.toContain('Bash(git reset *)'); // helpers only get the destructive `git reset --hard`
+  expect(on).not.toContain('Bash(git reset');
+  expect(on).toMatch(/--disallowedTools\|Task\|Agent$/);
+  expect(claudeArgs(base).join('|')).not.toContain('Bash(git merge');
 });
 
 it('claude gets a settings file that switches off the Co-Authored-By trailer', () => {
@@ -81,8 +81,8 @@ it('claude gets a settings file that switches off the Co-Authored-By trailer', (
   expect(claudeArgs(base)).not.toContain('--settings');
 });
 
-it('tells the lead it may merge itself, but never reset, and still offers the integrator', () => {
-  expect(LEAD_SYSTEM).toMatch(/Never reset or force-push/);
+it('tells the lead it may merge itself, to ask before resetting, and still offers the integrator', () => {
+  expect(LEAD_SYSTEM).toMatch(/Ask the user before you reset, force-push/);
   expect(LEAD_SYSTEM).toMatch(/Merging into the project's branch is allowed/);
   expect(LEAD_SYSTEM).toContain('"role":"integrator"');
   expect(LEAD_SYSTEM).not.toMatch(/merge finished harbor/);

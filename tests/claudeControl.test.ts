@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
-  ClaudeAdapter, GIT_DESTRUCTIVE_DENY, HELPER_BASH_ALLOW, claudeArgs, controlError, controlResponse, isGitWrite, parseControlCancel, parseControlRequest, userMessageLine
+  ClaudeAdapter, HELPER_BASH_ALLOW, claudeArgs, controlError, controlResponse, parseControlCancel, parseControlRequest, userMessageLine
 } from '../src/main/adapters/claude';
 import { streamLines } from '../src/main/adapters/stream';
 import type { Chunk, RunOptions, ToolPermissionDecision, ToolPermissionRequest } from '../src/main/adapters/types';
@@ -45,13 +45,6 @@ describe('control protocol helpers', () => {
       { type: 'control_response', response: { subtype: 'success', request_id: 'r1', response: { behavior: 'deny', message: 'no' } } });
     expect(JSON.parse(controlError('r2', 'bad'))).toEqual({ type: 'control_response', response: { subtype: 'error', request_id: 'r2', error: 'bad' } });
   });
-  it('recognises git writes in Bash commands only', () => {
-    for (const c of ['git reset HEAD~1', 'git -C ../x reset --hard', 'cd x && git reset --hard'])
-      expect(isGitWrite('Bash', { command: c })).toBe(true);
-    for (const c of ['git status', 'git merge-base a b', 'git log --grep=reset', 'npm push', 'git push origin main', 'git merge harbor/x', 'git rebase main', 'git cherry-pick abc'])
-      expect(isGitWrite('Bash', { command: c })).toBe(false);
-    expect(isGitWrite('Write', { command: 'git reset x' })).toBe(false);
-  });
 });
 
 describe('controlled-mode args', () => {
@@ -63,18 +56,16 @@ describe('controlled-mode args', () => {
       expect(plain).not.toContain('--permission-prompt-tool');
       if (p !== 'edit') expect(claudeArgs({ ...base, permission: p, ...h }, 'sp.txt')).toEqual(plain);
     }
-    // Helper runs: narrowed allowlist plus the destructive-git deny set on every edit run.
+    // Helper runs: the narrowed allowlist; only the native agent tools are denied.
     expect(claudeArgs(base)).toEqual(['-p', '--output-format', 'stream-json', '--verbose', '--model', 'sonnet', '--effort', 'medium',
       '--permission-mode', 'acceptEdits', '--allowedTools', ...HELPER_BASH_ALLOW,
-      '--disallowedTools', 'Task', 'Agent', ...GIT_DESTRUCTIVE_DENY]);
+      '--disallowedTools', 'Task', 'Agent']);
   });
-  it('edit + handler adds stream-json input and keeps the deny rules', () => {
-    const a = claudeArgs({ ...base, ...h, denyGitWrites: true });
+  it('edit + handler adds stream-json input and keeps the allowlist', () => {
+    const a = claudeArgs({ ...base, ...h, leadAllowlist: true });
     expect(a.slice(-4)).toEqual(['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio']);
-    expect(a).toContain('Bash(git reset *)');
-    expect(a).not.toContain('Bash(git merge *)');
-    expect(a).not.toContain('Bash(git push *)');
-    expect(a.slice(0, -4)).toEqual(claudeArgs({ ...base, denyGitWrites: true }));
+    expect(a).not.toContain('Bash(git reset *)');
+    expect(a.slice(0, -4)).toEqual(claudeArgs({ ...base, leadAllowlist: true }));
   });
 });
 
@@ -139,11 +130,11 @@ describe('ClaudeAdapter controlled mode (fake CLI)', () => {
     expect(t.report!.responses[0].response).toMatchObject({ behavior: 'deny', message: expect.stringContaining('boom') });
   });
 
-  it('lead runs auto-deny git writes without asking the host', async () => {
+  it('a git command is put to the host like any other tool, even on lead runs', async () => {
     let asked = false;
-    const { report } = await run('git', { denyGitWrites: true, onToolPermission: async () => { asked = true; return { allow: true }; } });
-    expect(asked).toBe(false);
-    expect(report!.responses[0]).toMatchObject({ request_id: 'req_g', response: { behavior: 'deny' } });
+    const { report } = await run('git', { leadAllowlist: true, onToolPermission: async () => { asked = true; return { allow: true }; } });
+    expect(asked).toBe(true);
+    expect(report!.responses[0]).toMatchObject({ request_id: 'req_g', response: { behavior: 'allow' } });
   });
 
   it('unknown control subtypes get an error response', async () => {
