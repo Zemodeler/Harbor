@@ -29,7 +29,7 @@ export const STRENGTH_MIN_SCORE = 3;
  * Quota pools. A model draws from its CLI's account-wide pool (`<cli>:all`) and, when the provider caps it separately, from
  * its own pool too; `pool` names the most specific one. Phase 2 (the budget governor) keys remaining quota by these ids.
  */
-export const POOLS = { claudeAll: 'claude:all', claudeOpus: 'claude:opus', claudeFable: 'claude:fable', codexAll: 'codex:all' } as const;
+export const POOLS = { claudeAll: 'claude:all', claudeOpus: 'claude:opus', claudeFable: 'claude:fable', codexAll: 'codex:all', geminiAll: 'gemini:all' } as const;
 
 export interface CatalogEntry {
   cli: CliId;
@@ -165,6 +165,23 @@ export const DEFAULT_CATALOG: CatalogEntry[] = [
     // Kept for stored sessions and settings that name it; the explicit models above are what automatic routing picks.
     cli: 'codex', model: 'default', tier: 'standard', costWeight: 10, costPerKTok: 0.8, pool: POOLS.codexAll, autoRoute: false,
     capability: { chat: 3, code: 4, research: 3, planning: 3, review: 3, 'long-context': 2, vision: 2 }, note: "Codex's configured default model"
+  }),
+  // Gemini: NOT VERIFIED. The model ids below come from the public Gemini CLI docs as remembered; none was checked with `gemini --help`
+  // or a run (the CLI was not installed when these were added). Scores, tiers and weights are priors, to be calibrated from measured runs.
+  model({
+    cli: 'gemini', model: 'gemini-2.5-pro', tier: 'strong', costWeight: 15, costPerKTok: 1, pool: POOLS.geminiAll, contextWindow: 1_000_000,
+    capability: { chat: 3, code: 4, research: 4, planning: 4, review: 4, 'long-context': 5, vision: 4 },
+    note: 'UNVERIFIED model id. Gemini strongest tier; very long context'
+  }),
+  model({
+    cli: 'gemini', model: 'gemini-2.5-flash', tier: 'standard', costWeight: 4, costPerKTok: 0.3, pool: POOLS.geminiAll, contextWindow: 1_000_000,
+    capability: { chat: 4, code: 3, research: 3, planning: 3, review: 3, 'long-context': 4, vision: 3 },
+    note: 'UNVERIFIED model id. Fast, inexpensive all-rounder'
+  }),
+  model({
+    cli: 'gemini', model: 'gemini-2.5-flash-lite', tier: 'cheap', costWeight: 1.5, costPerKTok: 0.1, pool: POOLS.geminiAll, contextWindow: 1_000_000, autoRoute: false,
+    capability: { chat: 3, code: 2, research: 2, planning: 2, review: 2, 'long-context': 3, vision: 2 },
+    note: 'UNVERIFIED model id. Cheapest tier; used only when named'
   })
 ];
 
