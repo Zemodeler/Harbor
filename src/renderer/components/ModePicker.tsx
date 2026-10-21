@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Conversation, ConversationMode } from '../../shared/api';
 import s from '../Harbor.module.css';
-import fx from './Features.module.css';
+import { InlineConfirm } from './ui/InlineConfirm';
 
 export const modes: { id: ConversationMode; label: string; hint: string }[] = [
   { id: 'default', label: 'Default', hint: 'Normal behaviour: Harbor asks before risky actions.' },
@@ -9,6 +9,9 @@ export const modes: { id: ConversationMode; label: string; hint: string }[] = [
   { id: 'plan', label: 'Plan', hint: 'Read-only. Harbor plans first and changes nothing.' },
   { id: 'goal', label: 'Goal', hint: 'Keep working until the goal you set is reached.' }
 ];
+
+// Module-level so the ref callback runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 export function ModePicker({ conversation, disabled, setMode }: { conversation: Conversation; disabled?: boolean; setMode: (mode: ConversationMode, goal?: string) => Promise<unknown> }) {
   const mode = conversation.mode ?? 'default';
@@ -38,9 +41,9 @@ export function ModePicker({ conversation, disabled, setMode }: { conversation: 
     try { await setMode('goal', goal.trim()); setGoalOpen(false); } finally { setPending(false); }
   }
   const active = goalOpen ? 'goal' : mode;
-  const autoConfirm = confirmAuto ? <div className={fx.fxConfirm} role="group" aria-label="Confirm Auto mode" aria-describedby="auto-mode-warning" onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancelAuto(); } }}>
-    <p id="auto-mode-warning"><strong>Turn on Auto mode?</strong> Permission prompts are off for the lead and for edit helpers, so they can run tools and change files without asking you. Reviewers stay read-only.</p>
-    <div className={fx.fxRow}><button autoFocus className={fx.fxPrimary} disabled={pending} onClick={() => void enableAuto()}>Enable Auto mode</button><button disabled={pending} onClick={cancelAuto}>Cancel</button></div>
+  // Auto removes the permission prompts, so the confirm is red and Cancel (the safe choice) has focus.
+  const autoConfirm = confirmAuto ? <div ref={focusSafe} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancelAuto(); } }}>
+    <InlineConfirm label="Confirm Auto mode" confirmLabel="Enable Auto mode" pending={pending} onConfirm={() => void enableAuto()} onCancel={cancelAuto}><strong>Turn on Auto mode?</strong> Permission prompts are off for the lead and for edit helpers, so they can run tools and change files without asking you. Reviewers stay read-only.</InlineConfirm>
   </div> : null;
   return <div className={s.modePicker}>
     <div ref={group} role="radiogroup" aria-label="Conversation mode" className={s.modeGroup}>

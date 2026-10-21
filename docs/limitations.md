@@ -50,7 +50,8 @@ Also unverified:
 
 ## Surprises
 
-- **The lead edits your folder directly.** Helpers start from the committed `HEAD` and do not see uncommitted edits (Harbor warns once). Two leads of one project take turns.
+- **The lead edits your folder directly, unless another session already does.** Helpers start from the committed `HEAD` and do not see uncommitted edits (Harbor warns once). A second editing session of the same project does not wait: it works in its own worktree on a `harbor/session-*` branch, and its changes reach your branch only when you merge the session. That session does not contain your uncommitted edits, and it keeps its worktree for good, so its native CLI session stays valid. A folder without git still has two leads take turns.
+- **Merging a session runs no checks.** It scans for secrets and fast-forwards, but the project's `.harbor/checks.json` runs only for helper integrations. Session worktrees are not cleaned up automatically yet, and a session merged into your branch keeps working on the same branch afterwards. Two sessions that change the same code meet as a merge conflict at merge time, not while they work.
 - **Verification is only as good as `.harbor/checks.json`.** Reviewers cannot run tests, and a verdict covers one commit.
 - **Restarts interrupt work.** Helpers become `stopped` (with their work committed), and the lead needs a new message. Some state lives only in memory and is lost on restart: quota holds and `heldUntil` timers, front-desk exchanges, and the one-time two-leads warning.
 - **Decisions** (`HARBOR_DECISION`) are scoped to the conversation they were noted in. A new conversation does not inherit them.

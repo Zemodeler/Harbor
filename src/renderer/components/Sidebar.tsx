@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Conversation } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
-import { Modal } from './Modal';
+import { ConfirmDialog } from './ui/ConfirmDialog';
+import { Menu, type MenuItem } from './ui/Menu';
+import { Tooltip } from './ui/Tooltip';
 import { ProjectSettings } from './ProjectSettings';
 import { initials } from './projectIcon';
 import { sessionStatus } from '../session';
@@ -29,19 +31,6 @@ export function Sidebar({ state, settings, overview, add, newProject, close, sea
   const [deletePending, setDeletePending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const list = useRef<HTMLDivElement>(null);
-  // Escape or a click elsewhere closes an open conversation menu; Escape returns focus to its button.
-  useEffect(() => {
-    const open = () => [...list.current?.querySelectorAll<HTMLDetailsElement>('details[open]') ?? []];
-    const key = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      const menus = open();
-      if (!menus.length) return;
-      menus.forEach(d => { d.removeAttribute('open'); d.querySelector('summary')?.focus(); });
-    };
-    const click = (e: PointerEvent) => open().forEach(d => { if (!d.contains(e.target as Node)) d.removeAttribute('open'); });
-    document.addEventListener('keydown', key); document.addEventListener('pointerdown', click);
-    return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', click); };
-  }, []);
   const project = state.projects.find(p => p.id === state.projectId);
   const roleOf = (c: Conversation) => state.agents.find(a => a.id === c.agentId)?.role;
   // Subagent conversations are reached from the chat with the main agent, not from here.
@@ -64,15 +53,27 @@ export function Sidebar({ state, settings, overview, add, newProject, close, sea
   const runningAgent = state.agents.find(a => a.id === running?.agentId);
   const today = startOfToday();
   const groups = [{ label: 'Pinned', items: mains.filter(c => c.pinned) }, { label: 'Today', items: mains.filter(c => !c.pinned && c.updated >= today) }, { label: 'Earlier', items: mains.filter(c => !c.pinned && c.updated < today) }, ...(archivedOpen ? [{ label: 'Archived', items: archived }] : [])].filter(g => g.items.length);
+  const menuItems = (c: Conversation): MenuItem[] => {
+    const archiveBusy = ['working', 'queued', 'waiting'].includes(sessionStatus(c, state.agents, state.sending));
+    return [
+      { key: 'pin', label: c.pinned ? 'Unpin' : 'Pin conversation', onSelect: () => { void state.updateConversation(c, { pinned: !c.pinned }); } },
+      { key: 'rename', label: 'Rename', onSelect: () => rename(c) },
+      ...(editTags ? [{ key: 'tags', label: 'Edit tags', onSelect: () => editTags(c) }] : []),
+      c.archived ? { key: 'archive', label: 'Restore', onSelect: () => { void state.updateConversation(c, { archived: false }); } }
+        : { key: 'archive', label: 'Archive', disabled: archiveBusy, reason: 'Stop this session first', onSelect: () => { void state.updateConversation(c, { archived: true }); } },
+      { key: 'sep', separator: true },
+      { key: 'delete', label: 'Delete…', ariaLabel: `Delete conversation ${c.title}`, danger: true, icon: <CloseIcon size={14} aria-hidden="true"/>, disabled: isBusy(c), reason: 'Stop this session or clear its queue before deleting it', onSelect: () => setDeleting(c) },
+    ];
+  };
   return <nav aria-label="Projects and conversations" className={s.sidebar}>
     <div className={s.rail}>
       <Brand compact/>
-      {overview ? <button className={s.chip} aria-label="Projects overview" title="Projects overview" onClick={() => { overview(); }}><OverviewIcon size={19} aria-hidden="true"/></button> : null}
-      {state.projects.filter(p => !p.archived || p.id === state.projectId).map(p => <button key={p.id} className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} title={`${p.name}\n${p.path}`} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button>)}
-      <button className={s.chip} aria-label="Add project" title="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button>
-      {newProject ? <button className={s.chip} aria-label="New project" title="New project (Ctrl+Shift+N)" onClick={newProject}><TemplateIcon size={19} aria-hidden="true"/></button> : null}
+      {overview ? <Tooltip text="Projects overview" side="right"><button className={s.chip} aria-label="Projects overview" onClick={() => { overview(); }}><OverviewIcon size={19} aria-hidden="true"/></button></Tooltip> : null}
+      {state.projects.filter(p => !p.archived || p.id === state.projectId).map(p => <Tooltip key={p.id} text={`${p.name} · ${p.path}`} side="right"><button className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button></Tooltip>)}
+      <Tooltip text="Add project" side="right"><button className={s.chip} aria-label="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button></Tooltip>
+      {newProject ? <Tooltip text="New project (Ctrl+Shift+N)" side="right"><button className={s.chip} aria-label="New project" onClick={newProject}><TemplateIcon size={19} aria-hidden="true"/></button></Tooltip> : null}
       <span className={s.railSpace}/>
-      <button className={s.chip} aria-label="Open settings" title="Settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button>
+      <Tooltip text="Settings" side="right"><button className={s.chip} aria-label="Open settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button></Tooltip>
       <button className={s.mobileClose} onClick={close} aria-label="Close project menu"><CloseIcon size={18} aria-hidden="true"/></button>
     </div>
     <div className={s.panel}>
@@ -81,37 +82,30 @@ export function Sidebar({ state, settings, overview, add, newProject, close, sea
         <div className={s.projectHead}>
           <span className={s.projectAvatar} aria-hidden="true">{project.image ? <img src={project.image} alt=""/> : initials(project.name)}</span>
           <div className={s.projectHeadText}><h2 className={s.panelTitle} title={project.path}>{project.name}</h2><p className={s.panelSub}>{mains.length === 1 ? '1 conversation' : `${mains.length} conversations`}</p></div>
-          <button className={s.projectGear} aria-label="Project options" title="Project options" onClick={() => setSettingsOpen(true)}><SettingsIcon size={18} aria-hidden="true"/></button>
+          <Tooltip text="Project options" side="bottom"><button className={s.projectGear} aria-label="Project options" onClick={() => setSettingsOpen(true)}><SettingsIcon size={18} aria-hidden="true"/></button></Tooltip>
         </div>
         <button className={s.sidebarSearch} onClick={search}><SearchIcon size={16} aria-hidden="true"/> Search <kbd>Ctrl K</kbd></button>
         {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.stopConversation(running.id); }}>Stop</button></div> : null}
         <button className={s.newConversation} onClick={() => { void state.newConversation(); close(); }}>New conversation</button>
-        {state.projectLoading ? <p role="status" className={s.muted}>Loading conversations…</p> : null}
+        {state.projectLoading ? <div className={s.skeletonList} role="status"><span className={s.srOnly}>Loading conversations…</span>{[0, 1, 2].map(i => <span key={i} className={s.skeletonRow} aria-hidden="true"/>)}</div> : null}
         {projectTags.length ? <div className={n.tagFilter} role="group" aria-label="Filter by tag">{projectTags.map(({ tag, count }) => <button key={tag} aria-pressed={activeFilter === tag} title={`${count} conversation${count === 1 ? '' : 's'}`} onClick={() => setTagFilter(activeFilter === tag ? undefined : tag)}>#{tag}</button>)}</div> : null}
         <div className={s.conversationList} ref={list} onKeyDown={listKeys}>
           {groups.map(g => <div key={g.label}><p className={s.group}>{g.label}</p>
             {g.items.map(c => <div key={c.id} className={s.conversationRow}>
               <button data-conversation-link className={`${s.conversationLink} ${isActive(c) ? s.selected : ''}`} aria-current={isActive(c) ? 'page' : undefined} onClick={() => { void state.selectConversation(c); close(); }}><span className={s.conversationText}><span className={s.conversationTitle}>{c.title}</span>{c.imported ? <small className={s.muted} title={`Imported from ${c.imported.label}: read-only history`}>imported</small> : null}{sessionStatus(c, state.agents, state.sending) !== 'idle' ? <SessionStatus status={sessionStatus(c, state.agents, state.sending)}/> : null}{tagsOf(c).length ? <span className={n.tags}>{tagsOf(c).map(t => <span key={t} className={n.tag}><span className={n.visuallyHidden}>tag </span>#{t}</span>)}</span> : null}</span></button>
-              <details className={s.conversationMenu}><summary aria-label={`Options for ${c.title}`} title="Conversation options"><MoreIcon size={20} aria-hidden="true"/></summary><div className={s.conversationMenuItems}>
-                <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { pinned: !c.pinned }); }}>{c.pinned ? 'Unpin' : 'Pin conversation'}</button>
-                <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); rename(c); }}>Rename</button>
-                {editTags ? <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); editTags(c); }}>Edit tags</button> : null}
-                {c.archived ? <button onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { archived: false }); }}>Restore</button>
-                  : <button disabled={['working', 'queued', 'waiting'].includes(sessionStatus(c, state.agents, state.sending))} onClick={e => { e.currentTarget.closest('details')?.removeAttribute('open'); void state.updateConversation(c, { archived: true }); }}>Archive</button>}
-              </div></details>
-              <button className={s.deleteConversation} aria-label={`Delete conversation ${c.title}`} disabled={isBusy(c)} title={isBusy(c) ? 'Stop this session or clear its queue before deleting it' : 'Delete conversation'} onClick={() => setDeleting(c)}><CloseIcon size={14} aria-hidden="true"/></button>
+              <Menu className={s.conversationMenu} triggerClassName={s.conversationMenuButton} label={`Options for ${c.title}`} title="Conversation options" trigger={<MoreIcon size={20} aria-hidden="true"/>} items={menuItems(c)}/>
             </div>)}
           </div>)}
           {activeFilter && !groups.length ? <p className={s.panelSub}>No conversation has #{activeFilter}.</p> : null}
         </div>
         {setArchivedOpen && archived.length ? <button className={n.archivedToggle} aria-expanded={!!archivedOpen} onClick={() => setArchivedOpen(!archivedOpen)}>{archivedOpen ? 'Hide archived' : `Show archived (${archived.length})`}</button> : null}
       </> : !state.loading ? <p className={s.muted}>Your projects will appear here.</p> : null}
-      {deleting ? <Modal title="Delete conversation?" close={() => { setDeleting(undefined); state.clearError('delete'); }} dismissible={!deletePending}>
+      {deleting ? <ConfirmDialog title="Delete conversation?" tone="danger" cancelLabel="Keep conversation" confirmLabel="Delete" pendingLabel="Deleting…" pending={deletePending} disabled={isBusy(deleting)} error={state.areaErrors.delete}
+        onCancel={() => { setDeleting(undefined); state.clearError('delete'); }}
+        onConfirm={() => { const c = deleting; setDeletePending(true); void state.deleteConversation(c, 'delete').then(ok => { if (ok) { forget?.(c.id); setDeleting(undefined); } }).finally(() => setDeletePending(false)); }}>
         <p>Delete “{deleting.title}”? Its messages will be removed. This cannot be undone.</p>
         {(queuedFor?.(deleting.id) ?? 0) > 0 ? <p className={s.muted}>It has queued follow-ups; clear them first.</p> : null}
-        {state.areaErrors.delete ? <p className={s.error} role="alert">{state.areaErrors.delete}</p> : null}
-        <div className={s.actions}><button disabled={deletePending} onClick={() => { setDeleting(undefined); state.clearError('delete'); }}>Keep conversation</button><button className={s.primary} disabled={deletePending || isBusy(deleting)} onClick={() => { const c = deleting; setDeletePending(true); void state.deleteConversation(c, 'delete').then(ok => { if (ok) { forget?.(c.id); setDeleting(undefined); } }).finally(() => setDeletePending(false)); }}>{deletePending ? 'Deleting…' : 'Delete'}</button></div>
-      </Modal> : null}
+      </ConfirmDialog> : null}
       {project && settingsOpen ? <ProjectSettings state={state} project={project} close={() => setSettingsOpen(false)}/> : null}
       <div className={s.panelFoot}><button className={s.historyButton} onClick={history}>Conversation history</button><small>Local workspace{document.documentElement.dataset.demo ? ' · Demo' : ''}</small></div>
     </div>

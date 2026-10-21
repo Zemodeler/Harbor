@@ -2,6 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import type { CliDryRun, CliFeatures, CliStatus, CliTemplate, CustomCliDescriptor, HarborApi } from '../../shared/api';
 import { errorText } from '../hooks/useAgentActions';
 import s from './Features.module.css';
+import { InlineConfirm } from './ui/InlineConfirm';
+
+// The safe choice (Cancel, first in the group) takes focus when a destructive confirm opens. Module-level so it runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 const FEATURE_LABELS: Array<[keyof CliFeatures, string]> = [
   ['resume', 'resume sessions'], ['images', 'images'], ['readOnly', 'read-only mode'], ['structuredOutput', 'structured output'],
@@ -129,8 +133,7 @@ export function CustomCliActions({ api, cli, descriptor, disabled, onEdit, onRem
       {descriptor ? <button disabled={disabled || busy} onClick={onEdit}>Edit or approve again</button> : null}
       {api.removeCustomCli ? <button disabled={disabled || busy} onClick={() => setConfirm(true)}>Remove</button> : null}
     </div>
-    {confirm ? <div className={s.fxConfirm} role="group" aria-label={`Remove ${cli.name}`}><p>Remove {cli.name}? Harbor stops routing work to it. The program itself is not touched.</p>
-      <div className={s.fxRow}><button className={s.fxPrimary} disabled={busy} onClick={() => void remove()}>Remove {cli.name}</button><button disabled={busy} onClick={() => setConfirm(false)}>Keep it</button></div></div> : null}
+    {confirm ? <div ref={focusSafe}><InlineConfirm label={`Remove ${cli.name}`} confirmLabel={`Remove ${cli.name}`} cancelLabel="Keep it" pending={busy} onConfirm={() => void remove()} onCancel={() => setConfirm(false)}>Remove {cli.name}? Harbor stops routing work to it. The program itself is not touched.</InlineConfirm></div> : null}
     {error ? <p className={s.fxError} role="alert">{error}</p> : null}
   </>;
 }

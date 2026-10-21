@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity, SpendStatus } from '../shared/api';
+import type { Agent, AgentRole, AgentState, Attachment, CliId, Conversation, ConversationMode, HarborEvent, Id, IntegrationSource, Message, PendingPermission, Project, SessionActivity, SessionMergeResult, SpendStatus } from '../shared/api';
 import type { Chunk, CliAdapter, Effort, ToolPermissionDecision, ToolPermissionRequest } from './adapters/types';
 import { DEFAULT_CATALOG, autoRoutable, entryFor, type CatalogEntry, type Need, type Tier } from './clis/capabilities';
 import type { TaskSize } from './calibration';
@@ -186,6 +186,9 @@ const SPAWN_FAILURE_RE = /\bENOENT\b|\bEACCES\b|\bEPERM\b|spawn .*(?:failed|erro
  * A tool call waiting for the user's answer. In memory only: a restart ends the run that asked. The deadline is a wall-clock
  * time, not a timer's promise: after the machine slept the timer may have stalled, so `rearm` starts it again for what is left.
  */
+/** A session that edits in its own worktree: the branch, the worktree folder, and where the lead starts (the project's subfolder inside it, when the project is one). */
+interface SessionWork { branch: string; worktree: string; cwd: string }
+
 interface ToolAsk { agentId: Id; projectId: Id; conversationId: Id; run: number; tool: string; rule?: ToolRuleDraft; noRules?: boolean; event: PendingPermission; deadline: number; settle(d: ToolPermissionDecision): void; rearm(): void }
 
 const MAX_SNAPSHOTS = 5;
@@ -1091,18 +1094,27 @@ ${attachedFilesNote(others)}` : text, conversationId);
       this.leadQuestion.delete(conversationId);
       // Whatever the front desk guessed, the lead edits and reads code: it is never left with only "chat".
       plan = { ...plan, needs: withCodeNeed(plan.needs) };
-      this.warnTwoLeads(project, conversationId);
+      // A session that already has its own worktree keeps working in it: its native session lives in that folder.
+      let work = await this.sessionWork(project, conversationId);
       // One lead turn per project edits the folder at a time; plan-mode leads are read-only and never wait.
       // A plain question ("what is happening in the latest run?") is read-only too: it must not sit behind a long editing session.
-      const lookOnly = trigger.kind === 'user' && this.editSlots.get(projectId)?.holder !== undefined && isReadOnlyQuestion(trigger.text);
+      const lookOnly = !work && trigger.kind === 'user' && this.editSlots.get(projectId)?.holder !== undefined && isReadOnlyQuestion(trigger.text);
       if (lookOnly) this.addNote(conversationId, 'Another session of this project is editing the folder right now. This turn is only a question: read and report, and do not edit, commit or run anything that changes files. If the user wants changes, say so and ask them to send that as a separate request.');
       const edits = (this.d.store.getConversation(conversationId)?.mode ?? 'default') !== 'plan' && !lookOnly;
-      const release = edits ? await this.acquireEditSlot(projectId, conversationId, ctl.signal) : undefined;
+      // Instead of queueing behind the session that edits the project folder, an editing session moves into its own git worktree
+      // (git projects only; without git there is nothing to branch from and it waits as before).
+      if (!work && edits && this.editSlots.get(projectId)?.holder !== undefined) work = await this.openSessionWorkspace(project, conversationId);
+      if (!work) this.warnTwoLeads(project, conversationId);
+      const release = edits && !work ? await this.acquireEditSlot(projectId, conversationId, ctl.signal) : undefined;
       try {
         if (ctl.signal.aborted) return;
         this.sessionState(conversationId, 'working', 'Harbor is working on this conversation.');
-        await this.leadTurn(project, main, trigger, conversationId, plan, ctl.signal, batch);
-      } finally { release?.(); }
+        await this.leadTurn(project, main, trigger, conversationId, plan, ctl.signal, batch, work);
+      } finally {
+        // The lead may not run git writes: Harbor commits its edits to the session branch, so the work is on the branch for helpers and for the merge.
+        if (work && edits) await this.commitSession(work.worktree, conversationId);
+        release?.();
+      }
     } finally {
       this.leads.delete(conversationId);
       const steered = this.steered.delete(conversationId);
@@ -1142,6 +1154,118 @@ ${attachedFilesNote(others)}` : text, conversationId);
       return false;
     }
     return true;
+  }
+
+  /** Commits whatever the lead left uncommitted in a session worktree (credential-looking files stay out), so the work is on the branch. */
+  private async commitSession(worktree: string, conversationId: Id): Promise<void> {
+    await this.d.git.checkpoint(worktree, `harbor: session ${clip(this.d.store.getConversation(conversationId)?.title ?? 'work', 60)}`).catch(() => undefined);
+  }
+
+  /** The conversation's own worktree, when it has one (re-attached when its folder was cleaned up). Undefined when it has none or the branch is gone. */
+  private async sessionWork(project: Project, conversationId: Id): Promise<SessionWork | undefined> {
+    const ws = this.d.store.getConversation(conversationId)?.workspace;
+    if (!ws) return undefined;
+    let path = ws.worktree;
+    if (!existsSync(path)) {
+      const again = await this.d.git.reuseWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), ws.branch).catch(() => undefined);
+      if (!again) return undefined;
+      path = again.path;
+      this.d.store.patchConversation(conversationId, { workspace: { ...ws, worktree: path } });
+    }
+    return { branch: ws.branch, worktree: path, cwd: await this.cwdIn(project, path) };
+  }
+
+  /**
+   * Gives a session its own worktree on a new harbor/* branch, from the project's HEAD, with the main checkout's node_modules linked.
+   * Undefined (the session waits for the folder instead) when the project is not a git repository with commits or git fails.
+   */
+  private async openSessionWorkspace(project: Project, conversationId: Id): Promise<SessionWork | undefined> {
+    const { git, store } = this.d;
+    try {
+      if (!(await this.probeRepo(project))) return undefined;
+      const title = store.getConversation(conversationId)?.title ?? 'session';
+      const wt = await git.createWorktree(project.path, this.d.worktreesRoot, project.id.slice(0, 8), `session ${title}`, conversationId);
+      const cwd = await this.cwdIn(project, wt.path);
+      const linked = await git.linkDependencies(project.path, cwd);
+      store.patchConversation(conversationId, { workspace: { branch: wt.branch, worktree: wt.path, base: wt.baseCommit } });
+      store.flush(); // a crash now must not lose the link to the branch: the next start would make a second one
+      const dirty = await git.isDirtyDetailed(project.path);
+      const target = await git.currentBranch(project.path).catch(() => undefined);
+      this.post(conversationId, 'system', `Another session is editing the project folder, so this session works in its own git worktree on ${wt.branch}${wt.baseCommit ? ` (from ${wt.baseCommit.slice(0, 7)})` : ''}. Nothing here changes the project folder until you merge the session${target ? ` into ${target}` : ''}.${dirty.dirty ? ' The project folder has uncommitted changes; this session does not contain them.' : ''}${linked ? '' : ' node_modules is not linked here: install dependencies in the worktree before running tests.'}`);
+      return { branch: wt.branch, worktree: wt.path, cwd };
+    } catch (e) {
+      this.post(conversationId, 'system', `Could not give this session its own worktree (${String((e as Error).message)}). It waits for the project folder instead.`);
+      return undefined;
+    }
+  }
+
+  /** The session whose worktree has this branch checked out (a helper integration may target it). */
+  private sessionByBranch(projectId: Id, branch: string | undefined): Conversation | undefined {
+    if (!branch) return undefined;
+    return this.d.store.listConversations(projectId).find((c) => c.workspace && this.d.git.sameBranch(c.workspace.branch, branch));
+  }
+
+  /**
+   * Where a target branch is checked out: the session's worktree for a session branch, else the project folder. Also makes the session's
+   * edits part of the branch first; refuses while its lead is still working, because uncommitted edits would race the integration.
+   */
+  private async homeOf(project: Project, branch: string | undefined): Promise<{ path: string; session?: Conversation }> {
+    const session = this.sessionByBranch(project.id, branch);
+    if (!session?.workspace || !existsSync(session.workspace.worktree)) return { path: project.path };
+    if (this.leads.has(session.id)) throw new Error(`The session "${clip(session.title, 50)}" is still working. Try again when its lead has finished its turn.`);
+    await this.d.git.checkpoint(session.workspace.worktree, `harbor: session ${clip(session.title, 60)}`).catch(() => undefined);
+    return { path: session.workspace.worktree, session };
+  }
+
+  /**
+   * Brings a worktree session's work onto the project's checked-out branch: that branch is merged into the session branch first (in the
+   * session's worktree, so a conflict never touches the user's folder), then the project branch is fast-forwarded to the result. Needs the
+   * lead idle and the project folder clean; scans the incoming change for secrets; never pushes or forces.
+   */
+  async mergeSession(conversationId: Id): Promise<SessionMergeResult> {
+    const { store, git } = this.d;
+    const conv = store.getConversation(conversationId);
+    if (!conv?.workspace) throw new Error('This session works in the project folder itself: there is nothing to merge.');
+    const project = this.project(conv.projectId);
+    const ws = conv.workspace;
+    if (this.leads.has(conversationId)) throw new Error('The lead is still working in this session. Merge when its turn has finished.');
+    if (!existsSync(ws.worktree)) throw new Error('This session\'s worktree folder is gone. Send it a message to re-attach it, then merge.');
+    await git.checkpoint(ws.worktree, `harbor: session ${clip(conv.title, 60)}`).catch(() => undefined);
+    const target = await git.currentBranch(project.path);
+    if (!target) throw new Error('The project folder has a detached HEAD. Check out the branch to merge into first.');
+    if (target.startsWith('harbor/')) throw new Error(`The project folder is on ${target}, a Harbor branch. Check out your own branch first.`);
+    const targetHead = await git.branchHead(project.path, target);
+    let head = await git.branchHead(project.path, ws.branch);
+    if (!targetHead || !head) throw new Error(`${!targetHead ? target : ws.branch} is not an existing local branch.`);
+    const done = (message: string, merged: boolean, extra: Partial<SessionMergeResult> = {}): SessionMergeResult => {
+      if (merged) store.patchConversation(conversationId, { workspace: { ...ws, mergedAt: Date.now(), mergedHead: head } });
+      this.post(conversationId, 'system', message);
+      return { merged, target, head, message, ...extra };
+    };
+    if (head === targetHead || await git.isAncestor(project.path, head, targetHead)) return done(`Nothing to merge: ${target} already contains this session's work.`, true);
+    const dirty = await git.isDirtyDetailed(project.path);
+    if (dirty.timedOut) throw new Error('git timed out while checking the project folder for uncommitted changes, so nothing was changed. Try again.');
+    if (dirty.failed) throw new Error('git could not read the status of the project folder, so nothing was changed.');
+    if (dirty.dirty) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
+    // Bring the project's branch into the session first: a conflict stays in the session's worktree and is aborted.
+    if (!(await git.isAncestor(project.path, targetHead, head))) {
+      await git.abortMerge(ws.worktree);
+      const r = await git.merge(ws.worktree, targetHead);
+      if (!r.ok) {
+        const paths = await git.unmergedPaths(ws.worktree);
+        await git.abortMerge(ws.worktree);
+        this.addNote(conversationId, `The user tried to merge this session into ${target}, but ${target} changed the same code (${paths.length ? paths.join(', ') : 'see git'}). Merge was aborted and nothing changed. Read what ${target} changed with git (diff, log: reads only) and adapt your edits to it; tell the user when you are done so they can merge again.`);
+        return done(`Merge stopped: ${target} conflicts with this session${paths.length ? ` in ${paths.join(', ')}` : ''}. Nothing was changed. Ask the lead to reconcile its work with ${target}, then merge again.`, false, { conflicts: paths });
+      }
+      head = await git.head(ws.worktree);
+      if (!head) throw new Error('git could not read the merged head.');
+    }
+    const main = this.ensureProject(project).main;
+    const scan = await this.secretGate({ ...main, parentConversationId: conversationId, title: conv.title }, ws.worktree, targetHead, head, undefined, conversationId);
+    if (scan.blocked) throw new Error(scan.blocked);
+    await git.fastForward(project.path, target, targetHead, head);
+    this.log({ kind: 'session-merge', projectId: project.id, conversationId, text: `session ${ws.branch} merged into ${target} at ${head.slice(0, 10)}` });
+    return done(`${target} fast-forwarded to ${head.slice(0, 10)}: this session's work is in your project folder. Nothing was pushed.${scan.note}`, true);
   }
 
   /**
@@ -1308,8 +1432,9 @@ ${attachedFilesNote(others)}` : text, conversationId);
   }
 
   /** The working agent: reads, edits, runs commands, and delegates through HARBOR_DELEGATE lines when that pays off. */
-  private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal, batch?: ReportBatch): Promise<void> {
+  private async leadTurn(project: Project, main: AgentRecord, trigger: LeadTrigger, conversationId: Id, plan: Escalation, signal: AbortSignal, batch?: ReportBatch, work?: SessionWork): Promise<void> {
     const notes = [...(this.notes.get(conversationId) ?? [])];
+    if (work) notes.push(`You work in this session's own git worktree on branch ${work.branch}, because another session of this project edits the project folder. Harbor commits your edits to this branch after each turn (do not run git commands that write). Other sessions cannot see your edits, and yours reach the project folder only when the user merges this session. Do not touch other directories. node_modules is linked from the main checkout: never run npm install or delete it.`);
     this.notes.delete(conversationId);
     // What the user was told by the front desk since this lead last ran: it cannot know, and would contradict or repeat it.
     const front = (this.frontDesk.get(conversationId) ?? []).slice(-2);
@@ -1322,8 +1447,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const mode = conv?.mode ?? 'default';
     const goal = mode === 'goal' ? conv?.goal : undefined;
     const goalMode = !!goal;
-    const headBefore = await this.d.git.head(project.path).catch(() => undefined);
     await this.probeRepo(project).catch(() => false);
+    const writableDirs = work && mode !== 'plan' ? await this.d.git.worktreeWritableDirs(work.worktree).catch(() => []) : [];
     const checkCmds = this.checkCommands(project);
     // Project notes this session has not seen yet (all relevant ones on its first turn); a resumed session already holds the rest.
     const allNotes = this.d.store.listProjectNotes(project.id);
@@ -1359,7 +1484,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
         ...(plan.effort ? { effort: plan.effort, fixedEffort: true } : {}), needs: plan.needs, preferCli: plan.preferCli, complexityNote: plan.note,
         // A turn with images goes only to a model the catalog says can see them; one that cannot is skipped with that reason.
         ...(trigger.kind === 'user' && trigger.images?.length ? { required: ['vision' as const] } : {}),
-        permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: project.path,
+        permission: mode === 'plan' ? 'read-only' : mode === 'auto' ? 'full' : 'edit', cwd: work?.cwd ?? project.path, ...(writableDirs.length ? { writableDirs } : {}),
         images: trigger.kind === 'user' ? trigger.images : undefined,
         ...(trigger.kind === 'user' && trigger.files?.length ? { files: trigger.files } : {}),
         ...(trigger.kind === 'screenshot' && trigger.shots?.length ? { shots: trigger.shots } : {}),
@@ -1374,7 +1499,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
     }
     // Notes count as shown only once a CLI actually took the prompt.
     if ((out.ok || out.started) && fresh.picked.length) this.notesShown.set(conversationId, new Set([...seenNotes, ...fresh.picked.map((n) => n.id)]));
-    await this.detectLeadMerge(project, main, conversationId, headBefore);
+    // Before any helper is created from this turn's delegations: they start from the session branch and must find the lead's edits on it.
+    if (work && mode !== 'plan') await this.commitSession(work.worktree, conversationId);
     if (!out.ok && out.stopped && this.steered.has(conversationId)) {
       this.post(conversationId, 'system', 'Interrupted to follow your new message.', { agentId: main.id });
       return;
@@ -1414,11 +1540,11 @@ ${attachedFilesNote(others)}` : text, conversationId);
     }
     const screened = await this.screenDelegations(project, delegations, conversationId);
     delegations = screened.kept;
-    const pin = delegations.some((t) => t.integrate) ? await this.pinTarget(project) : undefined;
+    const pin = delegations.some((t) => t.integrate) ? (work ? { checkedOut: work.branch } : await this.pinTarget(project)) : undefined;
     const created = this.createTasks(project, delegations, conversationId, trigger.kind === 'help' ? trigger.from.id : undefined, { pin, dirty: screened.dirty, held: pausedRefs });
     for (const b of proto.image) this.post(conversationId, 'assistant', imageBriefText(b), { agentId: main.id });
-    this.showImages(main, conversationId, proto.showImage, project.path, [project.path]);
-    this.openDocuments(main, conversationId, proto.openDocument, project.path, [{ kind: 'project', path: project.path }]);
+    this.showImages(main, conversationId, proto.showImage, work?.cwd ?? project.path, [project.path, ...(work ? [work.worktree] : [])]);
+    this.openDocuments(main, conversationId, proto.openDocument, work?.cwd ?? project.path, [{ kind: 'project', path: project.path }, ...(work ? [{ kind: 'project' as const, path: work.worktree }] : [])]);
     for (const p of proto.peer.slice(0, MAX_PEERS_PER_TURN)) this.deliverPeer(project.id, conversationId, p);
     const replied = new Set(proto.reply.map((r) => this.deliverReply(project.id, conversationId, r)).filter((x): x is Id => !!x));
     const started = created.filter((c) => c.state !== 'failed');
@@ -1535,7 +1661,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
    * changes and `paths` (tracked plus untracked). Tracked changes are mentioned once per state; git failing is said every time.
    */
   private async dirtyBase(project: Project, tasks: PlannedTask[], conversationId: Id): Promise<{ state?: 'dirty' | 'unknown'; paths: string[]; tracked: string[] }> {
-    if (!tasks.some((t) => t.access === 'edit' && !t.integrate) || this.repoKind.get(project.id) !== 'git') return { paths: [], tracked: [] };
+    // A session in its own worktree starts its helpers from its own branch, so the project folder's edits are none of their business.
+    if (this.d.store.getConversation(conversationId)?.workspace || !tasks.some((t) => t.access === 'edit' && !t.integrate) || this.repoKind.get(project.id) !== 'git') return { paths: [], tracked: [] };
     const r = await this.d.git.exec(project.path, STATUS_ARGS);
     if (!r.ok) {
       this.post(conversationId, 'system', 'git timed out (or failed) while checking the project folder, so Harbor cannot say whether it has uncommitted edits. Edit helpers start from the committed HEAD and would not contain them.');
@@ -1657,31 +1784,6 @@ ${attachedFilesNote(others)}` : text, conversationId);
   /** The checked-out branch now: an integrator queued without a target is pinned to it, and refuses to run once the folder is on another branch. */
   private async pinTarget(project: Project): Promise<{ checkedOut?: string }> {
     return { checkedOut: await this.d.git.currentBranch(project.path).catch(() => undefined) };
-  }
-
-  /**
-   * Backstop for the rule that only the integrator lands harbor/* branches: if a harbor/* head became reachable from the
-   * project's HEAD during the lead's turn, the lead merged (or fast-forwarded to) one itself. Works for every CLI.
-   */
-  private async detectLeadMerge(project: Project, main: AgentRecord, conversationId: Id, before: string | undefined): Promise<void> {
-    if (!before) return;
-    try {
-      const { git } = this.d;
-      const after = await git.head(project.path);
-      if (!after || after === before) return;
-      const merged: string[] = [];
-      const seen = new Set<string>();
-      for (const r of this.d.store.listAgentRecords(project.id)) {
-        if (!r.branch?.startsWith('harbor/') || seen.has(r.branch)) continue;
-        seen.add(r.branch);
-        const head = await git.branchHead(project.path, r.branch);
-        if (head && head !== before && !(await git.isAncestor(project.path, head, before)) && await git.isAncestor(project.path, head, after)) merged.push(r.branch);
-      }
-      if (!merged.length) return;
-      const list = merged.join(', ');
-      this.post(conversationId, 'system', `Warning: the lead merged ${list} into the project itself. Branches should land through an integrator helper so they are gated and applied by you. Check the project's history before building on it.`, { agentId: main.id });
-      this.log({ kind: 'protocol', projectId: project.id, conversationId, agentId: main.id, text: `Lead merged helper branch(es) itself: ${list}` });
-    } catch { /* detection must never break a lead turn */ }
   }
 
   /**
@@ -2084,7 +2186,15 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const key = project.id.slice(0, 8);
     const again = await git.reuseWorktree(project.path, worktreesRoot, key, a.branch ?? harborBranchFor(a.title, a.id));
     if (again) return a.baseCommit ? { ...again, baseCommit: a.baseCommit } : again;
-    return git.createWorktree(project.path, worktreesRoot, key, a.title, a.id);
+    // A helper of a worktree session starts from that session's branch, so it sees the lead's work. The lead's own uncommitted edits are
+    // committed first unless its turn is running right now (Harbor then takes the branch as it is).
+    const ws = this.d.store.getConversation(a.parentConversationId)?.workspace;
+    let from: string | undefined;
+    if (ws && existsSync(ws.worktree)) {
+      if (!this.leads.has(a.parentConversationId)) await git.checkpoint(ws.worktree, `harbor: session (before "${clip(a.title, 40)}")`).catch(() => undefined);
+      from = await git.branchHead(project.path, ws.branch);
+    }
+    return git.createWorktree(project.path, worktreesRoot, key, a.title, a.id, from);
   }
 
   private async runAgent(a: AgentRecord): Promise<void> {
@@ -2448,20 +2558,21 @@ ${attachedFilesNote(others)}` : text, conversationId);
    * scan completely, or a scan that failed) blocks it unless the user says yes to exactly these findings on this commit (a `permission`
    * event; no answer is a no). A yes is remembered per project, so re-running or applying the same head does not ask again.
    */
-  private async secretGate(a: AgentRecord, cwd: string, base: string, head: string, signal?: AbortSignal): Promise<{ blocked?: string; note: string }> {
+  private async secretGate(a: AgentRecord, cwd: string, base: string, head: string, signal?: AbortSignal, convId?: Id): Promise<{ blocked?: string; note: string }> {
     const h = head.slice(0, 10);
+    const conv = convId ?? this.convFor(a);
     const rec = await this.secretScan(a, cwd, base, head);
     a.secretScan = rec;
     if (rec.failed) return { blocked: `Harbor could not run its secret scan on ${h} (git failed), so the integration is not cleared. Run it again.`, note: '' };
     if (!rec.total && !rec.truncated) return { note: `\n\nSecret scan (Harbor) on ${h}: nothing found${rec.allowed ? ` (${rec.allowed} allowlisted)` : ''}.` };
     const summary = [rec.total ? `${rec.total} possible secret${rec.total === 1 ? '' : 's'}: ${describeFindings(rec.findings, rec.total)}` : '', rec.truncated ? 'the change is too large to scan completely' : ''].filter(Boolean).join('; ');
     const fp = `${findingsFingerprint(head, rec.findings)}${rec.truncated ? ':partial' : ''}`;
-    const journal = (text: string) => this.log({ kind: 'secret-scan', projectId: a.projectId, conversationId: a.parentConversationId, agentId: a.id, text: `integration ${h}: ${text}` });
+    const journal = (text: string) => this.log({ kind: 'secret-scan', projectId: a.projectId, conversationId: convId ?? a.parentConversationId, agentId: a.id, text: `integration ${h}: ${text}` });
     const allowedNote = `\n\nSecret scan (Harbor) on ${h}: ${summary}. You allowed integrating these (values not shown).`;
     if (this.d.store.hasSecretOverride(a.projectId, fp)) { rec.overridden = true; journal('allowed earlier by the user'); return { note: allowedNote }; }
     journal(`${describeFindings(rec.findings, rec.total, 5)}${rec.truncated ? ' (partial scan)' : ''}; asked the user`);
     const prompt = `Harbor's secret scan found ${summary} in what "${a.title}" would integrate (head ${h}). Values are not shown. Integrate anyway? Yes allows exactly these findings on this commit; anything new asks again. No blocks the integration: remove them (or add the paths to the project's secret allowlist) and run it again.`;
-    const d = await this.askTool(a, this.convFor(a), ++this.runSeq, { tool: SECRET_TOOL, input: {} }, signal ?? new AbortController().signal, { noRules: true, prompt });
+    const d = await this.askTool(a, conv, ++this.runSeq, { tool: SECRET_TOOL, input: {} }, signal ?? new AbortController().signal, { noRules: true, prompt });
     if (d.allow) {
       this.d.store.addSecretOverride(a.projectId, fp);
       rec.overridden = true;
@@ -2812,12 +2923,15 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const refuse = (why: string) => end('failed', `Integration refused. Nothing was merged.\n${why}`, `Refused: ${why}`);
 
     if (!(await git.isRepoWithCommits(project.path))) return refuse('the project folder is not a git repository with commits.');
+    // A target that is a worktree session's branch is read from (and later applied in) that session's worktree, not the project folder.
+    let home: { path: string; session?: Conversation };
+    try { home = await this.homeOf(project, integ.target ?? a.pinnedCheckedOut); } catch (e) { return refuse(String((e as Error).message)); }
     // 1. Target (as the ref is really spelled: on Windows "Main" reaches "main") and base. A re-run keeps the base its
     // integration branch was built on while the target is still there; once the target moved it starts fresh from the new head.
-    if (a.pinnedCheckedOut && !git.sameBranch(await git.currentBranch(project.path), a.pinnedCheckedOut)) {
-      return refuse(`this integration was queued for ${a.pinnedCheckedOut}, the branch checked out when it was requested, but the project folder is now on ${(await git.currentBranch(project.path)) ?? 'a detached HEAD'}. Switch back to ${a.pinnedCheckedOut}, or queue it again with an explicit target.`);
+    if (a.pinnedCheckedOut && !git.sameBranch(await git.currentBranch(home.path), a.pinnedCheckedOut)) {
+      return refuse(`this integration was queued for ${a.pinnedCheckedOut}, the branch checked out when it was requested, but the project folder is now on ${(await git.currentBranch(home.path)) ?? 'a detached HEAD'}. Switch back to ${a.pinnedCheckedOut}, or queue it again with an explicit target.`);
     }
-    const named = integ.target ?? await git.currentBranch(project.path);
+    const named = integ.target ?? await git.currentBranch(home.path);
     if (!named) return refuse('the project folder has a detached HEAD; name a target branch.');
     const target = await git.resolveBranch(project.path, named);
     if (!target) return refuse(`"${named}" is not an existing local branch.`);
@@ -2940,6 +3054,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
         : 'Only a finished rollback with every merge reverted and its checks passing can be applied.');
     }
     const project = this.project(a.projectId);
+    const home = await this.homeOf(project, job.target); // a session branch is applied inside its session's worktree
     // The ref's real spelling: on Windows a target stored as "Main" would otherwise move the checked-out "main" behind its index.
     const target = await git.resolveBranch(project.path, job.target);
     const current = target && await git.branchHead(project.path, target);
@@ -2952,18 +3067,18 @@ ${attachedFilesNote(others)}` : text, conversationId);
           ? 'Run the integration again: it rebuilds on the new head of the target.'
           : 'Start a new rollback of the task: this one was built on the old head.'}`);
       }
-      const dirty = await git.isDirtyDetailed(project.path);
+      const dirty = await git.isDirtyDetailed(home.path);
       if (dirty.timedOut) throw new Error('git timed out while checking the project folder for uncommitted changes, so nothing was changed. Try again.');
       if (dirty.failed) throw new Error('git could not read the status of the project folder, so nothing was changed.');
       if (dirty.dirty) throw new Error('The project folder has uncommitted changes. Commit or stash them first; Harbor does not overwrite your work.');
-      if (a.integration) await this.secretsCleared(a, project.path, base, head);
-      if (!git.sameBranch(await git.currentBranch(project.path), target)) {
+      if (a.integration) await this.secretsCleared(a, home.path, base, head);
+      if (!git.sameBranch(await git.currentBranch(home.path), target)) {
         const elsewhere = await git.worktreeOf(project.path, target);
         if (elsewhere) throw new Error(`${target} is checked out in ${elsewhere}. Apply from there or switch the project folder to ${target}.`);
       }
       // The awaits above leave room for a re-run to start: check again right before the write. The compare-and-swap
       // (update-ref with the expected old value, or the HEAD check before an ff-only merge) is the final authority.
-      await git.fastForward(project.path, target, base, head, () => {
+      await git.fastForward(home.path, target, base, head, () => {
         if (this.running.has(a.id) || a.state !== 'done' || job.head !== head || job.base !== base) throw new Error(`This ${kind} started running again; nothing was changed.`);
       });
     }

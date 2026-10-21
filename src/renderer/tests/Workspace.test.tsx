@@ -46,7 +46,7 @@ describe('Workspace quality of life', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Polish the checkout' }));
     await screen.findByRole('heading', { name: 'Polish the checkout' });
     await userEvent.click(screen.getByLabelText('Options for Polish the checkout'));
-    await userEvent.click(screen.getAllByRole('button', { name: 'Archive', hidden: true }).find(b => b.closest('details')?.open)!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Archive' }));
     await waitFor(() => expect(within(screen.getByRole('navigation')).queryByRole('button', { name: 'Polish the checkout' })).not.toBeInTheDocument());
     await userEvent.click(screen.getByRole('button', { name: 'Conversation history' }));
     const history = await screen.findByRole('dialog', { name: 'Conversation history' });    await userEvent.click(within(history).getByRole('option', { name: /Polish the checkout Storefront · Archived/ }));

@@ -26,11 +26,12 @@ import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
  * documented Claude Code option. --add-dir (images, worktree git metadata, skill folders) is listed by `claude --help` of 2.1.295
  * ("Additional directories to allow tool access to"); a real run reading a skill through it was not made.
  *
- * Git-write deny rules (`denyGitWrites`, lead runs): `Bash(git merge *)` etc. appended to the variadic --disallowedTools list.
+ * Git-write deny rules (`denyGitWrites`, lead runs): `Bash(git reset *)` appended to the variadic --disallowedTools list. Leads may merge,
+ * rebase and cherry-pick themselves (the owner asked for it on 2026-10-17); resets and the destructive commands stay denied.
  * NOT VERIFIED here (`claude` could not be run in the session that added this): the exact `Bash(prefix *)` rule syntax,
  * and that a deny rule wins over the `Bash(git *)` allow rule. Claude Code's permission docs state deny rules are evaluated
  * first and take precedence over allow rules, but that was not confirmed against the installed CLI. Also not covered:
- * `git -C x merge`, aliases, or merging through a shell wrapper; the post-turn check in orchestrator.ts is the backstop.
+ * `git -C x reset`, aliases, or resetting through a shell wrapper (`git -C` is denied for every edit run).
  * In `full` (bypassPermissions) mode deny rules still apply in Claude Code (also unconfirmed).
  *
  * Controlled mode (`onToolPermission` set and permission `edit`; everything else is unchanged): the run adds
@@ -44,7 +45,7 @@ import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
  * `{subtype:'success',request_id,response:{behavior:'allow',updatedInput}|{behavior:'deny',message}}` and the error shape
  * `{subtype:'error',request_id,error}`; the user turn line `{type:'user',message:{role:'user',content}}`; that a cancelled
  * request needs no reply; and that --disallowedTools deny rules are evaluated before the host is asked. Because of the
- * last one, lead runs (`denyGitWrites`) also auto-deny git merge/rebase/cherry-pick/reset/push here, without asking.
+ * last one, lead runs (`denyGitWrites`) also auto-deny git reset here, without asking.
  *
  * MCP (`mcp`, mcp/materialize.ts): Harbor's servers go in a per-run `--mcp-config <file>` (deleted in `finally`), and
  * `--strict-mcp-config` keeps Claude Code's own MCP configuration (user and project config, plugins, connectors) out of the run
@@ -57,7 +58,7 @@ const bashRules = (prefixes: string[]): string[] => prefixes.flatMap((p) => [`Ba
 
 /**
  * Denied on EVERY edit run (helpers and leads): commands that destroy work, rewrite refs, escape the worktree or touch
- * configuration. Merge/rebase/cherry-pick are not here because integrator helpers legitimately merge inside their worktree;
+ * configuration. Merge/rebase/cherry-pick are not here: integrator helpers merge inside their worktree and leads may land branches;
  * leads additionally get GIT_WRITE_DENY below. `git -C` is denied because it lets a command act on another repository.
  */
 export const GIT_DESTRUCTIVE_PREFIXES = [
@@ -83,9 +84,9 @@ export function claudeDenyRules(o: RunOptions): string[] {
 }
 
 // Plain `git push` is allowed for leads (the user asked for it); force and delete pushes stay in GIT_DESTRUCTIVE_PREFIXES.
-const GIT_WRITE_CMDS = ['merge', 'rebase', 'cherry-pick', 'reset'];
+const GIT_WRITE_CMDS = ['reset'];
 const GIT_WRITE_DENY = GIT_WRITE_CMDS.map((c) => `Bash(git ${c} *)`);
-// Broader than the deny rules on purpose (`git -C x merge`, `cd x && git push`): a false deny is cheap, a merge is not.
+// Broader than the deny rules on purpose (`cd x && git reset`): a false deny is cheap, a lost change is not.
 const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join('|')})(?![\\w-])`, 'i');
 
 /** Whether this run answers permission prompts through the host instead of silently denying. */
@@ -297,7 +298,7 @@ class PermissionChannel {
 
   private async ask(id: string, p: ToolPermissionRequest): Promise<void> {
     if (this.o.denyGitWrites && isGitWrite(p.tool, p.input)) {
-      this.send(controlResponse(id, { allow: false, message: 'Lead runs never merge, rebase, cherry-pick, reset or push; the integrator lands branches.' }, p.input));
+      this.send(controlResponse(id, { allow: false, message: 'Lead runs never reset. Merge, rebase and cherry-pick are allowed; use git revert to undo a commit.' }, p.input));
       return;
     }
     if (isGitDestructive(p.tool, p.input)) {

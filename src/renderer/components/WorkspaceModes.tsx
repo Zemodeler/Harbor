@@ -6,6 +6,7 @@ import { sessionStatus } from '../session';
 import { SessionStatus } from './SessionStatus';
 import { SessionPanel } from './SessionPanel';
 import { HelperDetails } from './HelperDetails';
+import { MergeSessionAction } from './IntegrationPanel';
 import { CloseIcon, PanelIcon, PlusIcon, ToolIcon } from './Icons';
 import s from '../Harbor.module.css';
 
@@ -45,7 +46,7 @@ export function LiveActivity({ state, close, review }: { state: HarborState; clo
   const latest = state.messages.filter(m => m.details).at(-1);
   const cli = c?.activity?.cli || latest?.details?.cli || owner?.cli;
   const recent = state.messages.filter(m => m.role === 'tool').slice(-4).reverse();
-  const helper = (a: typeof crew[number]) => <div className={s.activityAgent} key={a.id}><button onClick={() => void state.openAgent(a.id)}><strong>{a.title}</strong><small>{a.role} / {a.cli}</small></button><SessionStatus status={a.state}/>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button className={s.activityStop} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c?.id))}>Stop agent</button> : null}<HelperDetails state={state} agent={a}/></div>;
+  const helper = (a: typeof crew[number]) => <div className={s.activityAgent} key={a.id}><button onClick={() => void state.openAgent(a.id)}><strong>{a.title}</strong><small>{a.role} / {a.cli}</small></button><SessionStatus status={a.state}/>{a.summary ? <p>{a.summary}</p> : null}{['working', 'queued', 'waiting'].includes(a.state) ? <button className={`${s.activityStop} ${s.quiet}`} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c?.id))}>Stop agent</button> : null}<details className={s.verification} open><summary>Results and verification</summary><HelperDetails state={state} agent={a}/></details></div>;
   if (details) return <SessionPanel state={state} close={() => setDetails(false)}/>;
   return <>
     <div className={s.panelHeading}><h2>Live activity</h2><button className={s.iconButton} aria-label="Close live activity" onClick={close}><CloseIcon size={18} aria-hidden="true"/></button></div>
@@ -57,6 +58,7 @@ export function LiveActivity({ state, close, review }: { state: HarborState; clo
       {pastCrew.length ? <details className={s.pastAgents}><summary>Past helpers <span>{pastCrew.length}</span></summary>{pastCrew.map(helper)}</details> : null}
       <h3 className={s.activitySectionTitle}>Recent tool activity</h3>
       {recent.length ? <ol className={s.recentActivity}>{recent.map(m => <li key={m.id}><ToolIcon size={15} aria-hidden="true"/><span>{m.text.split('\n')[0] || 'Tool activity'}<time dateTime={new Date(m.time).toISOString()}>{new Date(m.time).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</time></span></li>)}</ol> : <p className={s.muted}>Tool activity appears when an agent uses a tool.</p>}
+      <MergeSessionAction key={c.id} api={state.api} conversation={c} working={['working', 'queued'].includes(sessionStatus(c, state.agents, state.sending))}/>
       <div className={s.activityActions}><button onClick={review}>Review current changes</button><button onClick={() => setDetails(true)}>Execution details</button></div>
     </>}
   </>;

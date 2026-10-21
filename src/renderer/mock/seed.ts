@@ -17,7 +17,7 @@ export function seed(empty = false) {
   ];
   const conversations: Conversation[] = empty ? [] : [
     { id: 'account', projectId: 'store', title: 'Build the account page', updated: now, agentId: 'main-store' },
-    { id: 'checkout', projectId: 'store', title: 'Polish the checkout', updated: now - 3600000, agentId: 'main-store' },
+    { id: 'checkout', projectId: 'store', title: 'Polish the checkout', updated: now - 3600000, agentId: 'main-store', workspace: { branch: 'harbor/session-polish-the-checkout-4d5e6f', worktree: 'C:\Harbor\worktrees\store\session-polish-the-checkout-4d5e6f', base: C_HEAD } },
     { id: 'search', projectId: 'store', title: 'Explore product search', updated: now - 7200000, agentId: 'main-store' }
   ];
   const agents: Agent[] = projects.map(p => ({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' }));
