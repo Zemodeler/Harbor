@@ -36,6 +36,7 @@ import { GitHub } from './github';
 import { cleanupWorktrees as cleanupWorktreesImpl, listHarborWorktrees } from './housekeeping';
 import { cloneProjectFolder, createProjectFolder, type CreatedFolder } from './projectCreate';
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
+import { TemplateLibrary, blockReason, collectTemplateFiles, previewOf, suggestedChecks } from './templateLibrary';
 import { buildOverview, globalUsage, searchAll as searchAllImpl } from './overview';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
@@ -52,7 +53,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -520,7 +521,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
   const gh = opts.github ?? new GitHub();
   const projectsDir = () => store.getSettings().projectsDir ?? opts.defaultProjectsDir ?? join(homedir(), 'Documents', 'Harbor Projects');
-  const createDeps = () => ({ git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p: string) => !!store.findProjectByPath(p) });
+  const templates = new TemplateLibrary(join(dataRoot, 'templates'), clock);
+  const createDeps = () => ({ git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p: string) => !!store.findProjectByPath(p), templates });
   const repoCache = new Map<string, { at: number; repos: GithubRepo[] }>();
   const REPO_CACHE_MS = 5 * 60_000;
   /** Registers a folder createProjectFolder or cloneProjectFolder made; on failure removes exactly what that call made. Optionally starts a first conversation. */
@@ -758,6 +760,22 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!next || next.length > 120) throw new Error('A project name needs 1 to 120 characters.');
       return store.upsertProject({ ...p, name: next });
     },
+    async listTemplates() { return templates.list(); },
+    async previewTemplate(projectId) {
+      const p = needProject(projectId);
+      return previewOf(p.id, await collectTemplateFiles(p.path, git, effectiveSettings(store.getSettings(), p.id).secretAllowlist), suggestedChecks(p.path));
+    },
+    async saveProjectAsTemplate(projectId, draft) {
+      const p = needProject(projectId);
+      if (!draft || typeof draft !== 'object') throw new Error('Name the template.');
+      // Scanned again here: the preview is only a convenience and is never trusted.
+      const c = await collectTemplateFiles(p.path, git, effectiveSettings(store.getSettings(), p.id).secretAllowlist);
+      const why = blockReason(c);
+      if (why) throw new Error(why);
+      return templates.save(draft, c.files, c.bytes, p.name);
+    },
+    async updateTemplate(id, patch) { return templates.update(String(id), patch); },
+    async deleteTemplate(id) { templates.remove(String(id)); },
     async setProjectFlags(id, patch) {
       const p = needProject(id);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Choose what to change.');
