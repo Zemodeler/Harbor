@@ -1,0 +1,6 @@
+{"harborTranscript":1,"cli":"codex","source":"recorded","scenario":"npm run smoke: resume","cliVersion":"0.163.0-alpha.10.2","captured":"2026-10-21","expect":{"done":{"ok":true},"kinds":["session","text","usage","done"]}}
+{"o":"{\"type\":\"thread.started\",\"thread_id\":\"01a15bcd-27f7-7222-808c-c7bfbd1ed87c\"}"}
+{"o":"{\"type\":\"turn.started\"}"}
+{"o":"{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"HARBOR_SMOKE_OK\"}}"}
+{"o":"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":39110,\"cached_input_tokens\":32768,\"cache_write_input_tokens\":0,\"output_tokens\":20,\"reasoning_output_tokens\":0}}"}
+{"exit":0}

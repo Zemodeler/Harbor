@@ -3743,6 +3743,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
       // The first reading the CLI prints during the run: a fresh "before" for calibration when the last one Harbor saw is old.
       let firstLimits: Extract<Chunk, { kind: 'limits' }>['limits'] | undefined;
       let streamId: Id | undefined;
+      /** Token deltas of the message being written: what has been shown so far, so the whole message that follows only adds what is missing. */
+      let live: { raw: string; emitted: string } | undefined;
       let parsed = 0, exitedClean = false; // parsed = chunks of real output (text, tool calls, usage); a bare session id is not output
       const details = detailsOf(decision);
       if (o.complexityNote) details.reason = `${details.reason}\n• ${o.complexityNote}`;
@@ -3805,7 +3807,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(o.stream && !o.lean ? { partial: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.
@@ -3813,10 +3815,39 @@ ${attachedFilesNote(others)}` : text, conversationId);
           // Mid-run usage rides along with messages already counted; only a final report counts as output of its own.
           if (c.kind === 'text' || c.kind === 'tool' || (c.kind === 'usage' && !c.partial)) parsed++;
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now(), model: decision.model, effort: decision.effort });
-          else if (c.kind === 'text') {
+          else if (c.kind === 'delta') {
+            if (!o.stream) continue;
+            live ??= { raw: '', emitted: '' };
+            live.raw += c.text;
+            // Only complete lines are shown: a protocol line cut in half would otherwise flash in the transcript before the whole message strips it.
+            const complete = live.raw.slice(0, live.raw.lastIndexOf('\n') + 1);
+            const shownAll = stripProtocol(complete, { nonce: o.nonce });
+            if (!shownAll.startsWith(live.emitted) || shownAll.length === live.emitted.length) continue;
+            const add = shownAll.slice(live.emitted.length);
+            if (!streamId) streamId = this.post(o.conversationId, 'assistant', add, { agentId: agent.id, details }).id;
+            else {
+              const piece = (live.emitted ? '' : '\n\n') + add;
+              store.updateMessage(streamId, { text: store.getMessage(streamId)!.text + piece });
+              this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: piece });
+            }
+            live.emitted = shownAll;
+          } else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
             if (o.stream) {
               const shown = stripProtocol(c.text, { nonce: o.nonce }); // protocol lines are machine-readable, not transcript
+              const had = live; live = undefined;
+              if (had?.emitted && streamId && shown.startsWith(had.emitted)) {
+                // The deltas already showed the start of this message: add the rest only.
+                const rest = shown.slice(had.emitted.length);
+                if (rest) { store.updateMessage(streamId, { text: store.getMessage(streamId)!.text + rest }); this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: rest }); }
+                continue;
+              }
+              if (had?.emitted && streamId) {
+                // The whole message disagrees with what was streamed: the stored text takes the whole message (the view shows it on its next refresh).
+                const m = store.getMessage(streamId)!;
+                store.updateMessage(streamId, { text: m.text.slice(0, Math.max(0, m.text.length - had.emitted.length)) + shown });
+                continue;
+              }
               if (!shown) continue;
               if (!streamId) streamId = this.post(o.conversationId, 'assistant', shown, { agentId: agent.id, details }).id;
               else {
@@ -3825,7 +3856,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
                 this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: `\n\n${shown}` });
               }
             }
-          } else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
+          
+} else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; live = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
           else if (c.kind === 'usage') { usage.add(c); this.spendTick(); }
           else if (c.kind === 'limits') { firstLimits ??= c.limits; limits = c.limits; ledger.observe(decision.cli, c.limits); }
           else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; exitedClean = c.exitCode === 0; if (c.text) final = c.text; }

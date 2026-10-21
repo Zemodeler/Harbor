@@ -38,6 +38,8 @@ export interface RunOptions {
    */
   onToolPermission?(req: ToolPermissionRequest, signal: AbortSignal): Promise<ToolPermissionDecision>;
   signal?: AbortSignal;
+  /** Ask for token-level `delta` chunks (Claude: --include-partial-messages). Adapters without support ignore it and send whole `text` chunks only. */
+  partial?: boolean;
   /**
    * A pure question-and-answer run (the concierge): no tools, no project settings, MCP servers or skills, no saved session, and the
    * system prompt replaces the CLI's own instead of being appended to it. Claude only; other adapters ignore it.
@@ -72,6 +74,8 @@ export type ToolPermissionDecision = { allow: true } | { allow: false; message: 
 export type Chunk =
   | { kind: 'session'; id: string }
   | { kind: 'text'; text: string }
+  /** A token-level piece of the message being written (only when RunOptions.partial is set and the CLI streams them). The whole message still arrives later as a `text` chunk. */
+  | { kind: 'delta'; text: string }
   | { kind: 'tool'; text: string }
   | {
       kind: 'usage'; inputTokens?: number; outputTokens?: number; costUsd?: number;
