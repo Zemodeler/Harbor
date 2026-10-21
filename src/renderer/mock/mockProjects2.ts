@@ -1,6 +1,6 @@
-import type { Agent, Conversation, TemplatePreview, UserTemplate, GithubRepo, GlobalUsage, HarborApi, Project, ProjectOverview, SearchAllHit, SearchHit } from '../../shared/api';
+import type { Agent, Conversation, PullRequestCheck, PullRequestStatus, ReleaseTagPreview, TemplatePreview, UserTemplate, GithubRepo, GlobalUsage, HarborApi, Project, ProjectOverview, SearchAllHit, SearchHit } from '../../shared/api';
 
-type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage'>>;
+type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos' | 'getPullRequestStatus' | 'rerunFailedChecks' | 'mergePullRequest' | 'previewReleaseTag' | 'createReleaseTag' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage'>>;
 interface Data { projects: Project[]; agents: Agent[]; conversations: Conversation[] }
 
 const DEMO_DIR = 'C:\Projects\Harbor Projects';
@@ -15,6 +15,28 @@ const REPOS: GithubRepo[] = [
  */
 export function createMockProjects2(data: () => Data, pause: () => Promise<void>, settings: () => { projectsDir?: string }, search: (query: string) => Promise<SearchHit[]>): Projects2Methods {
   const copy = <T,>(v: T): T => structuredClone(v);
+  // Pull requests by branch: the sample helper branch has failing checks, fix-footer is green, conflict-demo conflicts, draft-demo is a draft, any other has none.
+  // After a re-run the check shows as running for one read, then passes.
+  const merged = new Set<string>(), restarted = new Map<string, number>();
+  const tags = ['v1.2.3', 'v1.2.2'];
+  const checksFor = (branch: string): PullRequestCheck[] => branch === 'harbor/implement-account-page-1a2b3c'
+    ? [{ name: 'build', bucket: 'pass', workflow: 'CI' }, { name: 'test', bucket: !restarted.has(branch) ? 'fail' : (restarted.get(branch) ?? 0) < 1 ? 'pending' : 'pass', workflow: 'CI', link: 'https://github.com/demo-user/storefront/actions/runs/101/job/1' }]
+    : [{ name: 'build', bucket: 'pass', workflow: 'CI' }, { name: 'test', bucket: 'pass', workflow: 'CI' }];
+  const prOf = (branch: string): PullRequestStatus | null => {
+    const known: Record<string, number> = { 'harbor/implement-account-page-1a2b3c': 12, 'harbor/fix-footer-77aa11': 13, 'harbor/conflict-demo': 14, 'harbor/draft-demo': 15 };
+    const number = known[branch];
+    if (!number) return null;
+    const items = checksFor(branch);
+    const failing = items.filter(c => c.bucket === 'fail').length, pending = items.filter(c => c.bucket === 'pending').length;
+    const state = merged.has(branch) ? 'merged' as const : 'open' as const;
+    const hard = [...(state === 'merged' ? ['The pull request is already merged.'] : []), ...(branch === 'harbor/conflict-demo' ? ['It has merge conflicts with its base branch.'] : []), ...(branch === 'harbor/draft-demo' ? ['It is a draft. Mark it ready for review on GitHub first.'] : [])];
+    const soft = [...(failing ? [`${failing} check is failing.`] : []), ...(pending ? [`${pending} check is still running.`] : [])];
+    return {
+      number, url: `https://github.com/demo-user/storefront/pull/${number}`, title: branch.replace(/^harbor\//, '').replace(/-[0-9a-f]{6}$/, '').replace(/-/g, ' '), state, draft: branch === 'harbor/draft-demo', base: 'main', head: branch,
+      mergeable: branch === 'harbor/conflict-demo' ? 'conflicting' : 'mergeable', checks: { total: items.length, passing: items.filter(c => c.bucket === 'pass').length, failing, pending, skipped: 0, items },
+      blockers: [...hard, ...soft], checksOverridable: !hard.length && soft.length > 0, canMerge: !hard.length && !soft.length, canRerun: state === 'open' && failing > 0
+    };
+  };
   let templates: UserTemplate[] = [{ id: 'web-starter-1a2b3c', name: 'Web starter', description: 'Vite and React', created: Date.parse('2026-10-10T10:00:00Z'), files: 14, bytes: 52_000, checks: ['npm test', 'npm run build'], source: 'Storefront' }];
   const checks = (c: unknown) => { const list = Array.isArray(c) ? c.map(x => String(x).trim()).filter(Boolean) : []; if (list.length > 10) throw new Error('A template can hold at most 10 default checks.'); return list; };
   return {
@@ -33,6 +55,38 @@ export function createMockProjects2(data: () => Data, pause: () => Promise<void>
       data().projects.push(p);
       data().agents.push({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' });
       return { project: copy(p), path, remote: url, warnings: repo === 'empty' ? ['The repository has no commits yet. Make a first commit before asking an agent to work on it.'] : [] };
+    },
+    async getPullRequestStatus(_projectId, branch) { await pause(); const pr = prOf(branch); if (restarted.has(branch)) restarted.set(branch, (restarted.get(branch) ?? 0) + 1); return copy(pr); },
+    async rerunFailedChecks(_projectId, branch) {
+      await pause();
+      const pr = prOf(branch);
+      if (!pr) throw new Error('This branch has no pull request.');
+      if (!pr.canRerun) throw new Error('No failed check belongs to a workflow run that can be re-run.');
+      restarted.set(branch, 0);
+      return { rerun: 1 };
+    },
+    async mergePullRequest(_projectId, o) {
+      await pause();
+      if (o.confirmNumber !== o.number) throw new Error(`Confirm by repeating the pull request number (#${o.number}).`);
+      const pr = prOf(o.branch);
+      if (!pr) throw new Error('This branch has no pull request.');
+      if (!pr.canMerge && !pr.checksOverridable) throw new Error(`Harbor will not merge #${pr.number}: ${pr.blockers.join(' ')}`);
+      if (!pr.canMerge && !o.overrideChecks) throw new Error(`#${pr.number} is not green: ${pr.blockers.join(' ')} Merging anyway needs an explicit override.`);
+      merged.add(o.branch);
+      return { merged: true, url: pr.url, message: `Merged ${pr.url}` };
+    },
+    async previewReleaseTag(projectId): Promise<ReleaseTagPreview> {
+      await pause();
+      const noRemote = projectId === 'tools';
+      return { ...(noRemote ? {} : { remote: 'origin' }), defaultBranch: 'main', head: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2', headSubject: 'Polish the checkout', headOnRemote: !noRemote, recent: [...tags].slice(0, 10), suggested: 'v1.2.4' };
+    },
+    async createReleaseTag(projectId, draft) {
+      await pause();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(draft.name) || draft.name.includes('..')) throw new Error('That tag name is not allowed (no "..", "//", trailing separators or ".lock").');
+      if (tags.includes(draft.name)) throw new Error(`The tag ${draft.name} already exists. Harbor never moves or replaces a tag.`);
+      if (draft.push && projectId === 'tools') throw new Error('This project has no remote yet, so a tag cannot be pushed. Add one first.');
+      tags.unshift(draft.name);
+      return { name: draft.name, commit: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2', pushed: draft.push === true };
     },
     async listTemplates() { await pause(); return copy(templates); },
     async previewTemplate(projectId): Promise<TemplatePreview> {

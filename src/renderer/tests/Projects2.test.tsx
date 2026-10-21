@@ -224,3 +224,98 @@ describe('B4 recycle-bin delete', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Internal tools' })).not.toBeInTheDocument());
   });
 });
+
+describe('B5 pull request status, merge and release tags', () => {
+  async function openBranch(name: RegExp | string) {
+    await ready();
+    await userEvent.click(screen.getByRole('button', { name: 'Git' }));
+    const view = await screen.findByRole('region', { name: 'Git' });
+    await userEvent.click(await within(view).findByRole('button', { name }));
+    return view;
+  }
+  const SAMPLE = /^harbor\/implement-account-page-1a2b3c/;
+
+  it('shows the pull request, its check summary and why it cannot be merged yet', async () => {
+    const view = await openBranch(SAMPLE);
+    const card = await within(view).findByRole('region', { name: 'Pull request' });
+    expect(await within(card).findByRole('link', { name: /#12 implement account page/ })).toHaveAttribute('href', 'https://github.com/demo-user/storefront/pull/12');
+    expect(within(card).getByLabelText('Check summary')).toHaveTextContent('1 passing, 1 failing, 0 running');
+    expect(within(card).getByLabelText('Why it cannot be merged')).toHaveTextContent(/1 check is failing/);
+    expect(within(card).getByRole('button', { name: 'Re-run failed checks' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Merge pull request…' })).toBeInTheDocument();
+  });
+
+  it('re-runs the failed checks and shows them go from running to passing on refresh', async () => {
+    const view = await openBranch(SAMPLE);
+    const card = await within(view).findByRole('region', { name: 'Pull request' });
+    await userEvent.click(await within(card).findByRole('button', { name: 'Re-run failed checks' }));
+    expect(await within(card).findByRole('status')).toHaveTextContent(/Restarted 1 workflow run/);
+    await userEvent.click(within(card).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(within(card).getByLabelText('Check summary')).toHaveTextContent('1 passing, 0 failing, 1 running'));
+    await userEvent.click(within(card).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(within(card).getByLabelText('Check summary')).toHaveTextContent('2 passing, 0 failing, 0 running'));
+    expect(within(card).getByText('Ready to merge.')).toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: 'Re-run failed checks' })).not.toBeInTheDocument();
+  });
+
+  it('merging names the pull request and the method, and shows the pull request as merged afterwards', async () => {
+    const view = await openBranch(SAMPLE);
+    const card = await within(view).findByRole('region', { name: 'Pull request' });
+    await userEvent.click(await within(card).findByRole('button', { name: 'Re-run failed checks' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Refresh' }));
+    await userEvent.click(within(card).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(within(card).getByText('Ready to merge.')).toBeInTheDocument());
+    await userEvent.click(within(card).getByRole('button', { name: 'Merge pull request…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Merge pull request' });
+    expect(within(dialog).getByText(/Merge #12 “implement account page” into main\?/)).toBeInTheDocument();
+    expect(within(dialog).getByRole('radio', { name: /Squash and merge/ })).toBeChecked();
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument(); // green: nothing to override
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Rebase and merge/ }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Merge #12' }));
+    expect(await within(dialog).findByRole('status')).toHaveTextContent('Merged #12 into main.');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(within(card).getByText('merged')).toBeInTheDocument());
+    expect(within(card).queryByRole('button', { name: 'Merge pull request…' })).not.toBeInTheDocument();
+  });
+
+  it('failing checks need an explicit override in the merge dialog', async () => {
+    const view = await openBranch(SAMPLE);
+    const card = await within(view).findByRole('region', { name: 'Pull request' });
+    await userEvent.click(await within(card).findByRole('button', { name: 'Merge pull request…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Merge pull request' });
+    const go = within(dialog).getByRole('button', { name: 'Merge #12' });
+    expect(go).toBeDisabled();
+    expect(within(dialog).getByText(/1 check is failing/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('checkbox', { name: /Merge anyway/ }));
+    expect(go).toBeEnabled();
+    await userEvent.click(go);
+    expect(await within(dialog).findByRole('status')).toHaveTextContent('Merged #12 into main.');
+  });
+
+  it('creates a release tag from the default branch, suggesting the next version and pushing only when asked', async () => {
+    const view = await openBranch(/^main/);
+    await userEvent.click(within(view).getByRole('button', { name: 'Release tag…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Release tag' });
+    expect(await within(dialog).findByText(/Recent tags: v1.2.3, v1.2.2/)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Tag name')).toHaveValue('v1.2.4');
+    const push = within(dialog).getByRole('checkbox', { name: /Also push this tag/ });
+    expect(push).toBeEnabled();
+    expect(push).not.toBeChecked();
+    await userEvent.click(push);
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Create tag' }));
+    expect(await within(dialog).findByRole('status')).toHaveTextContent('Created and pushed v1.2.4.');
+  });
+
+  it('refuses a bad or existing tag name and explains why', async () => {
+    const view = await openBranch(/^main/);
+    await userEvent.click(within(view).getByRole('button', { name: 'Release tag…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Release tag' });
+    const name = within(dialog).getByLabelText('Tag name');
+    await userEvent.clear(name); await userEvent.type(name, 'a..b');
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/letters, digits/);
+    expect(within(dialog).getByRole('button', { name: 'Create tag' })).toBeDisabled();
+    await userEvent.clear(name); await userEvent.type(name, 'v1.2.3');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Create tag' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/already exists.*never moves/);
+  });
+});
