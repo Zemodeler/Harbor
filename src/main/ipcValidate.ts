@@ -326,6 +326,37 @@ export function validateInvoke(method: string, args: unknown[]): void {
     case 'deleteTemplate':
       if (!isId(args[0])) bad('template id must be a short non-empty string');
       break;
+    case 'getPullRequestStatus':
+    case 'rerunFailedChecks':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      if (typeof args[1] !== 'string' || !args[1].trim() || args[1].length > 250 || args[1].startsWith('-') || CONTROL.test(args[1])) bad('branch must be a branch name');
+      break;
+    case 'mergePullRequest': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('the merge request must be an object');
+      const m = o as Record<string, unknown>;
+      if (typeof m['branch'] !== 'string' || !m['branch'].trim() || m['branch'].length > 250 || m['branch'].startsWith('-') || CONTROL.test(m['branch'])) bad('branch must be a branch name');
+      if (!Number.isInteger(m['number']) || (m['number'] as number) < 1) bad('number must be a pull request number');
+      if (!Number.isInteger(m['confirmNumber'])) bad('confirmNumber must repeat the pull request number');
+      if (m['method'] !== 'merge' && m['method'] !== 'squash' && m['method'] !== 'rebase') bad('method must be merge, squash or rebase');
+      if (m['overrideChecks'] !== undefined && typeof m['overrideChecks'] !== 'boolean') bad('overrideChecks must be true or false');
+      break;
+    }
+    case 'previewReleaseTag':
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      break;
+    case 'createReleaseTag': {
+      if (!isId(args[0])) bad('project id must be a short non-empty string');
+      const o = args[1] as Record<string, unknown> | undefined | null;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) bad('the tag must be an object');
+      const t = o as Record<string, unknown>;
+      if (typeof t['name'] !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$/.test(t['name'])) bad('name must be a plain tag name');
+      if (t['message'] !== undefined && (typeof t['message'] !== 'string' || t['message'].length > 500 || t['message'].includes('\0'))) bad('message must be text of at most 500 characters');
+      if (t['ref'] !== undefined && (typeof t['ref'] !== 'string' || !t['ref'].trim() || t['ref'].length > 250 || t['ref'].startsWith('-') || CONTROL.test(t['ref']))) bad('ref must be a branch or commit');
+      if (t['push'] !== undefined && typeof t['push'] !== 'boolean') bad('push must be true or false');
+      break;
+    }
     case 'previewDeleteProject':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       break;

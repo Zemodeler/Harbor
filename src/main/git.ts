@@ -64,6 +64,23 @@ export function pushArgs(remote: string, branch: string, o: { setUpstream?: bool
   return ['push', ...(o.setUpstream ? ['--set-upstream'] : []), ...(o.extra ?? []), '--', remote, `refs/heads/${branch}:refs/heads/${branch}`];
 }
 
+/** Why a tag name is refused, or undefined: plain letters, digits and `. _ - /`, no `..`, no leading or trailing separator, not `.lock`. */
+export function tagNameProblem(name: string): string | undefined {
+  const n = typeof name === 'string' ? name : '';
+  if (!n || n.length > 100) return 'A tag name needs 1 to 100 characters.';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(n)) return 'A tag name uses letters, digits and . _ - / only, and starts with a letter or digit.';
+  if (n.includes('..') || n.includes('//') || /[./-]$/.test(n) || n.endsWith('.lock') || n.split('/').some((p) => p.startsWith('.') || p.endsWith('.lock'))) return 'That tag name is not allowed (no "..", "//", trailing separators or ".lock").';
+  return undefined;
+}
+
+/** The `git push` argv for one tag: fully qualified source and destination, nothing else (no --tags, --force or --delete). */
+export function pushTagArgs(remote: string, tag: string): string[] {
+  if (!remote || remote.startsWith('-') || /[\s:]/.test(remote)) throw new Error('Refusing to push: the remote name is not a plain name.');
+  const problem = tagNameProblem(tag);
+  if (problem) throw new Error(`Refusing to push the tag: ${problem}`);
+  return ['push', '--', remote, `refs/tags/${tag}:refs/tags/${tag}`];
+}
+
 /** A push failure in words the owner can act on. */
 export function explainPushFailure(stderr: string): string {
   const t = stderr || '';
@@ -573,6 +590,53 @@ export class Git {
     if (r.timedOut) return { ok: false, output: 'git push timed out. Check the connection and try again.' };
     const out = `${r.stdout}\n${r.stderr}`.trim();
     return r.code === 0 ? { ok: true, output: out } : { ok: false, output: explainPushFailure(out) };
+  }
+
+  /** Local tags, newest first (at most `limit`). */
+  async tags(repo: string, limit = 20): Promise<string[]> {
+    const r = await this.git(repo, ['tag', '--list', '--sort=-creatordate', '--format=%(refname:short)']);
+    return r.code === 0 ? r.stdout.split(/\r?\n/).filter(Boolean).slice(0, limit) : [];
+  }
+
+  /** The commit a branch or commit-ish names, or undefined. The ref is validated as a plain name first. */
+  async resolveCommit(repo: string, ref: string): Promise<string | undefined> {
+    if (!ref || ref.startsWith('-') || /[\s:\0]/.test(ref) || ref.length > 250) return undefined;
+    const r = await this.git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  async commitSubject(repo: string, commit: string): Promise<string | undefined> {
+    const r = await this.git(repo, ['log', '-1', '--format=%s', commit]);
+    return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  /** Whether any remote-tracking branch contains the commit (so pushing a tag for it publishes nothing new). */
+  async isOnRemote(repo: string, commit: string): Promise<boolean> {
+    const r = await this.git(repo, ['branch', '--remotes', '--contains', commit]);
+    return r.code === 0 && r.stdout.trim().length > 0;
+  }
+
+  /** `git tag -a`: refuses an existing tag, never moves one. An identity is borrowed from Harbor when git has none. */
+  async createTag(repo: string, name: string, message: string, commit: string): Promise<{ ok: boolean; error?: string }> {
+    const problem = tagNameProblem(name);
+    if (problem) return { ok: false, error: problem };
+    if (!/^[0-9a-f]{7,64}$/i.test(commit)) return { ok: false, error: 'The commit to tag is not valid.' };
+    const exists = await this.git(repo, ['rev-parse', '--verify', '--quiet', `refs/tags/${name}`]);
+    if (exists.code === 0) return { ok: false, error: `The tag ${name} already exists. Harbor never moves or replaces a tag.` };
+    const [n, e] = await Promise.all([this.git(repo, ['config', 'user.name']), this.git(repo, ['config', 'user.email'])]);
+    const ident = !n.stdout.trim() || !e.stdout.trim() ? ['-c', 'user.name=Harbor', '-c', 'user.email=harbor@localhost'] : [];
+    const r = await this.git(repo, [...ident, 'tag', '-a', '-m', message || name, '--', name, commit]);
+    return r.code === 0 ? { ok: true } : { ok: false, error: `git tag failed: ${(r.stderr || r.stdout).trim().split(/\r?\n/)[0] ?? ''}` };
+  }
+
+  /** Push exactly one tag (pushTagArgs). Failures are mapped like branch pushes. */
+  async pushTag(repo: string, remote: string, name: string): Promise<{ ok: boolean; output: string }> {
+    const r = await this.git(repo, pushTagArgs(remote, name), LONG_GIT_TIMEOUT_MS);
+    if (r.timedOut) return { ok: false, output: 'git push timed out. Check the connection and try again.' };
+    const out = `${r.stdout}\n${r.stderr}`.trim();
+    if (r.code === 0) return { ok: true, output: out };
+    if (/already exists|rejected|stale info/i.test(out)) return { ok: false, output: `The remote already has a tag named ${name}. Harbor never replaces a tag.` };
+    return { ok: false, output: explainPushFailure(out) };
   }
 
   /**
