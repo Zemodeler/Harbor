@@ -1,3 +1,4 @@
+import { OVERLAY_OPENED } from './ui/overlayEvents';
 import { useEffect, useRef } from 'react';
 import type { ToastState } from '../hooks/useToasts';
 import { visibleToasts, toastLive, toastRole, type ToastKind } from '../toasts';
@@ -21,6 +22,16 @@ export function Toasts({ toasts }: { toasts: ToastState }) {
     if (!el || typeof el.showPopover !== 'function') return;
     try { if (any) el.showPopover(); else el.hidePopover(); } catch { /* already in that state */ }
   }, [any]);
+  // The top layer stacks in the order things were shown, so a dialog opened later would cover the toasts: re-show on every dialog open.
+  useEffect(() => {
+    const raise = () => {
+      const el = ref.current;
+      if (!el || typeof el.showPopover !== 'function' || !el.matches(':popover-open')) return;
+      try { el.hidePopover(); el.showPopover(); } catch { /* not showing */ }
+    };
+    document.addEventListener(OVERLAY_OPENED, raise);
+    return () => document.removeEventListener(OVERLAY_OPENED, raise);
+  }, []);
   return <section ref={ref} className={n.toastRegion} aria-label="Notifications" popover="manual" data-empty={any ? undefined : ''}>
     {shown.map(t => {
       const Icon = ICONS[t.kind];
