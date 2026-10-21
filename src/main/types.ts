@@ -49,6 +49,8 @@ export interface AgentRecord extends Agent {
   specFromId?: Id;
   /** Agent that asked for this sibling via request_help. */
   helpFor?: Id;
+  /** Delegation grant from the lead: read-only sub-helpers this helper may still start itself (see PlannedTask.grant). */
+  grant?: { left: number; scope: string };
   /** User allowed this agent to overlap file claims held by a sibling. */
   sharedOk?: boolean;
   /** Redoes work a reviewer or Harbor check rejected: its difficulty was raised one floor step, and the effort policy never lowers it. */

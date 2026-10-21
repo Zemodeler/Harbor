@@ -87,6 +87,7 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (method !== 'removeSkill') { const p = args[method === 'setSkillEnabled' ? 2 : 1]; if (p !== undefined && p !== null && !isId(p)) bad('project id must be a short non-empty string'); }
       break;
     case 'listSkills':
+    case 'listMods':
       if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
       break;
     case 'previewSkillImport': {

@@ -1,3 +1,4 @@
+import { scanMods } from './mods/scan';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -713,6 +714,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
     // Skills: listing and reading only read files; nothing in a skill is ever run.
     async listSkills(projectId) { return skills.list(projectRef(projectId)); },
+    async listMods(projectId) { return scanMods({ claudeHome: opts.skillHomes?.claude, projectPath: projectRef(projectId)?.path }); },
     async readSkill(skillId, projectId) { return skills.read(skillId, projectRef(projectId)); },
     async setSkillEnabled(skillId, enabled, projectId) { return skills.setEnabled(skillId, enabled, projectRef(projectId)); },
     async previewSkillImport(source, o) {
