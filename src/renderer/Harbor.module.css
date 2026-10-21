@@ -214,7 +214,7 @@
 .switchList button { text-align: left; }
 .switchList small { display: block; margin-top: 5px; overflow-wrap: anywhere; }
 .mobileMenu, .mobileClose { display: none; }
-@media (max-width: 760px) { .app { grid-template-columns: minmax(0, 1fr); } .desktopSidebar { display: none; } .mobileMenu, .mobileClose { display: inline-block; } .header { padding: 14px 18px; gap: 10px; } .headerActions { gap: 4px; } .taskStatus { display: none; } .headerActions button { padding: 7px; font-size: 11px; } .stream { padding: 26px 18px 8px; } .composerArea { padding: 12px 18px; } .settings { padding: 28px 18px; } .modal .sidebar { border: 0; padding: 0; max-height: 68dvh; gap: 16px; } .modal .projectList { overflow-y: auto; flex: 1 1 auto; } .byline { flex-wrap: wrap; } }
+@media (max-width: 760px) { .app { grid-template-columns: minmax(0, 1fr); } .desktopSidebar { display: none; } .mobileMenu, .mobileClose { display: inline-block; } .header { padding: 14px 18px; gap: 10px; } .headerActions { gap: 4px; } .taskStatus { display: none; } .headerActions button { padding: 7px; font-size: 11px; } .stream { padding: 26px 18px 8px; } .composerArea { padding: 12px 18px; } .settings { padding: 28px 18px; } dialog .sidebar { border: 0; padding: 0; max-height: 68dvh; gap: 16px; } dialog .projectList { overflow-y: auto; flex: 1 1 auto; } .byline { flex-wrap: wrap; } }
 @media (max-height: 540px) { .header { min-height: 60px; } .composerArea { padding-top: 8px; padding-bottom: 8px; } .composer textarea { min-height: 35px; } .composeHint { display: none; }  }
 @media (prefers-reduced-motion: reduce) { :global(*) { scroll-behavior: auto !important; } }
 
