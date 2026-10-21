@@ -4,6 +4,7 @@ import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { ConfirmDialog } from './ui/ConfirmDialog';
 import { Menu, type MenuItem } from './ui/Menu';
+import { Tooltip } from './ui/Tooltip';
 import { ProjectSettings } from './ProjectSettings';
 import { initials } from './projectIcon';
 import { sessionStatus } from '../session';
@@ -67,10 +68,10 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
   return <nav aria-label="Projects and conversations" className={s.sidebar}>
     <div className={s.rail}>
       <Brand compact/>
-      {state.projects.map(p => <button key={p.id} className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} title={`${p.name}\n${p.path}`} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button>)}
-      <button className={s.chip} aria-label="Add project" title="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button>
+      {state.projects.map(p => <Tooltip key={p.id} text={`${p.name} · ${p.path}`} side="right"><button className={`${s.chip} ${state.projectId === p.id ? s.chipOn : ''}`} aria-label={p.name} aria-pressed={state.projectId === p.id} onClick={() => { void state.selectProject(p.id); close(); }}>{p.image ? <img className={s.chipImg} src={p.image} alt=""/> : initials(p.name)}</button></Tooltip>)}
+      <Tooltip text="Add project" side="right"><button className={s.chip} aria-label="Add project" onClick={add}><PlusIcon size={19} aria-hidden="true"/></button></Tooltip>
       <span className={s.railSpace}/>
-      <button className={s.chip} aria-label="Open settings" title="Settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button>
+      <Tooltip text="Settings" side="right"><button className={s.chip} aria-label="Open settings" onClick={settings}><SettingsIcon size={19} aria-hidden="true"/></button></Tooltip>
       <button className={s.mobileClose} onClick={close} aria-label="Close project menu"><CloseIcon size={18} aria-hidden="true"/></button>
     </div>
     <div className={s.panel}>
@@ -79,7 +80,7 @@ export function Sidebar({ state, settings, add, close, search, history, rename, 
         <div className={s.projectHead}>
           <span className={s.projectAvatar} aria-hidden="true">{project.image ? <img src={project.image} alt=""/> : initials(project.name)}</span>
           <div className={s.projectHeadText}><h2 className={s.panelTitle} title={project.path}>{project.name}</h2><p className={s.panelSub}>{mains.length === 1 ? '1 conversation' : `${mains.length} conversations`}</p></div>
-          <button className={s.projectGear} aria-label="Project options" title="Project options" onClick={() => setSettingsOpen(true)}><SettingsIcon size={18} aria-hidden="true"/></button>
+          <Tooltip text="Project options" side="bottom"><button className={s.projectGear} aria-label="Project options" onClick={() => setSettingsOpen(true)}><SettingsIcon size={18} aria-hidden="true"/></button></Tooltip>
         </div>
         <button className={s.sidebarSearch} onClick={search}><SearchIcon size={16} aria-hidden="true"/> Search <kbd>Ctrl K</kbd></button>
         {runningAgent && running ? <div className={s.live} role="status"><SessionStatus status={sessionStatus(running, state.agents, state.sending)}/><button className={s.stopLink} aria-label={`Stop ${runningAgent.title}`} onClick={() => { void state.stopConversation(running.id); }}>Stop</button></div> : null}

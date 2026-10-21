@@ -137,11 +137,9 @@
 /* Explicit accent on hover: the global button:hover wash must never show --on-accent text on a --wash background. */
 .primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 88%, var(--ink)); border-color: color-mix(in srgb, var(--accent) 88%, var(--ink)); }
 .primary:active:not(:disabled) { background: color-mix(in srgb, var(--accent) 78%, var(--ink)); }
-/* Quiet = text/icon button for secondary actions; danger = destructive confirmation; pill = status or tag chip. */
+/* Quiet = text/icon button for secondary actions; pill = status or tag chip. */
 .quiet { border-color: transparent; color: var(--muted); }
 .quiet:hover:not(:disabled) { color: var(--ink); border-color: transparent; background: var(--hover); }
-.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); }
-.danger:hover:not(:disabled) { background: var(--bad-wash); border-color: var(--bad); }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; min-height: 0; border-radius: var(--r-pill); font-size: var(--fs-xs); font-weight: 600; line-height: 1.6; border: 1px solid var(--line); background: var(--surface); color: var(--muted); }
 .pill[data-tone=ok] { color: var(--ok); background: var(--ok-wash); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
 .pill[data-tone=warn] { color: var(--warn); background: var(--warn-wash); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
@@ -201,10 +199,6 @@
 .appearanceSaved { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 18px; }
 @media (max-width: 1050px) { .paletteGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 420px) { .tabs { gap: 14px; } .tabs button { font-size: 12px; } .paletteGrid { gap: 10px; } .palettePreview { height: 90px; } .previewSidebar { width: 30px; } .paletteCaption { padding-left: 4px; padding-right: 4px; } .modeChoices { gap: 8px; } }
-.modal { background: var(--bg); color: var(--ink); border: 1px solid var(--line); box-shadow: var(--elev-2); border-radius: var(--r-lg); width: min(520px, calc(100% - 32px)); padding: 24px; max-height: calc(100dvh - 32px); overflow: auto; }
-.modal::backdrop { background: #07181bb0; }
-.modalHeader { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
-.modalHeader h2 { font-size: 19px; margin: 0; }
 .actions { display: flex; justify-content: end; gap: 12px; margin-top: 24px; }
 .switchList { display: grid; gap: 8px; margin: 16px 0; }
 .switchList button { text-align: left; }
@@ -669,10 +663,6 @@
 
 .sidebar .conversationLink { padding-right: 36px; }
 .conversationMenu { right: 6px; }
-.conversationMenuItems button { border: 0; padding: 6px 10px; min-height: 32px; }
-.conversationMenuItems .menuDelete { color: var(--bad); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-sm) var(--r-sm); margin-top: var(--sp-1); }
-.conversationMenuItems .menuDelete:hover:not(:disabled) { background: var(--bad-wash); }
-.conversationRow:has(.conversationMenu[open]) { padding-bottom: 170px; }
 
 .verification { flex: 0 0 100%; margin-top: var(--sp-1); }
 .verification > summary { font-size: var(--fs-xs); font-weight: 600; color: var(--muted); margin-bottom: var(--sp-2); }

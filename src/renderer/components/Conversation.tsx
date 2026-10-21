@@ -3,6 +3,7 @@ import type { Agent, Attachment, Conversation as ConversationRecord, Message } f
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { Markdown } from './Markdown';
+import { Tooltip } from './ui/Tooltip';
 import { DocumentLinks } from '../documents/DocumentLinks';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { sessionStatus } from '../session';
@@ -284,10 +285,10 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
       {images.length ? <ul className={s.thumbnails} aria-label="Images to send">{images.map(img => <li key={img.id} className={img.preview ? undefined : s.fileChip}>{img.preview ? <img src={img.preview} alt={img.name}/> : <span>{img.name}</span>}<button type="button" aria-label={`Remove ${img.name}`} onClick={() => setImages(prev => prev.filter(x => x.id !== img.id))}><CloseIcon size={12} aria-hidden="true"/></button></li>)}</ul> : null}
       <div className={s.composerTools}><div className={s.composerAttachments}>
         <input ref={filePicker} hidden multiple type="file" aria-label="Choose files" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) addFiles(files); }}/>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Attach files" title="Attach any file (up to 10, 50 MB each). You can also drag files in anywhere." onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button>
+        <Tooltip text="Attach any file (up to 10, 50 MB each). You can also drag files in anywhere."><button className={s.iconButton} disabled={c.archived} aria-label="Attach files" onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button></Tooltip>
         <input ref={imagePicker} hidden multiple type="file" accept={IMAGE_TYPES.join(',')} aria-label="Choose images" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; void addImages(files); }}/>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Attach images" title="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button>
+        <Tooltip text="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)"><button className={s.iconButton} disabled={c.archived} aria-label="Attach images" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button></Tooltip>
+        <Tooltip text="Reusable prompts"><button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button></Tooltip>
       </div><div className={s.composeActions}>{busy ? <button onClick={() => void state.stopConversation(c.id)}>Stop session</button> : null}{busy && agent?.role === 'main' ? <button disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} title="Interrupt the lead's current step and act on this message (and its attachments) now" onClick={steer}>Send now</button> : null}<button className={s.primary} disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} onClick={send}>{busy ? 'Queue follow-up' : 'Send ↑'}</button></div></div>
       {templatesOpen ? <div className={s.templatePicker}>{workspace.preferences.templates.length ? workspace.preferences.templates.map(t => <button key={t.id} onClick={() => { const before = latest.current; edit(`${before}${before ? '\n\n' : ''}${t.text}`, true); setTemplatesOpen(false); textarea.current?.focus(); }}>{t.title}</button>) : <p className={s.muted}>Save reusable prompts in Settings → Workspace.</p>}</div> : null}
       {sendError ? <div className={s.sendRecovery} role="status">{sendError}<button disabled={busy || !text.trim()} onClick={send}>Retry message</button><button onClick={() => void state.refreshClis()}>Check connections</button></div> : null}

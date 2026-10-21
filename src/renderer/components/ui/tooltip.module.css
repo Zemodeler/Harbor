@@ -1,0 +1,6 @@
+.wrap { display: contents; }
+.tip { position: fixed; z-index: var(--z-menu, 20); max-width: 260px; padding: 6px 10px; border-radius: var(--r-md); background: var(--ink); color: var(--bg); font-size: var(--fs-xs); line-height: 1.4; font-weight: 500; pointer-events: none; box-shadow: var(--elev-1); animation: tipIn 120ms ease-out; transform: translate(-50%, -100%); }
+.tip[data-side=bottom] { transform: translate(-50%, 0); }
+.tip[data-side=right] { transform: translate(0, -50%); }
+@keyframes tipIn { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .tip { animation: none; } }

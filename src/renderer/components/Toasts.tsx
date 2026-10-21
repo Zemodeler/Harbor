@@ -1,3 +1,4 @@
+import { Tooltip } from './ui/Tooltip';
 import { OVERLAY_OPENED } from './ui/overlayEvents';
 import { useEffect, useRef } from 'react';
 import type { ToastState } from '../hooks/useToasts';
@@ -45,7 +46,7 @@ export function Toasts({ toasts }: { toasts: ToastState }) {
             <button onClick={() => void toasts.open(t)} aria-label={`${t.kind === 'question' ? 'Answer' : 'Open conversation'}: ${t.body}`}>{t.kind === 'question' ? 'Answer' : 'Open conversation'}</button>
           </div> : null}
         </div>
-        <button className={n.toastClose} onClick={() => toasts.dismiss(t.id)} aria-label={`Dismiss notification: ${t.title}`} title="Dismiss"><CloseIcon size={14} aria-hidden="true" /></button>
+        <Tooltip text="Dismiss" side="bottom"><button className={n.toastClose} onClick={() => toasts.dismiss(t.id)} aria-label={`Dismiss notification: ${t.title}`}><CloseIcon size={14} aria-hidden="true" /></button></Tooltip>
       </div>;
     })}
     {hidden > 0 ? <p className={n.toastMore}>+{hidden} more</p> : null}
