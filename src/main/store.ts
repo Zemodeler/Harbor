@@ -562,6 +562,28 @@ export class Store {
     this.flush(); // an approval must survive a crash right after it
   }
 
+  // ---- mods: the switch that makes a mod's commands work (setModEnabled)
+  getModPref(modId: string, projectId?: Id): boolean | undefined {
+    const m = this.state.mods;
+    return (projectId !== undefined ? m?.projects?.[projectId]?.[modId] : undefined) ?? m?.global?.[modId];
+  }
+  setModPref(modId: string, enabled: boolean | null, projectId?: Id): void {
+    const m = { ...(this.state.mods ?? {}) };
+    if (projectId === undefined) {
+      const g = { ...(m.global ?? {}) };
+      if (enabled === null) delete g[modId]; else g[modId] = enabled;
+      m.global = g;
+    } else {
+      const projects = { ...(m.projects ?? {}) };
+      const p = { ...(projects[projectId] ?? {}) };
+      if (enabled === null) delete p[modId]; else p[modId] = enabled;
+      if (Object.keys(p).length) projects[projectId] = p; else delete projects[projectId];
+      m.projects = projects;
+    }
+    this.state.mods = m;
+    this.dirty();
+  }
+
   // ---- skills: enable/disable choices and library import records (skills/library.ts)
   skillPrefs(): { global: Record<string, boolean>; projects: Record<Id, Record<string, boolean>> } {
     const s = this.state.skills;

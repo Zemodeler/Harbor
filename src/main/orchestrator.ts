@@ -855,7 +855,7 @@ export class Orchestrator {
   // ------------------------------------------------------------ user input
 
   /** `attachments` are already validated and written to disk by the service (each has a `path`). */
-  async userMessage(conversationId: Id, text: string, attachments: Attachment[] = [], opts: { steer?: boolean } = {}): Promise<void> {
+  async userMessage(conversationId: Id, text: string, attachments: Attachment[] = [], opts: { steer?: boolean; /** What the lead receives instead of `text` (an expanded mod command); the chat still shows `text`. */ promptText?: string } = {}): Promise<void> {
     const conv = this.d.store.getConversation(conversationId);
     if (!conv) throw new Error('Unknown conversation');
     const agent = this.d.store.getAgent(conv.agentId);
@@ -888,15 +888,25 @@ export class Orchestrator {
       const isImage = (a: Attachment) => a.mime.startsWith('image/');
       const images = attachments.filter(isImage).map((a) => a.path).filter((p): p is string => !!p);
       const files = attachments.filter((a) => !isImage(a) && a.path).map((a) => a.path!);
-      this.enqueueMain(agent.projectId, { kind: 'user', text: files.length ? `${text}
+      const sent = opts.promptText ?? text;
+      this.enqueueMain(agent.projectId, { kind: 'user', text: files.length ? `${sent}
 
-${attachedFilesNote(attachments.filter((a) => !isImage(a) && a.path))}` : text, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) }, conversationId);
+${attachedFilesNote(attachments.filter((a) => !isImage(a) && a.path))}` : sent, ...(images.length ? { images } : {}), ...(files.length ? { files } : {}) }, conversationId);
     } else {
       const others = attachments.filter((a) => !a.mime.startsWith('image/') && a.path);
       this.direct(agent, others.length ? `${text}
 
 ${attachedFilesNote(others)}` : text, conversationId);
     }
+  }
+
+  /** A chat command Harbor answered itself (/skills, /mods): the message and the answer are posted, and no agent runs. */
+  localCommand(conversationId: Id, userText: string, reply: string): void {
+    const conv = this.d.store.getConversation(conversationId);
+    if (!conv) throw new Error('Unknown conversation');
+    if (conv.archived) throw new Error('Restore this conversation before sending a message.');
+    this.post(conversationId, 'user', userText, { agentId: conv.agentId });
+    this.post(conversationId, 'system', reply);
   }
 
   /**
