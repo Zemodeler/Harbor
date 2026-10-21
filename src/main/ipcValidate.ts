@@ -273,6 +273,24 @@ export function validateInvoke(method: string, args: unknown[]): void {
       }
       break;
     }
+    case 'cloneProject': {
+      const d = (args[0] ?? {}) as Record<string, unknown>;
+      if (!args[0] || typeof d !== 'object' || Array.isArray(d)) bad('the clone request must be an object');
+      if (typeof d['url'] !== 'string' || !d['url'].trim() || d['url'].length > 500 || CONTROL.test(d['url'])) bad('url must be an https or ssh URL');
+      if (d['name'] !== undefined && (typeof d['name'] !== 'string' || !d['name'].trim() || d['name'].length > 80 || CONTROL.test(d['name']))) bad('name must be 1 to 80 characters');
+      if (d['parentDir'] !== undefined && (typeof d['parentDir'] !== 'string' || !d['parentDir'].trim() || d['parentDir'].length > MAX_PATH || d['parentDir'].includes('\0'))) bad('parentDir must be a folder path');
+      if (d['firstPrompt'] !== undefined && (typeof d['firstPrompt'] !== 'string' || d['firstPrompt'].length > 20000)) bad('firstPrompt must be text of at most 20000 characters');
+      break;
+    }
+    case 'listGithubRepos': {
+      const o = args[0] as Record<string, unknown> | undefined | null;
+      if (o === undefined || o === null) break;
+      if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+      if (o['owner'] !== undefined && (typeof o['owner'] !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(o['owner']))) bad('owner must be a GitHub account name');
+      if (o['limit'] !== undefined && (typeof o['limit'] !== 'number' || !Number.isFinite(o['limit']))) bad('limit must be a number');
+      if (o['refresh'] !== undefined && typeof o['refresh'] !== 'boolean') bad('refresh must be true or false');
+      break;
+    }
     case 'previewDeleteProject':
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       break;

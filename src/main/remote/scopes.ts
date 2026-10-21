@@ -42,7 +42,7 @@ export const METHOD_SCOPE: Record<InvokeMethod, MethodClass> = {
   listImportSources: 'never', previewImport: 'never', importConversation: 'never', continueImported: 'never',
 
   // Project lifecycle and publish (0.1.47): disk deletion and publishing stay at the desktop, like addProject.
-  createProject: 'never', previewDeleteProject: 'never', deleteProject: 'never', previewPush: 'never', pushBranch: 'never',
+  cloneProject: 'never', listGithubRepos: 'never', createProject: 'never', previewDeleteProject: 'never', deleteProject: 'never', previewPush: 'never', pushBranch: 'never',
   createPullRequest: 'never', setRemote: 'never', getGithubStatus: 'never', browseFolder: 'never', listWorktrees: 'never', cleanupWorktrees: 'never',
 
   openLogin: 'never', addProject: 'never', openProjectFolder: 'never', openWorkspace: 'never', exportDiagnostics: 'never',

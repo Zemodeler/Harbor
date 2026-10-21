@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { GithubStatus, ProjectTemplate } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
+import { CloneProject } from './CloneProject';
 import { Modal } from './Modal';
 import s from '../Harbor.module.css';
 import l from './Lifecycle.module.css';
@@ -26,6 +27,7 @@ export function NewProject({ state, close }: { state: HarborState; close: () => 
   const [pending, setPending] = useState(false);
   const [gh, setGh] = useState<GithubStatus>();
   const [warnings, setWarnings] = useState<string[]>();
+  const [tab, setTab] = useState<'new' | 'existing'>('new');
   const failure = state.areaErrors[AREA];
   useEffect(() => { void state.api.getGithubStatus?.().then(setGh).catch(() => setGh({ installed: false, loggedIn: false })); return () => state.clearError(AREA); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -44,8 +46,13 @@ export function NewProject({ state, close }: { state: HarborState; close: () => 
   };
   const choose = () => void state.run(async () => { const dir = await state.api.browseFolder!(); if (dir) setParentDir(dir); }, AREA);
 
+  const canClone = !!state.api.cloneProject;
   return <Modal title="New project" close={close} dismissible={!pending}>
-    {warnings ? <div className={l.form}>
+    {canClone && !warnings ? <div role="tablist" aria-label="How to start" className={l.tabs}>
+      <button role="tab" type="button" aria-selected={tab === 'new'} disabled={pending} onClick={() => setTab('new')}>Start from scratch</button>
+      <button role="tab" type="button" aria-selected={tab === 'existing'} disabled={pending} onClick={() => setTab('existing')}>Start from existing repo</button>
+    </div> : null}
+    {canClone && tab === 'existing' && !warnings ? <CloneProject state={state} close={close} gh={gh} base={parentDir ?? (state.settings?.projectsDir || undefined)} chooseLocation={state.api.browseFolder ? choose : undefined} parentDir={parentDir} resetLocation={() => setParentDir(undefined)}/> : warnings ? <div className={l.form}>
       <p className={l.strong}>“{trimmed}” was created, with notes:</p>
       <ul className={l.warnings} aria-label="Notes about the new project">{warnings.map(w => <li key={w}>{w}</li>)}</ul>
       <div className={s.actions}><button className={s.primary} autoFocus onClick={close}>Open project</button></div>

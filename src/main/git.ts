@@ -74,6 +74,15 @@ export function explainPushFailure(stderr: string): string {
   return `git push failed: ${t.trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ') || 'no details'}`;
 }
 
+/** A clone failure in words the owner can act on. */
+export function explainCloneFailure(stderr: string): string {
+  const t = stderr || '';
+  if (/terminal prompts disabled|could not read (?:username|password)|authentication failed|invalid username or password|permission denied \(publickey\)|\b403\b|access denied/i.test(t)) return 'Not signed in to the remote, or you have no access to this repository. Sign in with git (for example `gh auth login`) and check the URL.';
+  if (/repository not found|not found|does not appear to be a git repository|\b404\b/i.test(t)) return 'The repository was not found. Check the URL (private repositories need you to be signed in).';
+  if (/could not resolve host|unable to access|connection (?:timed out|refused|reset)|network is unreachable/i.test(t)) return 'The remote could not be reached. Check the URL and that you are online.';
+  return `git clone failed: ${t.trim().split(/\r?\n/).filter(Boolean).slice(-2).join(' ') || 'no details'}`;
+}
+
 /** A Harbor worktree as the retention policy sees it. `lastActivity` is epoch ms. */
 export interface WorktreeEntry { path: string; branch?: string; lastActivity: number; applied?: boolean; merged?: boolean; active?: boolean }
 
@@ -492,6 +501,20 @@ export class Git {
     if (!name || name.startsWith('-')) return undefined;
     const r = await this.git(repo, ['remote', 'get-url', name]);
     return r.code === 0 ? r.stdout.trim() || undefined : undefined;
+  }
+
+  /**
+   * `git clone -- <url> <dest>` run from `cwd` (the parent folder). The URL passes `remoteUrlProblem` first and goes after `--`, so it
+   * can never be read as an option; the file, ext and other local transports are refused by that check. Failures are mapped to a
+   * cause the owner can act on. The caller removes a half-made destination.
+   */
+  async clone(url: string, dest: string, cwd: string): Promise<{ ok: boolean; output: string }> {
+    const problem = remoteUrlProblem(url);
+    if (problem) throw new Error(problem);
+    const r = await this.git(cwd, ['clone', '--', url.trim(), dest], LONG_GIT_TIMEOUT_MS);
+    if (r.timedOut) return { ok: false, output: 'git clone timed out. Check the connection and try again.' };
+    const out = `${r.stdout}\n${r.stderr}`.trim();
+    return r.code === 0 ? { ok: true, output: out } : { ok: false, output: explainCloneFailure(out) };
   }
 
   /** Add `origin`, or with `replace` change it. The URL is validated and passed as its own argument after `--`. */

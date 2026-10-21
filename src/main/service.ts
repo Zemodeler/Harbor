@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
+import type { Attachment, CreateProjectResult, GithubRepo, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import type { CliAdapter } from './adapters/types';
@@ -34,7 +34,7 @@ import { readLogTail } from './logger';
 import { projectPathRefusal } from './projectPath';
 import { GitHub } from './github';
 import { cleanupWorktrees as cleanupWorktreesImpl, listHarborWorktrees } from './housekeeping';
-import { createProjectFolder } from './projectCreate';
+import { cloneProjectFolder, createProjectFolder, type CreatedFolder } from './projectCreate';
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
@@ -51,7 +51,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -519,6 +519,32 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
   };
   const gh = opts.github ?? new GitHub();
   const projectsDir = () => store.getSettings().projectsDir ?? opts.defaultProjectsDir ?? join(homedir(), 'Documents', 'Harbor Projects');
+  const createDeps = () => ({ git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p: string) => !!store.findProjectByPath(p) });
+  const repoCache = new Map<string, { at: number; repos: GithubRepo[] }>();
+  const REPO_CACHE_MS = 5 * 60_000;
+  /** Registers a folder createProjectFolder or cloneProjectFolder made; on failure removes exactly what that call made. Optionally starts a first conversation. */
+  const registerCreated = (created: CreatedFolder, firstPrompt: string | undefined): CreateProjectResult => {
+    let project: Project;
+    try {
+      project = store.upsertProject({ id: newId(), name: created.name, path: created.path, lastOpened: clock() });
+      orchestrator.ensureProject(project);
+    } catch (e) {
+      created.undo();
+      throw new Error(`The project was not registered: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const warnings = [...created.warnings];
+    let conversationId: Id | undefined;
+    const first = typeof firstPrompt === 'string' ? firstPrompt.trim() : '';
+    if (first) {
+      try {
+        const c = orchestrator.newConversation(project.id);
+        conversationId = c.id;
+        // Not awaited: the first lead turn can take minutes and the project already exists.
+        void ready.then(() => orchestrator.userMessage(c.id, first, [], {})).catch(() => { /* shown in the conversation by the orchestrator */ });
+      } catch (e) { warnings.push(`The first prompt was not sent: ${e instanceof Error ? e.message : String(e)}`); }
+    }
+    return { project, path: created.path, ...(created.remote ? { remote: created.remote } : {}), ...(conversationId ? { conversationId } : {}), warnings };
+  };
   const deleteDeps = () => ({
     git, store, worktreesRoot, projectsDir: projectsDir(),
     protectedRoots: [dataRoot, worktreesRoot, ...(opts.appRoots ?? [])],
@@ -737,27 +763,23 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
     // ---- project lifecycle and publish (contract 0.1.47). The folder is only ever deleted at the user's typed confirmation.
     async createProject(draft) {
-      const created = await createProjectFolder(draft, { git, gh, defaultParent: projectsDir(), harborRoots: [dataRoot, worktreesRoot], isRegistered: (p) => !!store.findProjectByPath(p) });
-      let project: Project;
-      try {
-        project = store.upsertProject({ id: newId(), name: created.name, path: created.path, lastOpened: clock() });
-        orchestrator.ensureProject(project);
-      } catch (e) {
-        created.undo();
-        throw new Error(`The project was not registered: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      const warnings = [...created.warnings];
-      let conversationId: Id | undefined;
-      const first = typeof draft.firstPrompt === 'string' ? draft.firstPrompt.trim() : '';
-      if (first) {
-        try {
-          const c = orchestrator.newConversation(project.id);
-          conversationId = c.id;
-          // Not awaited: the first lead turn can take minutes and the project already exists.
-          void ready.then(() => orchestrator.userMessage(c.id, first, [], {})).catch(() => { /* shown in the conversation by the orchestrator */ });
-        } catch (e) { warnings.push(`The first prompt was not sent: ${e instanceof Error ? e.message : String(e)}`); }
-      }
-      return { project, path: created.path, ...(created.remote ? { remote: created.remote } : {}), ...(conversationId ? { conversationId } : {}), warnings };
+      const created = await createProjectFolder(draft, createDeps());
+      return registerCreated(created, draft.firstPrompt);
+    },
+    async cloneProject(draft) {
+      if (!draft || typeof draft !== 'object') throw new Error('Enter the repository URL.');
+      const created = await cloneProjectFolder(draft, createDeps());
+      return registerCreated(created, draft.firstPrompt);
+    },
+    async listGithubRepos(o) {
+      const owner = o?.owner?.trim() || undefined;
+      const key = owner?.toLowerCase() ?? '';
+      const hit = repoCache.get(key);
+      if (hit && !o?.refresh && clock() - hit.at < REPO_CACHE_MS) return structuredClone(hit.repos);
+      const r = await gh.listRepos({ ...(owner ? { owner } : {}), ...(o?.limit !== undefined ? { limit: o.limit } : {}) });
+      if (!r.ok) throw new Error(r.message);
+      repoCache.set(key, { at: clock(), repos: r.value });
+      return structuredClone(r.value);
     },
     async previewDeleteProject(id) { return previewDelete(needProject(id), deleteDeps()); },
     async deleteProject(id, scope, confirmName) {
