@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { mergeFetched, mergeMessages, upsertById, upsertByTime } from '../listOps';
-import type { Agent, CliStatus, Conversation, ConversationMode, CreateProjectResult, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
+import type { Agent, CliStatus, Conversation, ConversationMode, CloneProjectDraft, CreateProjectResult, DeleteResult, DeleteScope, HarborEvent, Message, NewProjectDraft, Project, Settings, UsageWindow } from '../../shared/api';
 
 export type ImageUpload = { name: string; mime: string; dataBase64: string };
 
@@ -313,6 +313,17 @@ export function useHarbor() {
     }, area);
     return result;
   }
+  /** Clones an existing repository into the projects folder and opens it; undefined when it failed (the reason is in `area`). */
+  async function cloneProject(draft: CloneProjectDraft, area?: string) {
+    let result: CreateProjectResult | undefined;
+    await run(async () => {
+      if (!api.cloneProject) throw new Error('Cloning a repository is available in the desktop app.');
+      const r = await api.cloneProject(draft);
+      setProjects(await api.listProjects()); await selectProject(r.project.id);
+      result = r;
+    }, area);
+    return result;
+  }
   /** Deletes a project at the chosen level (records, plus worktrees and branches, plus the folder) and reloads. */
   async function deleteProject(id: string, scope: DeleteScope, confirmName: string | undefined, area?: string) {
     let result: DeleteResult | undefined;
@@ -423,7 +434,7 @@ export function useHarbor() {
     questions, questionPending, questionErrors, dismissQuestion, answerQuestion, stopConversation,
     loading, messagesLoading, projectLoading, error, areaErrors, startupError, messagesError, clearError, dismissError: () => setError(''),
     sending, run, reload, selectProject, selectConversation, clearProject, retryMessages: () => conversation ? selectConversation(conversation) : Promise.resolve(),
-    newConversation, deleteConversation, openAgent, addProject, removeProject, createProject, deleteProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
+    newConversation, deleteConversation, openAgent, addProject, removeProject, createProject, cloneProject, deleteProject, renameProject, setProjectImage, send, setConversationMode, answerPermission, updateSettings, saveSettings,
     refreshClis: () => run(async () => setClis(await api.refreshClis())) };
 }
 export type HarborState = ReturnType<typeof useHarbor>;

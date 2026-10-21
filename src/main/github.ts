@@ -1,4 +1,4 @@
-import type { GithubStatus } from '../shared/api';
+import type { GithubRepo, GithubStatus } from '../shared/api';
 import { runProcess, type Runner } from './proc';
 import { scanLine } from './secretScan';
 
@@ -71,6 +71,24 @@ export class GitHub {
     return { ok: true, value: { url: url ?? `https://github.com/${slug}`, slug } };
   }
 
+  /** The repositories of the signed-in account (or of `owner`) through `gh repo list`, newest push first. Read-only. */
+  async listRepos(o: { owner?: string; limit?: number } = {}): Promise<GhOutcome<GithubRepo[]>> {
+    if (o.owner !== undefined && !OWNER_NAME.test(o.owner)) return { ok: false, kind: 'error', message: 'The GitHub owner is not a valid account name.' };
+    const limit = Math.min(200, Math.max(1, Math.floor(o.limit ?? 100)));
+    const blocked = await this.needGh();
+    if (blocked) return blocked;
+    const r = await this.gh(['repo', 'list', ...(o.owner ? [o.owner] : []), '--limit', String(limit), '--json', 'nameWithOwner,name,owner,description,isPrivate,isFork,updatedAt,url']);
+    if (r.timedOut) return { ok: false, kind: 'error', message: 'gh timed out while listing repositories.' };
+    const text = `${r.stdout}
+${r.stderr}`;
+    if (r.code !== 0) {
+      if (/auth|log ?in|credentials|401/i.test(text)) return { ok: false, kind: 'not-logged-in', message: `gh is not signed in to GitHub. ${GH_LOGIN_HINT}` };
+      if (/could not resolve|not found|404/i.test(text)) return { ok: false, kind: 'error', message: `GitHub does not know ${o.owner ?? 'that account'}.` };
+      return { ok: false, kind: 'error', message: `gh could not list repositories: ${plainGhMessage(text)}` };
+    }
+    return { ok: true, value: parseRepoList(r.stdout) };
+  }
+
   /** `gh pr create` from a branch already on the remote. The body is read from stdin. Returns the pull request URL. */
   async createPr(o: { cwd: string; head: string; base: string; title: string; body?: string; draft?: boolean }): Promise<GhOutcome<{ url: string }>> {
     for (const b of [o.head, o.base]) if (!b || b.startsWith('-') || /[\s:]/.test(b)) return { ok: false, kind: 'error', message: 'The branch names are not plain names.' };
@@ -86,4 +104,24 @@ export class GitHub {
     if (/auth|log ?in|credentials|401/i.test(text)) return { ok: false, kind: 'not-logged-in', message: `gh is not signed in to GitHub. ${GH_LOGIN_HINT}` };
     return { ok: false, kind: 'error', message: `gh could not open the pull request: ${plainGhMessage(text)}` };
   }
+}
+
+/** Repositories from `gh repo list --json ...`: tolerant of missing fields, never trusts a url that is not https. */
+export function parseRepoList(stdout: string): GithubRepo[] {
+  let j: unknown;
+  try { j = JSON.parse(stdout); } catch { return []; }
+  if (!Array.isArray(j)) return [];
+  const out: GithubRepo[] = [];
+  for (const raw of j.slice(0, 200)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const slug = typeof r['nameWithOwner'] === 'string' ? r['nameWithOwner'] : '';
+    const name = typeof r['name'] === 'string' ? r['name'] : slug.split('/')[1] ?? '';
+    const owner = typeof (r['owner'] as { login?: unknown } | undefined)?.login === 'string' ? (r['owner'] as { login: string }).login : slug.split('/')[0] ?? '';
+    const web = typeof r['url'] === 'string' ? r['url'] : '';
+    if (!slug || !name || !owner || !/^https:\/\/github\.com\/[^\s]+$/.test(web)) continue;
+    const when = typeof r['updatedAt'] === 'string' ? Date.parse(r['updatedAt']) : NaN;
+    out.push({ slug, name, owner, ...(typeof r['description'] === 'string' && r['description'] ? { description: r['description'].slice(0, 300) } : {}), isPrivate: r['isPrivate'] === true, ...(r['isFork'] === true ? { isFork: true } : {}), ...(Number.isFinite(when) ? { updatedAt: when } : {}), url: web.endsWith('.git') ? web : `${web}.git` });
+  }
+  return out;
 }
