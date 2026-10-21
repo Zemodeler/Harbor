@@ -238,6 +238,8 @@ Behavior the core already provides that the UI should surface or respect:
 - E9 Paged messages and git log wired through `service.ts`.
 - From wave 1 D3: `orchestrator.ts` still carries the journal cast hacks (`PERMISSION_KIND` and the `'triage'` stand-in for rollback); `JournalKind` now has `permission` and `rollback`, so remove them.
 
+- **Extensions (contracts 0.1.71-0.1.73), core done, UI missing.** A Mods screen over `listMods` / `setModEnabled` (per project: switch, parts with their status notes, which MCP servers were skipped and why); the composer's slash menu should also list `listModCommands` (name, `argumentHint`, description) and `/skills`, `/mods`; permission cards for the "Are you sure?" questions (mode switch, `.harbor/permissions.json` deny) deserve their own headline instead of "Allow Bash?"; a Skills screen control for `.harbor/extensions.json` (shared project choices) and bulk on/off. `/skills` and `/mods` are answered in chat today (`chatCommands.ts`).
+
 ## API requests (from UI)
 
 - Add assignment/conversation ownership to Agent (or a conversation-scoped listAgents API). The current contract identifies parent agents but cannot distinguish assignments belonging to different main-agent conversations in one project. The UI currently shows all children of the selected main agent.

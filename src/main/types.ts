@@ -214,6 +214,8 @@ export interface State {
   pendingPermissions?: PendingPermissionRecord[];
   /** Hash of the `.harbor/checks.json` commands the user approved per project; changed commands need a new approval. */
   checksApproved?: Record<Id, string>;
+  /** Mod switches (setModEnabled): global default and per-project choices by mod id. */
+  mods?: { global?: Record<string, boolean>; projects?: Record<Id, Record<string, boolean>> };
   /** Hash of the `.harbor/permissions.json` allow list the user approved, by project. */
   permissionsApproved?: Record<Id, string>;
   /** Skill choices (global default and per project, by skill id) and what was imported into the library (by folder). */

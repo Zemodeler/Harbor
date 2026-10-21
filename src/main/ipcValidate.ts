@@ -93,6 +93,7 @@ export function validateInvoke(method: string, args: unknown[]): void {
       break;
     case 'listSkills':
     case 'listMods':
+    case 'listModCommands':
       if (args[0] !== undefined && args[0] !== null && !isId(args[0])) bad('project id must be a short non-empty string');
       break;
     case 'previewSkillImport': {
