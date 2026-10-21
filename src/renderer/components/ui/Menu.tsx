@@ -1,3 +1,4 @@
+import { Tooltip } from './Tooltip';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import './ui.module.css';
 import m from './menu.module.css';
@@ -66,9 +67,9 @@ export function Menu({ label, title, trigger, items, className, triggerClassName
   };
 
   return <span ref={wrap} className={`${m.wrap} ${className ?? ''}`}>
-    <button ref={button} type="button" className={`${m.trigger} ${triggerClassName ?? ''}`} aria-label={label} title={title} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
+    <Tooltip text={title ?? ''} side="bottom" disabled={!title}><button ref={button} type="button" className={`${m.trigger} ${triggerClassName ?? ''}`} aria-label={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
       onClick={() => { if (open) close(false); else { setPos({ opacity: 0 }); setOpen(true); } }}
-      onKeyDown={e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setPos({ opacity: 0 }); setOpen(true); } }}>{trigger}</button>
+      onKeyDown={e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setPos({ opacity: 0 }); setOpen(true); } }}>{trigger}</button></Tooltip>
     {open ? <div ref={popover} id={menuId} role="menu" aria-label={label} className={m.menu} style={pos} onKeyDown={onMenuKey}>
       {items.map(item => item.separator ? <div key={item.key} role="separator" className={m.separator}/>
         : <MenuRow key={item.key} item={item} select={() => { close(true); item.onSelect(); }}/>)}
