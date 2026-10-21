@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import type { CliId, Conversation, EffortPolicy, Id, LowAllowancePolicy, Message, Project, ProjectNote, ProjectSettings, ResultRating, RolePreference, Settings, SpendCeilings, ToolRule } from '../shared/api';
 import { isEditorId } from './launcher';
 import { cliPathProblem } from './clis/discovery';
@@ -644,6 +644,7 @@ export function mergeSettings(cur: Settings, patch: Partial<Settings>): Settings
     for (const [cli, path] of Object.entries(p.cliPaths ?? {})) { if (path) merged[cli] = path; else delete merged[cli]; }
     if (Object.keys(merged).length) next.cliPaths = merged; else delete next.cliPaths;
   }
+  if (!next.projectsDir) delete next.projectsDir;
   for (const k of [...SCOPED_KEYS, 'projectOverrides'] as const) {
     if (next[k] === undefined || (k === 'projectOverrides' && !Object.keys(next[k]!).length)) delete next[k];
   }
@@ -776,6 +777,12 @@ export function normalizeSettingsPatch(patch: Partial<Settings>): Partial<Settin
       map[cli] = p as string;
     }
     out.cliPaths = map;
+  }
+  if ('projectsDir' in patch) {
+    const d: unknown = patch.projectsDir;
+    if (d === undefined || d === '') out.projectsDir = undefined;
+    else if (typeof d !== 'string' || d.length > 1024 || /[\0\r\n]/.test(d) || !isAbsolute(d.trim()) || parse(resolve(d.trim())).root === resolve(d.trim())) throw new Error('projectsDir must be an absolute folder path (not a drive root).');
+    else out.projectsDir = resolve(d.trim());
   }
   if ('remote' in patch) out.remote = normalizeRemoteSettings(patch.remote);
   if (patch.maxHelpersPerTurn !== undefined) out.maxHelpersPerTurn = clampInt(patch.maxHelpersPerTurn, HELPERS_PER_TURN_RANGE, 'maxHelpersPerTurn');

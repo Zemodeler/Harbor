@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { HarborState } from '../hooks/useHarbor';
 import { cliReadiness, readinessSummary } from '../onboarding';
 import { Modal } from './Modal';
+import { NewProject } from './NewProject';
 import s from '../Harbor.module.css';
 import n from './Navigation.module.css';
 
@@ -15,10 +16,12 @@ const status = { ready: 'Ready', signedOut: 'Needs sign-in', unknown: 'Sign-in s
 export function Onboarding({ state, finish }: { state: HarborState; finish: () => void }) {
   const [step, setStep] = useState(0);
   const [pending, setPending] = useState(false);
+  const [starting, setStarting] = useState(false);
   const { ready, text } = readinessSummary(state.clis, state.settings);
   const project = state.projects.find(p => p.id === state.projectId);
   async function busy(work: () => Promise<unknown>) { setPending(true); try { await work(); } finally { setPending(false); } }
   const last = step === steps.length - 1;
+  if (starting) return <NewProject state={state} close={() => setStarting(false)}/>;
   return <Modal title={steps[step] === 'Welcome' ? 'Welcome to Harbor' : steps[step]} close={finish}>
     <div className={n.wizard}>
       <ol className={n.steps} aria-label={`Step ${step + 1} of ${steps.length}`}>{steps.map((name, i) => <li key={name} data-done={i <= step || undefined}><span className={n.visuallyHidden}>{name}{i < step ? ' (done)' : i === step ? ' (current)' : ''}</span></li>)}</ol>
@@ -36,7 +39,7 @@ export function Onboarding({ state, finish }: { state: HarborState; finish: () =
       </> : step === 2 ? <>
         {project ? <p>Your project <strong>{project.name}</strong> is open. Add more any time from the + on the left or with Ctrl+K.</p>
           : <p>Choose a folder on this computer. Harbor works in that folder and in separate git worktrees for helpers; your files stay where they are.</p>}
-        <div><button className={project ? undefined : s.primary} disabled={pending} onClick={() => void busy(() => state.addProject(undefined))}>{project ? 'Add another folder…' : 'Choose project folder…'}</button></div>
+        <div><button className={project ? undefined : s.primary} disabled={pending} onClick={() => void busy(() => state.addProject(undefined))}>{project ? 'Add another folder…' : 'Choose project folder…'}</button>{state.api.createProject ? <> <button disabled={pending} onClick={() => setStarting(true)}>Start a new project…</button></> : null}</div>
         {state.error ? <p className={s.error} role="alert">{state.error}</p> : null}
       </> : <>
         <dl className={n.modeList}>

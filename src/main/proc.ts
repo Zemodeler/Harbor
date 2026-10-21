@@ -225,8 +225,10 @@ export function killTree(child: ChildProcess): void {
  */
 export function gitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const n = Math.max(0, Number.parseInt(base.GIT_CONFIG_COUNT ?? '0', 10) || 0);
+  // GIT_TERMINAL_PROMPT=0: a missing login fails fast with a message instead of a child process waiting on a prompt nobody sees.
   return {
     ...base,
+    GIT_TERMINAL_PROMPT: '0',
     GIT_CONFIG_COUNT: String(n + 2),
     [`GIT_CONFIG_KEY_${n}`]: 'core.longpaths', [`GIT_CONFIG_VALUE_${n}`]: 'true',
     [`GIT_CONFIG_KEY_${n + 1}`]: 'core.untrackedCache', [`GIT_CONFIG_VALUE_${n + 1}`]: 'true'

@@ -4,6 +4,7 @@ import { seed } from './seed';
 import { createMockSkills } from './mockSkills';
 import { createMockDocuments } from './mockDocuments';
 import { createMockTransfer } from './mockTransfer';
+import { createMockLifecycle } from './mockLifecycle';
 import { createMockMcp } from './mockMcp';
 
 const demoBranch = 'harbor/implement-account-page-1a2b3c';
@@ -185,6 +186,8 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
     ...createMockTransfer(() => data, () => settings, emit, pause),
     // MCP servers (CHANGELOG 0.1.36): a sample registry; nothing is run or written.
     ...createMockMcp(pause),
+    // Project lifecycle and publishing (CHANGELOG 0.1.47): sample outcomes only.
+    ...createMockLifecycle(() => data, pause, projectId => api.removeProject(projectId), () => settings),
     async listProjects() { await pause(); return copy(data.projects); },
     async addProject(path) {
       const projectPath = path?.trim() || `C:\\Projects\\New project ${data.projects.length + 1}`;
