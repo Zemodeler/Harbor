@@ -19,6 +19,7 @@ Harbor is a personal tool for one person on their own machine. It is not a sandb
 | Concierge is wrong | Runs with no tools (`--tools ""`), read-only; escalates when unsure | Its answers can still be wrong |
 | Skills, MCP servers, custom CLIs | Skill imports are checked and run nothing; you approve a custom CLI's executable by its hash; an MCP server reaches a run only if each tool call can be asked about, or if you allowed it without asking | Once allowed, they run as you. The MCP registry is stored as plain text (an owner decision) |
 | Screenshots | Every capture needs your yes, and the source is your pick in a live preview, never the agent's; at most one per agent per minute | A capture can show anything on that window or screen |
+| Remote API | Off by default; loopback bind; TLS or an explicit plain-HTTP acknowledgement off-box; bearer tokens (hash stored) with scopes; no CORS; requests with an `Origin` header or an unexpected Host refused; desktop-only methods never remote | Unit-tested only. `full` scope can start work that runs as you. Plain HTTP over a network exposes tokens |
 | Bundles | Built from an allowlist (no credentials, MCP or env values, CLI paths or session ids); a secret scan, with redaction offered; an imported bundle never approves checks | The secret scan is pattern-based |
 
 ## What agents can do (Claude runs)
@@ -39,12 +40,17 @@ Tool prompts offer three answers: allow once; always allow for this project (a c
 
 - Harbor never reads or stores credentials. Sign-in is always each CLI's own flow. Codex usage is read from `~/.codex/sessions`, never from auth files.
 - Credential-looking files (`.env*`, keys, `.npmrc`, `.netrc`, service-account JSON, ...) are kept out of Harbor's commits and hidden in diffs.
+- An edit helper's commits and every integration are scanned for secrets (see [architecture](architecture.md)); a finding blocks the integration until you allow it. Pattern-based, so it misses things.
 - Secret-shaped strings are redacted from logs, check output and diagnostics, on a best-effort basis. Diagnostics contain no message text.
 - Agents inherit your full environment, including any API keys in it. Checks get a reduced one, and custom CLIs and MCP tests get a fixed allowlist of variables.
 - What you type is stored in clear text and sent to the provider. Don't paste secrets.
 
+## Remote API
+
+Off by default (`remote.enabled`; `npm run headless` always serves it). It listens on `127.0.0.1:47821` by default. A non-loopback bind is refused without TLS (`tlsCertFile` and `tlsKeyFile`) unless `allowPlainHttp` says a tunnel already encrypts the traffic. Every request needs `Authorization: Bearer <token>`. A token has one scope: `read-only` (list/get methods and events), `answer-permissions` (adds answering permissions and questions) or `full` (methods that start, stop or change work; creating one needs `remote.allowFullScope`). A token is shown once and only its SHA-256 is stored. Opening windows, folders and terminals, sign-in, diagnostics export, adding project folders and token management are never remote; free resets are never answerable remotely; "always allow" needs `full`; `setSettings` cannot change `remote`. Settings are read once at startup. Only one Harbor (app or headless) may use a data folder at a time. Not verified outside unit tests.
+
 ## Quota brakes
 
-Up to 8 delegations per turn, plus optional per-turn helper and planner limits (off by default; when set, the rest are created paused for you to resume). Helpers running at once: at most 3, set by the quota budget and the concurrency setting. At most 12 automatic lead turns per message. Goal mode stops after 8 continuations. Each lead turn stops at 60 minutes; helpers stop at 35 (soft) and 70 (hard) minutes. The loop guard stops looping helpers. Only one editing lead per project. Rate-limited models are kept out for 30 minutes. A reserve is held back for your interactive work. There is no API fallback, so nothing can spend beyond your subscription. Spend ceilings per task, day or week are planned (roadmap Phase 0) but not built.
+Up to 8 delegations per turn, plus optional per-turn helper and planner limits (off by default; when set, the rest are created paused for you to resume). Helpers running at once: at most 3, set by the quota budget and the concurrency setting. At most 12 automatic lead turns per message. Goal mode stops after 8 continuations. Each lead turn stops at 60 minutes; helpers stop at 35 (soft) and 70 (hard) minutes. The loop guard stops looping helpers. Only one editing lead per project. Rate-limited models are kept out for 30 minutes. A reserve is held back for your interactive work. There is no API fallback, so nothing can spend beyond your subscription. Optional spend ceilings per task, 24 hours and 7 days (estimates from Harbor's own runs) ask you before a run starts and stop runs when reached.
 
 Report problems with Settings > Diagnostics (`exportDiagnostics`). Don't attach `state.json`.

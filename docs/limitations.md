@@ -8,7 +8,7 @@ This page is drawn from the code, the adapter file headers, `BACKLOG.md`, `HANDO
 - **Reported windows can be stale.** Claude's are only seen while Harbor runs Claude. Codex's are as fresh as your last Codex use. Gemini and custom CLIs have none.
 - **Budget constants are starting values** tuned in a simulator that models the providers. The cost priors come from one machine's runs on 2026-10-12, and the Claude figures include the owner's own use outside Harbor. The effort multipliers (`EFFORT_TOKEN_MULT` 0.8/1/1.35) were never measured. The governor projects the last day's burn over the rest of the week and does not model weekends.
 - **Difficulty** is computed from wording and file counts, and the concierge's rating is heuristic. `/deep` forces a strong lead.
-- **Routing quality is unproven.** The catalog is data, not benchmarks. No eval harness yet compares Harbor with a single agent on quality, cost or time (roadmap Phase 1).
+- **Routing quality is unproven.** The catalog is data, not benchmarks. An eval harness exists (`npm run eval`, fake adapters by default), but no real-CLI comparison is recorded, so whether routing and delegation pay off is unmeasured.
 
 ## Cost of delegation
 
@@ -43,7 +43,9 @@ Also unverified:
 
 - Windows only. The installer is not signed. macOS is out of scope and Linux is deferred.
 - Whether headless, parallel use of subscription CLIs fits each provider's terms is an open owner decision (see the README). Check your plan's terms yourself.
-- Built-in adapters exist only for Claude Code and Codex. Gemini is detected but not used, unless you add it as a custom CLI. There is no API fallback.
+- Built-in adapters exist only for Claude Code and Codex. Gemini is detected but not used, unless you add it as a custom CLI (a Gemini adapter is in progress on an unmerged branch). There is no API fallback.
+- The remote API, spend ceilings, the secret scan and the repository map are covered by unit tests only; none was exercised against real CLIs or remote clients.
+- The task report covers only runs of the last 8 days; its quota figures are estimates.
 - "Open in editor" needs the editor installed and registered for its URL protocol.
 
 ## Surprises
@@ -54,7 +56,8 @@ Also unverified:
 - **Decisions** (`HARBOR_DECISION`) are scoped to the conversation they were noted in. A new conversation does not inherit them.
 - **Direct messages** reach a running helper only after its current step. A `HARBOR_REPLY` to a queued helper arrives after its first run.
 - **A held task is not a record.** A task refused by the size gate or the dirty-base check is not created, so the lead has to delegate it again.
-- **Streaming** comes per CLI message, not per token.
+- **Streaming** comes per CLI message, not per token (token deltas are a backlog item).
+- **Stop** on a lead stops only the open conversation's running turn and its helpers; with no lead turn running, nothing happens.
 - **Rollback** handles merge commits only, one task at a time, and the lead cannot start it.
 - **Concurrency** is per project. There is no cross-project queue, and no capacity is reserved for your messages beyond the quota reserve.
 - **`routing: manual`** has no effect. You can name a CLI in a message instead ("use codex").
@@ -63,4 +66,4 @@ Also unverified:
 
 ## Interface gaps
 
-These are built in the renderer but recorded as tested only against the in-memory mock: integrate, apply, rollback, queue controls, routing settings, tool rules, diagnostics export, and the auto-mode confirmation. Not built: a deadline picker (`setConversationDeadline`), a budget panel, a cross-project queue view, per-conversation CLI override, a UI for stored decisions, an `autoUpdate` setting in the typed settings or the UI, and an integrated terminal. Quality gaps (re-rendering, no virtualization, one global error string, no accessibility audit) are listed in `BACKLOG.md`.
+These are built in the renderer but recorded as tested only against the in-memory mock: integrate, apply, rollback, queue controls, routing settings, tool rules, diagnostics export, and the auto-mode confirmation. Not built (per `BACKLOG.md`, which may lag newer renderer work): a deadline picker (`setConversationDeadline`), a budget panel, a cross-project queue view, per-conversation CLI override, a UI for stored decisions, an `autoUpdate` setting in the typed settings or the UI, and an integrated terminal. Quality gaps (re-rendering, no virtualization, one global error string, no accessibility audit) are listed in `BACKLOG.md`.

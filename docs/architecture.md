@@ -14,6 +14,8 @@ service.ts  HarborApi over Store + Orchestrator + UsageLedger (no electron impor
   clis/             discovery, registry, capabilities.ts (catalog as data), custom.ts (custom CLI descriptors)
   adapters/         claude.ts, codex.ts, generic.ts (custom CLIs), fake.ts (tests)
   usage.ts          usage ledger; codexLimits.ts reads Codex's own logs
+  spend.ts, secretScan.ts, knowledge.ts, repoMap.ts, taskReport.ts, ratings.ts, routingReplay.ts   ceilings, scan, notes, map, measurement
+  remote/, headless.ts, headlessMain.ts   remote API server, scopes, tokens, headless entry
   sizeGate.ts, softCap.ts, loopGuard.ts, helperLimit.ts, dirtyBase.ts, askRouting.ts   delegation brakes
   skills/, mcp/, bundles/, importers/, screenshots.ts, documents.ts, images.ts          features
   handoff.ts, rollback.ts, git.ts, gitView.ts, launcher.ts, updater.ts, journal.ts, diagnostics.ts
@@ -24,7 +26,7 @@ The renderer/main contract is `src/shared/api.ts`. It only grows by optional add
 ## Agents
 
 - **Concierge**: one call with no tools to a cheap model. It answers, or escalates with complexity and needs.
-- **Lead**: one native CLI session per conversation, resumed every turn, working in your folder. It talks to Harbor with single-line JSON protocol lines: `HARBOR_DELEGATE`, `HARBOR_ASK`, `HARBOR_REPLY` (answers a helper), `HARBOR_DECISION`, `HARBOR_PEER` (a note to another lead of the same project), `HARBOR_IMAGE_BRIEF`, `HARBOR_GOAL_DONE`, `HARBOR_SCREENSHOT`, `HARBOR_SHOW_IMAGE`, `HARBOR_OPEN_DOCUMENT`.
+- **Lead**: one native CLI session per conversation, resumed every turn, working in your folder. It talks to Harbor with single-line JSON protocol lines: `HARBOR_DELEGATE`, `HARBOR_ASK`, `HARBOR_REPLY` (answers a helper), `HARBOR_DECISION`, `HARBOR_PEER` (a note to another lead of the same project), `HARBOR_NOTE` (a short project note), `HARBOR_IMAGE_BRIEF`, `HARBOR_GOAL_DONE`, `HARBOR_SCREENSHOT`, `HARBOR_SHOW_IMAGE`, `HARBOR_OPEN_DOCUMENT`.
 - **Helpers**: planner, implementer (in its own worktree), reviewer (read-only, ends with a verdict), or other (read-only unless it asks for edit access). Helpers report with `HARBOR_RESULT`. They may ask with `HARBOR_REQUEST_HELP` or `HARBOR_ASK`, and they never start or message agents. Questions about files, scope or branches go to the lead first. Only questions about credentials, destructive actions or publishing go straight to you. An unanswered helper question is answered "no" after 10 minutes.
 - **Integrator and rollback**: Harbor's own git code. No CLI is involved.
 
@@ -35,7 +37,7 @@ Claude's native `Task`/`Agent` tools are disabled. Codex's `ultra` effort, which
 1. **Triage.** Obvious work, images, `/deep`, go-aheads and named CLIs skip the concierge. For everything else, the concierge decides.
 2. **Route** a CLI, model and effort ([routing](routing-and-usage.md)). If a session cannot resume (new conversation, lost session, another CLI took over), Harbor prepends a handoff it writes itself: decisions, unfinished work, and verification evidence tied to the commit it covered.
 3. **Lead turn.** Only one lead per project edits the folder at a time; other turns queue. A turn is stopped at 60 minutes. A steering message interrupts the turn and starts a new one.
-4. **Delegate.** Protocol lines are parsed after the turn. A line counts only if it is valid JSON at column 0, outside code fences, and carries the per-turn tag. Per-turn caps: 8 delegations, 3 peer notes, 3 decisions, 3 replies, 1 screenshot, 3 images, 3 documents. The **size gate** refuses an edit task estimated at over 25 minutes, one claiming more than 10 paths, and catch-all tasks. It also holds an edit task whose files overlap uncommitted edits in your folder. Each refusal comes with a notice to the lead.
+4. **Delegate.** Protocol lines are parsed after the turn. A line counts only if it is valid JSON at column 0, outside code fences, and carries the per-turn tag. Per-turn caps: 8 delegations, 3 peer notes, 3 project notes, 3 decisions, 3 replies, 1 screenshot, 3 images, 3 documents. The **size gate** refuses an edit task estimated at over 25 minutes, one claiming more than 10 paths, and catch-all tasks. It also holds an edit task whose files overlap uncommitted edits in your folder. Each refusal comes with a notice to the lead.
 5. **Schedule.** Helpers start by priority, then by age, once their dependencies are done. The number running at once is set by the quota budget (at most 3; 1 when a pool is in "protect"; none while every pool is exhausted) and by your concurrency setting, whichever is smaller. A failed dependency fails its dependents.
 6. **Run.** Edit helpers get a `harbor/<slug>` worktree created from the committed `HEAD`. Every run ends with a checkpoint commit. Helpers have a soft time limit of 35 minutes (an active run continues past it) and a hard limit of 70 minutes, and are resumed once automatically after a limit. The **loop guard** stops a helper that keeps repeating the same commands or cycles without progress. It resumes the helper once, and on a second loop it leaves the helper stopped and wakes the lead.
 7. **Check.** The approved `.harbor/checks.json` runs on the helper's commit. A later commit marks reviews and checks **outdated**. Harbor schedules a reviewer itself when routing flagged the work as only just inside the model's capability.
@@ -50,6 +52,11 @@ Edit helpers never share a checkout, so collisions show up as merge conflicts at
 
 ## Features beyond the core loop
 
+- **Project knowledge** (`knowledge.ts`, `repoMap.ts`): the lead writes short notes with `HARBOR_NOTE` (at most 40 per project, secret-looking strings masked). They are model-written and advisory; prompts say the user, `AGENTS.md` and the repository win. Leads get the notes they have not seen yet. Helpers, except reviewers, also get a read-only repository map (at most 6,000 characters, cached by HEAD and working-tree status, credential files never listed). The concierge gets neither.
+- **Spend ceilings** (`spend.ts`): optional limits per task, 24 hours and 7 days, in k-tokens and agent-minutes of Harbor's own runs (an estimate). A reached ceiling asks you before a run starts and stops runs in its scope; "yes" allows one more limit's worth.
+- **Secret scan** (`secretScan.ts`): what an edit helper commits is scanned for keys, tokens and credential-named files. Findings (type, file, line, never the value) go into the report and to reviewers. An integration is scanned after merging and fails unless nothing is found, an allowlist or a `harbor:allow-secret` marker covers it, or you say yes. Pattern-based, best effort.
+- **Measurement** (`taskReport.ts`, `ratings.ts`, `routingReplay.ts`, `scripts/eval`): `getTaskReport` totals a conversation from Harbor's usage records (kept 8 days; quota figures are estimates), results can be rated, `replayRouting` re-routes recorded decisions under a what-if, and `npm run eval` compares Harbor with a single agent.
+- **Remote API** (`remote/`, `headless.ts`): see [safety](safety.md). Every contract method is classified by scope; an unclassified one is denied.
 - **Skills** (`skills/`): a library in `%APPDATA%\Harbor\skills`, project skills in `.harbor/skills`, and read-only listings of Claude's and Codex's own skill folders. Lead and helper runs get each enabled skill's name, description and path. Imports from a folder, zip or GitHub are checked and never run anything.
 - **MCP servers** (`mcp/`): one registry in `mcp-servers.json`, written out per run in each CLI's own format. A server reaches a run only if each tool call can be asked about, or if you marked the server as allowed without asking. Read-only runs get no servers.
 - **Custom CLIs** (`clis/custom.ts`, `adapters/generic.ts`): a CLI described as data. You approve the executable, and Harbor records its hash; if the file changes, Harbor stops running it.
@@ -68,4 +75,4 @@ Edit helpers never share a checkout, so collisions show up as merge conflicts at
 
 ## Data
 
-`%APPDATA%\Harbor\state.json` holds projects, conversations, messages (with the routing reason), agents, session links, usage events, calibration, coordination entries, file locks, tool rules and settings. These sit next to it: `capabilities.json` (optional catalog override), `custom-clis.json`, `mcp-servers.json`, `skills/`, `attachments/`, `patches/` and logs. New fields are optional, so older files still load.
+`%APPDATA%\Harbor\state.json` holds projects, conversations, messages (with the routing reason), agents, session links, usage events, calibration, coordination entries, project notes, ratings, file locks, tool rules and settings. These sit next to it: `capabilities.json` (optional catalog override), `custom-clis.json`, `mcp-servers.json`, remote token hashes, `harbor.lock`, `skills/`, `attachments/`, `patches/` and logs. New fields are optional, so older files still load.
