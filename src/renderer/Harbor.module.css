@@ -631,6 +631,7 @@
 .execution > summary::-webkit-details-marker { display: none; }
 .execution > summary:hover { color: var(--ink); }
 .reviewAction { align-self: start; margin: 0 0 var(--sp-4); font-size: var(--fs-sm); }
+.reviewAction.primary { color: var(--on-accent); }
 .message { margin-bottom: 28px; }
 .assistant { max-width: 72ch; }
 .byline strong { font-weight: 600; font-size: var(--fs-sm); }
