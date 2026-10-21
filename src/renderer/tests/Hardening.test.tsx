@@ -371,20 +371,26 @@ describe('App flows', () => {
     await ready();
     const nav = within(screen.getByRole('navigation', { name: 'Projects and conversations' }));
     await userEvent.click(nav.getByRole('button', { name: 'New conversation' }));
-    const buttons = await screen.findAllByRole('button', { name: /^Delete conversation New conversation/ });
-    expect(buttons[0]).toBeEnabled();
+    await userEvent.click((await screen.findAllByLabelText('Options for New conversation'))[0]);
+    expect(await screen.findByRole('menuitem', { name: /^Delete conversation New conversation/ })).toBeEnabled();
+    await userEvent.keyboard('{Escape}');
     const c = (await window.harbor.listConversations('store')).find(x => x.title === 'New conversation')!;
     await push({ type: 'conversation', conversation: { ...c, activity: { state: 'working', updated: Date.now() } } });
-    expect(screen.getAllByRole('button', { name: /^Delete conversation New conversation/ })[0]).toBeDisabled();
+    await userEvent.click(screen.getAllByLabelText('Options for New conversation')[0]);
+    const busy = await screen.findByRole('menuitem', { name: /^Delete conversation New conversation/ });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAccessibleDescription('Stop this session or clear its queue before deleting it');
   });
   it('closes an open conversation menu with Escape', async () => {
     await ready();
-    const summary = screen.getByLabelText('Options for Polish the checkout');
-    await userEvent.click(summary);
-    const details = summary.closest('details')!;
-    expect(details.open).toBe(true);
+    const trigger = screen.getByLabelText('Options for Polish the checkout');
+    await userEvent.click(trigger);
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('menu', { name: 'Options for Polish the checkout' })).toBeInTheDocument();
     fireEvent.keyDown(document.body, { key: 'Escape' });
-    expect(details.open).toBe(false);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    expect(trigger).toHaveFocus();
   });
   it('removing the last project clears the open project instead of leaving stale state', async () => {
     const hook = renderHook(() => useHarbor());
