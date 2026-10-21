@@ -2,6 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { HarborApi, Skill, SkillDetail, SkillImportPreview, SkillImportSource } from '../../shared/api';
 import { errorText } from '../hooks/useAgentActions';
 import s from './Features.module.css';
+import { InlineConfirm } from './ui/InlineConfirm';
+
+// The safe choice (Cancel, first in the group) takes focus when a destructive confirm opens. Module-level so it runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 const SOURCE_LABEL: Record<Skill['source'], string> = { library: 'Harbor library', project: 'Project', claude: 'From Claude Code', codex: 'From Codex' };
 export const formatBytes = (n: number): string => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} bytes`);
@@ -52,8 +56,7 @@ export function SkillsPanel({ api, projectId, projectName }: { api: HarborApi; p
           {sk.source !== 'library' && api.previewSkillImport ? <button disabled={busy} onClick={() => setImporter({ kind: 'folder', path: sk.path })}>Copy to library</button> : null}
           {sk.source === 'library' && api.removeSkill ? <button disabled={busy} onClick={() => setConfirm(sk.id)}>Remove</button> : null}
         </div>
-        {confirm === sk.id ? <div className={s.fxConfirm} role="group" aria-label={`Remove ${sk.name}`}><p>Remove {sk.name} from Harbor’s library? Its folder is deleted; projects stop using it.</p>
-          <div className={s.fxRow}><button className={s.fxPrimary} disabled={busy} onClick={() => void remove(sk)}>Remove {sk.name}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>Keep it</button></div></div> : null}
+        {confirm === sk.id ? <div ref={focusSafe}><InlineConfirm label={`Remove ${sk.name}`} confirmLabel={`Remove ${sk.name}`} cancelLabel="Keep it" pending={busy} onConfirm={() => void remove(sk)} onCancel={() => setConfirm(undefined)}>Remove {sk.name} from Harbor’s library? Its folder is deleted; projects stop using it.</InlineConfirm></div> : null}
         {open[sk.id] ? <SkillText detail={open[sk.id]!}/> : null}
       </li>)}</ul>}
   </div>;
