@@ -33,6 +33,7 @@ export interface PaletteMeta { tags: Record<string, string[]>; recent: string[];
 
 const SEARCH_DELAY_MS = 180;
 const LIMIT = 60;
+const groupLabel = { action: 'Commands', project: 'Projects', conversation: 'Conversations', prompt: 'Prompts' } as const;
 const kindLabel = { action: 'Command', project: 'Project', conversation: 'Conversation', prompt: 'Prompt' } as const;
 const themeNames: Record<AppearanceMode, string> = { system: 'Use system', light: 'Light', dark: 'Dark', contrast: 'High contrast' };
 
@@ -213,6 +214,12 @@ export function CommandMenu({ state, history, close, actions, meta, templates = 
     else if ((e.key === 'Home' || e.key === 'End') && e.ctrlKey) move(e.key === 'Home' ? 0 : last);
     else if (e.key === 'Enter') { e.preventDefault(); const entry = entries[current]; if (entry) run(entry); }
   }
+  // Headings only while nothing is typed: a typed query is ordered by relevance, and headings would flip with every key.
+  const grouped = !text && !history && parsed.scope === 'all';
+  const recentIds = new Set(meta?.recent || []);
+  let recentCount = 0;
+  if (grouped) while (recentCount < entries.length && recentIds.has(entries[recentCount]!.id) && !entries[recentCount]!.disabled) recentCount++;
+  const sectionOf = (entry: Entry, i: number) => i < recentCount ? 'Recent' : groupLabel[entry.kind];
   const label = history ? 'Search conversation history' : 'Search commands, projects and conversations';
   const activeId = entries.length ? `${optionId}-${current}` : undefined;
   return <div className={n.palette}>
@@ -220,13 +227,19 @@ export function CommandMenu({ state, history, close, actions, meta, templates = 
       <input autoFocus className={s.search} role="combobox" aria-label={label} aria-expanded={entries.length > 0} aria-controls={listId} aria-activedescendant={activeId} aria-autocomplete="list"
         placeholder={history ? 'Search titles and messages…' : 'Type a command, project or conversation…'} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={onKeyDown}/>
     </div>
-    {!history ? <p className={n.hint} id={`${listId}-hint`}>↑↓ to move · Enter to run · <kbd>&gt;</kbd> commands · <kbd>@</kbd> projects · <kbd>#</kbd> tags</p> : null}
     <ul ref={list} id={listId} role="listbox" aria-label={history ? 'Conversations' : 'Results'} className={n.options}>
-      {entries.map((entry, i) => <Option key={entry.id} id={`${optionId}-${i}`} index={i} entry={entry} active={i === current} query={text} run={runStable} hover={setActive}/>)}
+      {entries.map((entry, i) => {
+        const section = grouped ? sectionOf(entry, i) : undefined;
+        const heading = section && (i === 0 || section !== sectionOf(entries[i - 1]!, i - 1));
+        return [heading ? <li key={`h:${section}`} role="presentation" className={n.group}>{section}</li> : null,
+          <Option key={entry.id} id={`${optionId}-${i}`} index={i} entry={entry} active={i === current} query={text} run={runStable} hover={setActive}/>];
+      })}
     </ul>
     <div aria-live="polite" className={n.status}>
       {loading ? <p>Searching messages…</p> : error ? <p role="alert">{error} <button onClick={() => setRetry(x => x + 1)}>Retry search</button></p>
         : !entries.length ? <p className={s.muted}>{history || parsed.scope === 'tag' ? 'No matching conversations.' : 'Nothing matches. Try fewer letters, or > for commands.'}</p> : null}
     </div>
+    <p className={n.paletteHint} id={`${listId}-hint`}><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span>
+      {!history ? <span className={n.hintPrefixes}><kbd>&gt;</kbd> commands <kbd>@</kbd> projects <kbd>#</kbd> tags</span> : null}</p>
   </div>;
 }

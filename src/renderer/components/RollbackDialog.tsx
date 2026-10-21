@@ -3,23 +3,25 @@ import type { Agent, HarborApi, RollbackDependent, RollbackPreview } from '../..
 import { errorText, useAction } from '../hooks/useAgentActions';
 import { AgentOutcome, shortHash } from './AgentOutcome';
 import { ApplyButton } from './IntegrationPanel';
-import { Modal } from './Modal';
+import { Modal } from './ui/Modal';
 import s from './Features.module.css';
 
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const REASON: Record<RollbackDependent['reason'], string> = { dependsOn: 'waits for it', spec: 'used its spec', help: 'asked for its help', overlap: 'later work on the same files' };
 
 function PreviewBody({ preview, agents }: { preview: RollbackPreview; agents: Agent[] }) {
   const who = (id?: string) => id ? agents.find(a => a.id === id)?.title ?? id : undefined;
   const blockers = preview.blockers ?? [], notes = preview.notes ?? [];
   return <div className={s.fxDialog}>
+    <p className={s.fxSummary} aria-label="Summary">{plural(preview.merges?.length ?? 0, 'merge')}, {plural(preview.files?.length ?? 0, 'file')}</p>
     <p className={s.fxPreviewNote}>Preview only. Nothing has been changed; this is what undoing the task would do.</p>
     <section><h3>Target</h3><div><strong>{preview.target ?? 'checked-out branch'}</strong>{preview.targetHead ? <> at <span className={s.fxMono}>{shortHash(preview.targetHead)}</span></> : null}</div></section>
     <section><h3>Merge commits that would be reverted</h3>{preview.merges?.length
       ? <ul className={s.fxList}>{preview.merges.map(m => <li key={m.commit}><span className={s.fxMono}>{shortHash(m.commit)}</span>{who(m.agentId) ? <span>{who(m.agentId)}</span> : null}{m.integrationId ? <span className={s.fxMuted}>via {who(m.integrationId)}</span> : null}</li>)}</ul>
       : <p className={s.fxNote}>None found.</p>}</section>
-    <section><h3>Files</h3>{preview.files?.length
+    <section><details className={s.fxFiles}><summary>Files ({preview.files?.length ?? 0})</summary>{preview.files?.length
       ? <ul className={`${s.fxList} ${s.fxScroll}`}>{preview.files.map(f => <li key={f.path}><span className={s.fxBadge}>{f.status}</span><span className={s.fxMono}>{f.hidden ? `${f.path} (hidden: credentials)` : f.path}</span></li>)}</ul>
-      : <p className={s.fxNote}>No files listed.</p>}</section>
+      : <p className={s.fxNote}>No files listed.</p>}</details></section>
     <section><h3>Later commits on the same files</h3>{preview.laterCommits?.length
       ? <ul className={s.fxList}>{preview.laterCommits.map(c => <li key={c.hash}><span className={s.fxMono}>{shortHash(c.hash)}</span><span>{c.subject}</span>{c.agentTitle ? <span className={s.fxMuted}>by {c.agentTitle}</span> : null}{c.files?.length ? <span className={`${s.fxMuted} ${s.fxMono}`}>{c.files.join(', ')}</span> : null}</li>)}</ul>
       : <p className={s.fxNote}>None.</p>}</section>
@@ -55,16 +57,13 @@ export function RollbackAction({ api, agent, agents }: { api: HarborApi; agent: 
   }
   return <>
     <button onClick={() => setOpen(true)}>Preview rollback</button>
-    {open ? <Modal title={`Preview rollback: ${agent.title}`} close={() => setOpen(false)}>
+    {open ? <Modal title={`Preview rollback: ${agent.title}`} close={() => setOpen(false)} size="lg" footer={<><button onClick={() => setOpen(false)}>Close</button>
+        <button className={s.fxPrimary} disabled={!preview || blocked || act.busy || !!queued} title={blocked ? 'Resolve the blockers first' : undefined} onClick={() => void rollBack()}>{act.busy ? 'Queuing…' : 'Roll back'}</button></>}>
       <div className={s.fxRow}><label className={s.fxRow}>Target branch<input value={target} placeholder="checked-out branch" onChange={e => setTarget(e.target.value)}/></label><button onClick={() => void load(target)}>Preview again</button></div>
       {loadError ? <p className={s.fxError} role="alert">{loadError}</p> : !preview ? <p role="status">Simulating the rollback…</p> : <PreviewBody preview={preview} agents={agents}/>}
       {preview?.supported === false && !(preview.blockers?.length) ? <p className={s.fxNote}>Harbor cannot reverse this task automatically.</p> : null}
       {queued ? <p className={s.fxNote} role="status">Rollback queued as “{queued.title}”. Its card shows progress and an Apply button when it is done.</p> : null}
       {act.error ? <p className={s.fxError} role="alert">{act.error}</p> : null}
-      <div className={s.fxRow} style={{ justifyContent: 'flex-end', marginTop: 12 }}>
-        <button onClick={() => setOpen(false)}>Close</button>
-        <button className={s.fxPrimary} disabled={!preview || blocked || act.busy || !!queued} title={blocked ? 'Resolve the blockers first' : undefined} onClick={() => void rollBack()}>{act.busy ? 'Queuing…' : 'Roll back'}</button>
-      </div>
     </Modal> : null}
   </>;
 }
