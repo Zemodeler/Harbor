@@ -41,7 +41,7 @@ import { RepoMapCache } from './repoMap';
 import { calibrationSample, finishedRuns, overlapKTok, readingsDuring } from './runCalibration';
 import { effortFor, evaluate, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
 import { DEFAULT_CONCURRENCY, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
-import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
+import type { AgentRecord, CheckRun, PendingPermissionRecord, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
 import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
 import { isModelSpecific } from './adapters/types';
@@ -59,6 +59,8 @@ import { SECRET_TOOL, applyAllowlist, describeFindings, findingsFingerprint, sca
 import type { SecretScanRecord } from './types';
 
 export interface OrchestratorDeps {
+  /** Called when the set of unanswered tool permission requests changes (the service mirrors it into the store for crash recovery). */
+  permissionsChanged?: () => void;
   store: Store;
   bus: EventBus;
   ledger: UsageLedger;
@@ -684,6 +686,8 @@ export class Orchestrator {
   /** Reconcile persisted state after a restart: nothing is running, so working agents are stopped (never replayed). */
   recover(): void {
     this.sweep = this.reapOrphans();
+    // Taken first: nothing may write a new list before this one is read.
+    const unanswered = this.d.store.takePendingPermissions();
     for (const p of this.d.store.listProjects()) for (const c of this.d.store.listConversations(p.id)) {
       if (c.activity && ['working', 'queued'].includes(c.activity.state)) this.sessionState(c.id, 'stopped', 'Harbor restarted. Send a message to continue.');
     }
@@ -700,7 +704,8 @@ export class Orchestrator {
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     this.noticeUncertainReports();
     this.noticeInterrupted(interrupted);
-    this.noticeStranded(stranded);
+    const told = this.noticeUnanswered(unanswered);
+    this.noticeStranded(stranded.filter((a) => !told.has(a.id)));
     for (const p of this.d.store.listProjects()) this.pump(p.id);
     this.startup = this.startupGit(interrupted).catch(() => {});
   }
@@ -759,6 +764,31 @@ export class Orchestrator {
       this.post(conv, 'system', `Harbor cannot tell whether the lead received ${items.length} helper report(s): ${reportRefs(items)}. Each report is kept and goes to the lead with its next turn (your next message to it, or its next helper report), marked as possibly seen already. Nothing is re-run.`);
       this.d.store.noticeReports(items);
     }
+  }
+
+  /**
+   * Permission requests the previous run left unanswered. The CLI that asked died with Harbor, so the request cannot be put back
+   * on screen: it counts as denied, the asking agent is stopped (`stopKind: 'restart'`; a lead only waits for the next message)
+   * and the conversation and the lead's next turn are told. Returns the agents that were told.
+   */
+  private noticeUnanswered(items: PendingPermissionRecord[]): Set<Id> {
+    const told = new Set<Id>();
+    for (const r of items) {
+      const a = r.agentId ? this.d.store.getAgent(r.agentId) : undefined;
+      // A free-reset proposal belongs to no conversation; Harbor proposes it again when it applies.
+      // A helper's request names its own conversation; the user follows a helper in its lead's conversation.
+      const conv = [a && a.role !== 'main' ? a.parentConversationId : undefined, r.conversationId].find((c): c is Id => !!c && !!this.d.store.getConversation(c));
+      if (!conv) continue;
+      if (a && a.role !== 'main' && !['stopped', 'done', 'failed'].includes(a.state)) this.setState(a, 'stopped', { error: RESTART_WAITING_ERROR, stopKind: 'restart' });
+      const what = r.kind === 'tool' ? `to run ${r.tool ?? 'a tool'}` : r.kind === 'screenshot' ? 'to take a screenshot' : 'for an answer';
+      const who = !a ? 'An agent' : a.role === 'main' ? 'The lead agent' : `"${clip(a.title, 50)}"`;
+      const next = a && a.role !== 'main' ? 'It is stopped; resume it to continue from its saved session (it will ask again).' : 'Send a message to continue; it will ask again if it still needs this.';
+      this.post(conv, 'system', `Harbor restarted while ${who} was waiting for your permission ${what}. That request is gone and nothing was allowed or run. ${next}`, a ? { agentId: a.id } : undefined);
+      this.addNote(conv, `Restart: ${who} had an unanswered permission request ${what}; it was treated as denied.`);
+      this.log({ kind: 'permission', projectId: a?.projectId ?? this.d.store.getConversation(conv)!.projectId, conversationId: conv, ...(a ? { agentId: a.id } : {}), text: `${r.tool ?? r.kind}: unanswered at restart (${r.hash}); treated as denied` });
+      if (a) told.add(a.id);
+    }
+    return told;
   }
 
   /** One note per helper the restart found waiting for an answer; the lead hears of it at its next turn (no turn is started). */
@@ -3378,6 +3408,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       this.post(conversationId, 'system', `${prompt}\nWaiting for your answer (${choices}). Denied automatically after ${minutes}.`, { agentId: agent.id });
       journal('asked the user');
       this.emit(event);
+      this.d.permissionsChanged?.();
     });
   }
 
@@ -3420,6 +3451,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     this.log({ kind: 'permission', projectId: p.projectId, conversationId: p.conversationId, agentId: p.agentId, text: `${p.tool}: ${journalText}` });
     if (chat) this.post(p.conversationId, 'system', chat, { agentId: p.agentId });
     p.settle(d);
+    this.d.permissionsChanged?.();
     return true;
   }
 
