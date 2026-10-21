@@ -7,6 +7,9 @@ import type { SecretFinding } from './secretScan';
 import type { SpendGrant, SpendRun } from './spend';
 
 /** Main-process view of an agent: the public Agent plus orchestration state. 1 agent == 1 assignment. */
+/** What is kept of an unanswered permission event: no prompt text (it can hold commands or paths), a hash of it instead. */
+export interface PendingPermissionRecord { requestId: Id; kind: 'freeReset' | 'tool' | 'conflict' | 'screenshot'; agentId?: Id; conversationId?: Id; tool?: string; hash: string; created: number }
+
 export interface AgentRecord extends Agent {
   /** The user request / assignment prompt this agent works on. */
   task: string;
@@ -205,6 +208,8 @@ export interface State {
   settings: Settings;
   /** "Always allow for this project" tool rules, keyed by project id. Optional so older files still load. */
   toolRules?: Record<Id, ToolRule[]>;
+  /** Permission requests waiting for an answer when state was last written; a restart cannot continue them (the CLI is gone), so recover() reports and drops them. */
+  pendingPermissions?: PendingPermissionRecord[];
   /** Hash of the `.harbor/checks.json` commands the user approved per project; changed commands need a new approval. */
   checksApproved?: Record<Id, string>;
   /** Skill choices (global default and per project, by skill id) and what was imported into the library (by folder). */

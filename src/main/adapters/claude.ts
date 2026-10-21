@@ -96,6 +96,9 @@ export const NO_ATTRIBUTION_SETTINGS = JSON.stringify({ includeCoAuthoredBy: fal
 
 export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFile?: string, settingsFile?: string): string[] {
   const a = ['-p', '--output-format', 'stream-json', '--verbose'];
+  // Token deltas for streamed lead turns. NOT VERIFIED on a real run (claude is not installed on the dev machine, 2026-10-21): the flag is
+  // documented for -p with stream-json; without it, or when no stream_event lines arrive, whole messages are all there is.
+  if (o.partial && !o.lean) a.push('--include-partial-messages');
   // A settings file (quotes cannot go through .cmd shims) switches off the "Co-Authored-By: Claude" trailer and the generated-with line.
   if (settingsFile) a.push('--settings', settingsFile);
   if (o.model && o.model !== 'default') a.push('--model', o.model);
@@ -217,6 +220,10 @@ export function parseClaudeLine(line: string): Chunk[] {
         ...(typeof u.cache_creation_input_tokens === 'number' ? { cacheWriteTokens: u.cache_creation_input_tokens } : {})
       });
     }
+  } else if (j.type === 'stream_event') {
+    // --include-partial-messages: only text deltas of the top-level conversation are surfaced (sub-agent output is blocked anyway).
+    const ev = j.event;
+    if (!j.parent_tool_use_id && ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string' && ev.delta.text) out.push({ kind: 'delta', text: ev.delta.text });
   } else if (j.type === 'rate_limit_event') {
     // The account's real 5h / 7-day utilization (0..1) as the subscription sees it, not just Harbor's runs.
     const uw = j.rate_limit_info?.unifiedWindows, asOf = Date.now();

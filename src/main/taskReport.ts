@@ -1,9 +1,10 @@
-import type { AgentRole, Conversation, Id, Message, QuotaEstimate, TaskReport, TaskReportAgent, TaskReportDecision, TaskReportModel, TaskReportRun, TaskReportTokens } from '../shared/api';
+import type { AgentRole, Conversation, Id, Message, QuotaEstimate, TaskReport, TaskReportDay, TaskReportRequest, TaskReportSpend, TaskReportAgent, TaskReportDecision, TaskReportModel, TaskReportRun, TaskReportTokens } from '../shared/api';
 import { BUDGET_PERIODS, poolsOfEntry } from './budget';
 import { costPerKTokOf, poolPctPrior } from './budgetPriors';
 import { billableKTok, calibrated, pctKey, type Calibration } from './calibration';
 import { entryFor, type CatalogEntry } from './clis/capabilities';
 import type { AgentRecord, UsageEvent } from './types';
+import { spendRunOf } from './spend';
 
 /**
  * Per-conversation cost and time report (getTaskReport). PURE: built from what Harbor already records (usage events, agent records,
@@ -74,6 +75,41 @@ export function decisionsOf(messages: readonly Message[]): TaskReportDecision[] 
     });
   }
   return out;
+}
+
+const dayOf = (t: number): string => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+/**
+ * The totals split per user request and per calendar day, counted exactly as the spend ceilings count (spend.spendRunOf), so the
+ * report and a ceiling never disagree. Every usage event is one attempt: a retry or a fallback to another CLI is its own run here.
+ */
+export function spendBreakdown(events: readonly UsageEvent[], messages: readonly Message[]): { requests: TaskReportRequest[]; days: TaskReportDay[] } {
+  const add = (into: TaskReportSpend, u: UsageEvent): void => {
+    const r = spendRunOf(u);
+    into.kTokens += r.kTokens; into.minutes += r.minutes; into.runs++;
+    if (!u.ok) into.failedRuns++;
+    if (u.partial) into.partial = true;
+    if (u.costUsd !== undefined) into.costUsd = (into.costUsd ?? 0) + u.costUsd;
+  };
+  const blank = (): TaskReportSpend => ({ kTokens: 0, minutes: 0, runs: 0, failedRuns: 0, partial: false });
+  const tidy = <T extends TaskReportSpend>(x: T): T => ({ ...x, kTokens: r4(x.kTokens), minutes: r1(x.minutes), ...(x.costUsd !== undefined ? { costUsd: r4(x.costUsd) } : {}) });
+  const reqs = new Map<string, TaskReportRequest>();
+  const days = new Map<string, TaskReportDay>();
+  for (const u of events) {
+    const key = u.taskId ?? '';
+    let q = reqs.get(key);
+    if (!q) {
+      const label = u.taskId ? messages.find((m) => m.id === u.taskId)?.text.replace(/\s+/g, ' ').trim().slice(0, 80) : undefined;
+      q = { ...blank(), ...(u.taskId ? { taskId: u.taskId } : {}), ...(label ? { label } : {}), time: u.time };
+      reqs.set(key, q);
+    }
+    add(q, u);
+    const date = dayOf(u.time);
+    let d = days.get(date);
+    if (!d) { d = { ...blank(), date }; days.set(date, d); }
+    add(d, u);
+  }
+  return { requests: [...reqs.values()].map(tidy).sort((a, b) => a.time - b.time), days: [...days.values()].map(tidy).sort((a, b) => (a.date < b.date ? -1 : 1)) };
 }
 
 export function buildTaskReport(i: TaskReportInput): TaskReport {
@@ -148,6 +184,7 @@ export function buildTaskReport(i: TaskReportInput): TaskReport {
     "Quota figures are Harbor's estimates (billable tokens x the catalog's cost per token x the calibrated quota per token), not the provider's own quota readings."
   ];
   if (runs.some((r) => r.role === 'main')) notes.push("Lead runs include the concierge's first pass: both run as the project's lead agent.");
+  notes.push('Every attempt is a run: a retry or a fallback to another CLI adds its own run, tokens and minutes to the totals, the requests and the days.');
   if (totals.runsWithoutTokens) notes.push(`${totals.runsWithoutTokens} run(s) reported no token counts: their quota is unknown and not included.`);
   if (totals.partialRuns) notes.push(`${totals.partialRuns} run(s) ended before the CLI's final usage report: their tokens are a lower bound.`);
   if (totals.costUsd !== undefined) notes.push('costUsd is what the CLI itself reported for its runs (subscription runs are not billed per run).');
@@ -156,7 +193,7 @@ export function buildTaskReport(i: TaskReportInput): TaskReport {
   if (keep !== undefined && earliest < i.now - keep) notes.push(`Harbor keeps run records for ${Math.round(keep / 86_400_000)} days: runs before ${new Date(i.now - keep).toISOString().slice(0, 10)} are missing from this report.`);
 
   return {
-    conversationId: conv.id, projectId: conv.projectId, generatedAt: i.now, totals,
+    conversationId: conv.id, projectId: conv.projectId, generatedAt: i.now, totals, estimate: true, ...spendBreakdown(events, i.messages),
     agents: [...agentRows.values()].map(tidy).sort((a, b) => roleOrder.indexOf(a.role) - roleOrder.indexOf(b.role) || (a.title < b.title ? -1 : 1)),
     byModel: [...modelRows.values()].map(tidy).sort((a, b) => b.billableKTok - a.billableKTok || (a.cli + a.model < b.cli + b.model ? -1 : 1)),
     runs, decisions: decisionsOf(i.messages), notes

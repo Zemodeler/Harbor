@@ -41,7 +41,7 @@ import { RepoMapCache } from './repoMap';
 import { calibrationSample, finishedRuns, overlapKTok, readingsDuring } from './runCalibration';
 import { effortFor, evaluate, explainNoRoute, route, type Complexity, type RouteDecision, type RouteRequest, type RouterInput } from './router';
 import { DEFAULT_CONCURRENCY, currentResult, describeToolRule, effectiveSettings, matchesToolRule, newId, normPath, toolRuleFor, type ReportMark, type Store, type ToolRuleDraft } from './store';
-import type { AgentRecord, CheckRun, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
+import type { AgentRecord, CheckRun, PendingPermissionRecord, ReportDelivery, TaskSnapshot, UsageEvent } from './types';
 import type { ReportedLimit } from './codexLimits';
 import { buildHistory, type FreeResetCoordinator, type UsageLedger } from './usage';
 import { isModelSpecific } from './adapters/types';
@@ -59,6 +59,8 @@ import { SECRET_TOOL, applyAllowlist, describeFindings, findingsFingerprint, sca
 import type { SecretScanRecord } from './types';
 
 export interface OrchestratorDeps {
+  /** Called when the set of unanswered tool permission requests changes (the service mirrors it into the store for crash recovery). */
+  permissionsChanged?: () => void;
   store: Store;
   bus: EventBus;
   ledger: UsageLedger;
@@ -689,6 +691,8 @@ export class Orchestrator {
   /** Reconcile persisted state after a restart: nothing is running, so working agents are stopped (never replayed). */
   recover(): void {
     this.sweep = this.reapOrphans();
+    // Taken first: nothing may write a new list before this one is read.
+    const unanswered = this.d.store.takePendingPermissions();
     for (const p of this.d.store.listProjects()) for (const c of this.d.store.listConversations(p.id)) {
       if (c.activity && ['working', 'queued'].includes(c.activity.state)) this.sessionState(c.id, 'stopped', 'Harbor restarted. Send a message to continue.');
     }
@@ -705,7 +709,8 @@ export class Orchestrator {
     this.d.store.setLocks(this.d.store.locks.filter((l) => this.running.has(l.agentId)));
     this.noticeUncertainReports();
     this.noticeInterrupted(interrupted);
-    this.noticeStranded(stranded);
+    const told = this.noticeUnanswered(unanswered);
+    this.noticeStranded(stranded.filter((a) => !told.has(a.id)));
     for (const p of this.d.store.listProjects()) this.pump(p.id);
     this.startup = this.startupGit(interrupted).catch(() => {});
   }
@@ -764,6 +769,31 @@ export class Orchestrator {
       this.post(conv, 'system', `Harbor cannot tell whether the lead received ${items.length} helper report(s): ${reportRefs(items)}. Each report is kept and goes to the lead with its next turn (your next message to it, or its next helper report), marked as possibly seen already. Nothing is re-run.`);
       this.d.store.noticeReports(items);
     }
+  }
+
+  /**
+   * Permission requests the previous run left unanswered. The CLI that asked died with Harbor, so the request cannot be put back
+   * on screen: it counts as denied, the asking agent is stopped (`stopKind: 'restart'`; a lead only waits for the next message)
+   * and the conversation and the lead's next turn are told. Returns the agents that were told.
+   */
+  private noticeUnanswered(items: PendingPermissionRecord[]): Set<Id> {
+    const told = new Set<Id>();
+    for (const r of items) {
+      const a = r.agentId ? this.d.store.getAgent(r.agentId) : undefined;
+      // A free-reset proposal belongs to no conversation; Harbor proposes it again when it applies.
+      // A helper's request names its own conversation; the user follows a helper in its lead's conversation.
+      const conv = [a && a.role !== 'main' ? a.parentConversationId : undefined, r.conversationId].find((c): c is Id => !!c && !!this.d.store.getConversation(c));
+      if (!conv) continue;
+      if (a && a.role !== 'main' && !['stopped', 'done', 'failed'].includes(a.state)) this.setState(a, 'stopped', { error: RESTART_WAITING_ERROR, stopKind: 'restart' });
+      const what = r.kind === 'tool' ? `to run ${r.tool ?? 'a tool'}` : r.kind === 'screenshot' ? 'to take a screenshot' : 'for an answer';
+      const who = !a ? 'An agent' : a.role === 'main' ? 'The lead agent' : `"${clip(a.title, 50)}"`;
+      const next = a && a.role !== 'main' ? 'It is stopped; resume it to continue from its saved session (it will ask again).' : 'Send a message to continue; it will ask again if it still needs this.';
+      this.post(conv, 'system', `Harbor restarted while ${who} was waiting for your permission ${what}. That request is gone and nothing was allowed or run. ${next}`, a ? { agentId: a.id } : undefined);
+      this.addNote(conv, `Restart: ${who} had an unanswered permission request ${what}; it was treated as denied.`);
+      this.log({ kind: 'permission', projectId: a?.projectId ?? this.d.store.getConversation(conv)!.projectId, conversationId: conv, ...(a ? { agentId: a.id } : {}), text: `${r.tool ?? r.kind}: unanswered at restart (${r.hash}); treated as denied` });
+      if (a) told.add(a.id);
+    }
+    return told;
   }
 
   /** One note per helper the restart found waiting for an answer; the lead hears of it at its next turn (no turn is started). */
@@ -3383,6 +3413,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       this.post(conversationId, 'system', `${prompt}\nWaiting for your answer (${choices}). Denied automatically after ${minutes}.`, { agentId: agent.id });
       journal('asked the user');
       this.emit(event);
+      this.d.permissionsChanged?.();
     });
   }
 
@@ -3425,6 +3456,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     this.log({ kind: 'permission', projectId: p.projectId, conversationId: p.conversationId, agentId: p.agentId, text: `${p.tool}: ${journalText}` });
     if (chat) this.post(p.conversationId, 'system', chat, { agentId: p.agentId });
     p.settle(d);
+    this.d.permissionsChanged?.();
     return true;
   }
 
@@ -3748,6 +3780,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
       // The first reading the CLI prints during the run: a fresh "before" for calibration when the last one Harbor saw is old.
       let firstLimits: Extract<Chunk, { kind: 'limits' }>['limits'] | undefined;
       let streamId: Id | undefined;
+      /** Token deltas of the message being written: what has been shown so far, so the whole message that follows only adds what is missing. */
+      let live: { raw: string; emitted: string } | undefined;
       let parsed = 0, exitedClean = false; // parsed = chunks of real output (text, tool calls, usage); a bare session id is not output
       const details = detailsOf(decision);
       if (o.complexityNote) details.reason = `${details.reason}\n• ${o.complexityNote}`;
@@ -3810,7 +3844,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(o.stream && !o.lean ? { partial: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.
@@ -3818,10 +3852,39 @@ ${attachedFilesNote(others)}` : text, conversationId);
           // Mid-run usage rides along with messages already counted; only a final report counts as output of its own.
           if (c.kind === 'text' || c.kind === 'tool' || (c.kind === 'usage' && !c.partial)) parsed++;
           if (c.kind === 'session') store.setSession({ agentId: key, cli: decision.cli, sessionId: c.id, updated: Date.now(), model: decision.model, effort: decision.effort });
-          else if (c.kind === 'text') {
+          else if (c.kind === 'delta') {
+            if (!o.stream) continue;
+            live ??= { raw: '', emitted: '' };
+            live.raw += c.text;
+            // Only complete lines are shown: a protocol line cut in half would otherwise flash in the transcript before the whole message strips it.
+            const complete = live.raw.slice(0, live.raw.lastIndexOf('\n') + 1);
+            const shownAll = stripProtocol(complete, { nonce: o.nonce });
+            if (!shownAll.startsWith(live.emitted) || shownAll.length === live.emitted.length) continue;
+            const add = shownAll.slice(live.emitted.length);
+            if (!streamId) streamId = this.post(o.conversationId, 'assistant', add, { agentId: agent.id, details }).id;
+            else {
+              const piece = (live.emitted ? '' : '\n\n') + add;
+              store.updateMessage(streamId, { text: store.getMessage(streamId)!.text + piece });
+              this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: piece });
+            }
+            live.emitted = shownAll;
+          } else if (c.kind === 'text') {
             text += (text ? '\n\n' : '') + c.text;
             if (o.stream) {
               const shown = stripProtocol(c.text, { nonce: o.nonce }); // protocol lines are machine-readable, not transcript
+              const had = live; live = undefined;
+              if (had?.emitted && streamId && shown.startsWith(had.emitted)) {
+                // The deltas already showed the start of this message: add the rest only.
+                const rest = shown.slice(had.emitted.length);
+                if (rest) { store.updateMessage(streamId, { text: store.getMessage(streamId)!.text + rest }); this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: rest }); }
+                continue;
+              }
+              if (had?.emitted && streamId) {
+                // The whole message disagrees with what was streamed: the stored text takes the whole message (the view shows it on its next refresh).
+                const m = store.getMessage(streamId)!;
+                store.updateMessage(streamId, { text: m.text.slice(0, Math.max(0, m.text.length - had.emitted.length)) + shown });
+                continue;
+              }
               if (!shown) continue;
               if (!streamId) streamId = this.post(o.conversationId, 'assistant', shown, { agentId: agent.id, details }).id;
               else {
@@ -3830,7 +3893,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
                 this.emit({ type: 'messageDelta', messageId: streamId, conversationId: o.conversationId, text: `\n\n${shown}` });
               }
             }
-          } else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
+          
+} else if (c.kind === 'tool') { toolCalls++; if (o.stream) { streamId = undefined; live = undefined; this.post(o.conversationId, 'tool', c.text, { agentId: agent.id }); } }
           else if (c.kind === 'usage') { usage.add(c); this.spendTick(); }
           else if (c.kind === 'limits') { firstLimits ??= c.limits; limits = c.limits; ledger.observe(decision.cli, c.limits); }
           else if (c.kind === 'done') { ok = c.ok; error = c.error; rateLimited = !!c.rateLimited; exitedClean = c.exitCode === 0; if (c.text) final = c.text; }
