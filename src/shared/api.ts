@@ -36,6 +36,12 @@ export interface Skill {   // a folder with a SKILL.md (frontmatter name + descr
  hash?: string; importedFrom?: string; importedAt?: number;   // library: sha256 of the files recorded at import, and where they came from
  problems?: string[];   // why it cannot be used (e.g. no description); such a skill is never given to an agent
 }
+export interface ModPart { kind: 'skills' | 'commands' | 'mcp' | 'hooks' | 'agents'; count: number; names: string[]; status: 'ready' | 'planned' | 'claude-only' | 'unused'; note: string }   // what Harbor does with this kind of part today (CHANGELOG 0.1.71); names are capped
+export interface Mod {   // a Claude Code plugin found on this machine; listed read-only, never enabled or run by listMods
+ id: string; name: string; version?: string; description: string; author?: string;   // id = "<source>:<name>"
+ source: 'claude' | 'project'; path: string; parts: ModPart[];   // claude = under ~/.claude/plugins; project = the project's .claude/plugins
+ enabledInClaude: boolean;   // Claude Code's own settings.json turns it on (information only)
+}
 export interface SkillFile { path: string; bytes: number; script?: boolean }   // path relative to the skill folder, forward slashes
 export interface SkillDetail extends Skill { text: string; truncated?: boolean; fileList: SkillFile[]; currentHash?: string; modified?: boolean }   // text = SKILL.md as written; modified = library files no longer match the hash recorded at import
 export type SkillImportSource = { kind: 'folder'; path: string } | { kind: 'zip'; path: string } | { kind: 'github'; ref: string };   // github: https://github.com/owner/repo[/tree/<ref>/<path>] or owner/repo[/path]
@@ -201,6 +207,7 @@ export interface HarborApi {
  saveCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string; replace?: boolean }): Promise<CustomCliDescriptor[]>;   // replace = update the custom CLI with the same id (otherwise a used id is refused); validates, records the executable's hash (approval), stores and re-runs discovery; also re-approves a changed file. Rejects invalid descriptors with every problem listed
  removeCustomCli?(id: CliId): Promise<CustomCliDescriptor[]>;   // returns the remaining custom CLIs
  listSkills?(projectId?: Id): Promise<Skill[]>;   // library and user-level skills; with a project also its .harbor\skills and .claude\skills. enabled is for that project (CHANGELOG 0.1.32)
+ listMods?(projectId?: Id): Promise<Mod[]>;   // Claude Code plugins on this machine (and the project's .claude/plugins), read-only (CHANGELOG 0.1.71)
  readSkill?(skillId: string, projectId?: Id): Promise<SkillDetail>;   // SKILL.md text and the file list; never runs anything
  setSkillEnabled?(skillId: string, enabled: boolean | null, projectId?: Id): Promise<Skill[]>;   // with projectId: that project's choice; without: the global default; null = back to the default
  previewSkillImport?(source: SkillImportSource, opts?: { confirmDownload?: string }): Promise<SkillImportPreview>;   // folder/zip: reads and checks, writes nothing. github: first call lists files and sizes only (network, no file content); confirmDownload = that listing's token downloads exactly those files

@@ -1936,7 +1936,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       const rec: AgentRecord = {
         id, projectId: project.id, parentId: this.d.store.mainAgent(project.id)?.id, role: t.role, title: t.title, state: 'queued', cli: 'auto', model: 'auto',
         effort: keepModel?.effort ?? effortFor(t.role, complexity), retry: rejected ? true : undefined, ...(avoid ? { avoid } : {}), task: t.instructions, files: t.files, dependsOn: [...deps], specFromId,
-        needs: t.needs, readOnly: t.access === 'read', pinnedCli: t.cli,
+        needs: t.needs, readOnly: t.access === 'read', pinnedCli: t.cli, ...(t.grant && !t.integrate ? { grant: { left: t.grant.helpers, scope: t.grant.scope } } : {}),
         helpFor: t.helpFor ?? requester, revision: 1, complexity, difficulty, size: est.size, difficultySignals: prior ? [...est.signals, rejected ? `retry of rejected work: floor raised from ${priorD}` : `retry: kept ${priorD}`] : est.signals,
         ...(escalateFrom ? { escalateFrom } : {}), ...(keepModel ? { keepModel } : {}),
         parentConversationId: conversationId, attempts: 0, created: Date.now(), updated: Date.now(),
@@ -3762,10 +3762,33 @@ ${attachedFilesNote(others)}` : text, conversationId);
 
   private helpRequested(a: AgentRecord, h: HelpRequest): void {
     this.d.store.addCoordination({ projectId: a.projectId, kind: 'help', from: a.id, text: `${h.reason} → ${h.proposedRole}: ${h.instructions}` });
+    if (this.grantedHelp(a, h)) return;
     this.post(this.convFor(a), 'system', `Requested help from the lead: ${h.instructions || h.reason}`, { agentId: a.id });
     // A helper that keeps asking (and a lead that keeps delegating more) is the same runaway loop as any other: it spends the same cap.
     if (!this.autoTurn(a.parentConversationId)) return;
     this.enqueueMain(a.projectId, { kind: 'help', from: a, reason: h.reason, proposedRole: h.proposedRole, instructions: h.instructions, blocked: h.blocked }, a.parentConversationId);
+  }
+
+  /**
+   * A delegation grant: the lead let this helper start a few read-only sub-helpers itself. The request is served at once (no lead
+   * turn), the sub-helper's report goes back to the requester (helpFor), and the lead still sees it in the conversation. Never an edit
+   * helper, never beyond the grant, and the usual caps (concurrency, spend, loop guard) still apply to the new helper.
+   */
+  private grantedHelp(a: AgentRecord, h: HelpRequest): boolean {
+    const g = a.grant;
+    const role = h.proposedRole === 'planner' || h.proposedRole === 'reviewer' || h.proposedRole === 'other' ? h.proposedRole : undefined;
+    if (!g || g.left < 1 || !role || !h.instructions.trim() || !this.autoTurn(a.parentConversationId)) return false;
+    a.grant = { ...g, left: g.left - 1 };
+    this.d.store.upsertAgent(a);
+    const title = clip(`Help for ${a.title}: ${h.instructions}`, 80);
+    const made = this.createTasks(this.project(a.projectId), [{
+      ref: 'grant', title, role, access: 'read', complexity: 'medium', needs: [], dependsOn: [], files: [], helpFor: a.id,
+      instructions: `${h.instructions}\n\n(Started by "${a.title}" under the lead's grant for: ${g.scope}. Report to it; do not edit files.)`
+    }], a.parentConversationId, a.id);
+    this.post(this.convFor(a), 'system', `"${a.title}" started a helper under the lead's grant (${a.grant.left} left): ${clip(h.instructions, 200)}`, { agentId: a.id });
+    this.d.store.addCoordination({ projectId: a.projectId, kind: 'help', from: a.id, text: `granted: ${made.length} sub-helper(s) started without the lead` });
+    this.pump(a.projectId);
+    return made.length > 0;
   }
 
   // ------------------------------------------------------------ routed execution with fallback
