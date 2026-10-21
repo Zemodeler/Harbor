@@ -205,7 +205,8 @@ describe('item 8: usage accounting', () => {
   it('the catalog carries a per-model run weight (haiku 1, sonnet 12, opus 25, codex 10)', () => {
     expect(DEFAULT_CATALOG.map((e) => [e.model, e.costWeight])).toEqual([
       ['claude-haiku-5-5', 1], ['claude-sonnet-5-5', 12], ['claude-opus-5-5', 25], ['claude-fable-5-1', 25],
-      ['gpt-6.1-sol', 10], ['gpt-6-astra', 25], ['gpt-6-sol', 8], ['gpt-6-luna', 3], ['gpt-5.6-sol', 8], ['gpt-5.6-terra', 6], ['gpt-5.6-luna', 3], ['default', 10]
+      ['gpt-6.1-sol', 10], ['gpt-6-astra', 25], ['gpt-6-sol', 8], ['gpt-6-luna', 3], ['gpt-5.6-sol', 8], ['gpt-5.6-terra', 6], ['gpt-5.6-luna', 3], ['default', 10],
+      ['gemini-2.5-pro', 15], ['gemini-2.5-flash', 4], ['gemini-2.5-flash-lite', 1.5]
     ]);
     expect(costWeightOf(DEFAULT_CATALOG, 'claude', 'claude-opus-5-5')).toBe(25);
     expect(costWeightOf(DEFAULT_CATALOG, 'claude', 'opus')).toBe(25);

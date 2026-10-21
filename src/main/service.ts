@@ -5,6 +5,8 @@ import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import type { Attachment, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
+import { GeminiAdapter, geminiTerminalArgs } from './adapters/gemini';
+import { TerminalAdapter } from './adapters/terminal';
 import type { CliAdapter } from './adapters/types';
 import { cliPathProblem, defaultDiscoveryDeps, discoverClis, findExecutable, isFilePath, loginCommand, resolveCli, toStatus, type ResolvedCli } from './clis/discovery';
 import { loadCatalogWithWarnings, parseCatalog, type CatalogEntry } from './clis/capabilities';
@@ -339,7 +341,10 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     }
     if (id === 'claude') return new ClaudeAdapter(path);
     if (id === 'codex') return new CodexAdapter(path);
-    return undefined; // gemini and others: detected, but no headless adapter yet
+    // Owner-enabled terminal mode wins: the baseline adapter for a CLI whose structured output is unusable or unwanted.
+    if (store.getSettings().cliOverrides[id]?.terminal === true) return new TerminalAdapter(id, path, { name: r.name, ...(id === 'gemini' ? { args: geminiTerminalArgs } : {}) });
+    if (id === 'gemini') return new GeminiAdapter(path);
+    return undefined; // other detected CLIs: no headless adapter
   };
   // A run that reports a login failure takes the CLI out of routing until the next refresh (discovery sets authState).
   const markSignedOut = (id: CliId) => {
