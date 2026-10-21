@@ -9,7 +9,7 @@ import { mergeNote, type NoteDraft } from './knowledge';
 import { normalizeRemoteSettings } from './remote/guard';
 import type { TrackedProcess } from './proc';
 import type { Calibration } from './calibration';
-import type { AgentRecord, CoordinationEntry, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
+import type { AgentRecord, CoordinationEntry, PendingPermissionRecord, FileLock, ReportDelivery, SessionLink, State, UsageEvent } from './types';
 import { normalizeCeilings, pruneGrants, type SpendGrant, type SpendRun } from './spend';
 
 /**
@@ -584,6 +584,25 @@ export class Store {
     if (rec) imports[folder] = rec; else delete imports[folder];
     this.state.skills = { ...(this.state.skills ?? {}), imports };
     this.flush(); // the recorded hash must survive a crash right after the import
+  }
+
+  private pendingTaken = false;
+  // ---- unanswered permission requests (survive a crash so the next start can say what was lost)
+  /** Replaces the stored list; records already stored keep their `created` time. */
+  setPendingPermissions(list: PendingPermissionRecord[]): void {
+    if (!this.pendingTaken) return; // the previous run's list is still waiting to be read by recover()
+    const old = new Map((this.state.pendingPermissions ?? []).map((r) => [r.requestId, r]));
+    const next = list.map((r) => ({ ...r, created: old.get(r.requestId)?.created ?? r.created }));
+    if (!next.length && !this.state.pendingPermissions?.length) return;
+    if (next.length) this.state.pendingPermissions = next; else delete this.state.pendingPermissions;
+    this.dirty();
+  }
+  /** What the previous run left unanswered; clears it. Called once, at startup, before anything can write a new list. */
+  takePendingPermissions(): PendingPermissionRecord[] {
+    this.pendingTaken = true;
+    const list = this.state.pendingPermissions ?? [];
+    if (list.length) { delete this.state.pendingPermissions; this.dirty(); }
+    return list;
   }
 
   // ---- "always allow for this project" tool rules

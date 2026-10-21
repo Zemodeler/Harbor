@@ -18,6 +18,8 @@ import { codexMcpArgs, codexMcpPlan } from '../mcp/materialize';
  * low/medium/high. codex-cli 0.162 lists xhigh, max and ultra for some models; Harbor never emits them (guarded here as well).
  * NOT VERIFIED: whether `codex exec` accepts xhigh/max through `-c model_reasoning_effort` (never sent today). `ultra` is excluded
  * on purpose: it turns on automatic task delegation, and helpers never spawn agents.
+ * Token deltas (RunOptions.partial): none. `codex exec --help` of 0.163.0-alpha.10.2 lists no partial-message flag, and the recorded runs show only
+ * `item.completed` agent messages, so Codex streams whole messages (the fallback every adapter has).
  * Mid-run token counts: `codex exec --json` was not seen to emit usage before `turn.completed`, so a stopped Codex run records
  * duration and model but no tokens (marked partial). Not verified against a long run.
  * MCP (`mcp`): Harbor's servers are added as `-c mcp_servers.<name>...` overrides (mcp/materialize.ts has what was verified). Codex

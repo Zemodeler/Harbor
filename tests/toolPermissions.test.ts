@@ -359,3 +359,46 @@ describe('leading cd into the project (pure)', () => {
     expect(t.events[1]!.alwaysAllow).toBe(false);
   });
 });
+
+describe('unanswered permission requests across a restart', () => {
+  const restartOver = (dataDir: string) => {
+    const cli: ResolvedCli = { id: 'claude', name: 'claude', installed: true, signedIn: true, authState: 'signedIn', models: ['default'], path: '/fake/claude' };
+    return createHarborService({ dataDir, discover: async () => [cli], adapterFor: () => new FakeAdapter('claude', () => say('ok')), worktreesRoot: join(tmp(), 'wt2'), ledger: { reported: calmReported } });
+  };
+
+  it('a lead waiting for permission when Harbor dies: the request is stored without its prompt, and the next start reports it as denied', async () => {
+    const dataDir = tmp();
+    const t = await setup({ dataDir, nextLeadTool: () => bash('make secret-deploy') });
+    void t.svc.send(t.conv.id, 'deploy it');
+    await waitFor(() => t.events.length === 1);
+    t.svc.store.flush(); // the crash: nothing is answered, nothing is shut down
+    const stored = new Store(dataDir).takePendingPermissions();
+    expect(stored).toMatchObject([{ requestId: t.events[0]!.requestId, kind: 'tool', tool: 'Bash', conversationId: t.conv.id }]);
+    expect(JSON.stringify(stored)).not.toContain('secret-deploy');
+
+    const again = restartOver(dataDir);
+    await waitFor(() => again.store.listMessages(t.conv.id).some((m) => m.text.includes('was waiting for your permission to run Bash')));
+    const texts = again.store.listMessages(t.conv.id).filter((m) => m.role === 'system').map((m) => m.text);
+    expect(texts.some((m) => m.includes('That request is gone and nothing was allowed or run'))).toBe(true);
+    expect(await again.listPendingPermissions()).toEqual([]);
+    expect(again.store.takePendingPermissions()).toEqual([]);
+    await again.shutdown();
+  });
+
+  it('a helper waiting for permission is stopped with stopKind restart and the conversation is told which request was lost', async () => {
+    const dataDir = tmp();
+    const helper = { ref: 'a', title: 'Write a', role: 'implementer', instructions: 'write a', files: ['a.txt'] };
+    const t = await setup({ dataDir, delegate: [helper], helperScript: async (_p, opts) => { await opts.onToolPermission!(bash('make x'), opts.signal ?? new AbortController().signal); return say('done'); } });
+    void t.svc.send(t.conv.id, 'please delegate this');
+    await waitFor(() => t.events.length === 1);
+    t.svc.store.flush();
+    const again = restartOver(dataDir);
+    await waitFor(() => again.store.listMessages(t.conv.id).some((m) => m.text.includes('was waiting for your permission to run Bash')));
+    const a = again.store.listAgentRecords(t.project.id).find((x) => x.title === 'Write a')!;
+    expect(a.state).toBe('stopped');
+    expect(a.stopKind).toBe('restart');
+    const sys = again.store.listMessages(t.conv.id).filter((m) => m.role === 'system').map((m) => m.text);
+    expect(sys.filter((m) => m.includes('"Write a"') && m.includes('was waiting for your permission to run Bash')).length).toBe(1);
+    await again.shutdown();
+  });
+});

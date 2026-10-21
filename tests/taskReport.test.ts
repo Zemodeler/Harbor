@@ -90,3 +90,38 @@ describe('getTaskReport (service)', () => {
     await svc.shutdown();
   });
 });
+
+describe('task report per request and per day', () => {
+  const DAY = 86_400_000;
+  const msg = (id: string, text: string): Message => ({ id, conversationId: 'c1', role: 'user', text, time: T } as Message);
+
+  it('splits the totals by request and by day with the numbers the spend ceilings count, retries and fallbacks included', () => {
+    const agents = [agent('lead', 'main'), agent('impl', 'implementer')];
+    const usage = [
+      ev('u1', 'lead', { conversationId: 'c1', taskId: 'm1', time: T }),
+      // The first attempt failed on a limit and the retry ran on another CLI: both are runs of the same request.
+      ev('u2', 'impl', { taskId: 'm1', time: T + 60_000, ok: false, rateLimited: true, inputTokens: 5_000, outputTokens: 0 }),
+      ev('u3', 'impl', { taskId: 'm1', time: T + 120_000, cli: 'codex', model: 'gpt-6', costUsd: 0.25 }),
+      ev('u4', 'lead', { conversationId: 'c1', taskId: 'm2', time: T + 2 * DAY, partial: true }),
+      ev('u5', 'lead', { conversationId: 'c1', time: T + 3 * DAY }) // recorded before requests were tracked
+    ];
+    const r = buildTaskReport({ conversation: conv, agents, usage, messages: [msg('m1', 'Add  the\nlogin page'), msg('m2', 'Now the tests')], catalog: DEFAULT_CATALOG, now: T + 4 * DAY });
+    expect(r.estimate).toBe(true);
+    expect(r.requests!.map((q) => [q.taskId, q.label, q.runs, q.failedRuns, q.partial])).toEqual([['m1', 'Add the login page', 3, 1, false], ['m2', 'Now the tests', 1, 0, true], [undefined, undefined, 1, 0, false]]);
+    expect(r.requests![0]).toMatchObject({ kTokens: 11 + 5 + 11, costUsd: 0.25 });
+    expect(r.days!.map((d) => d.runs)).toEqual([3, 1, 1]);
+    // Both splits add up to the report's own totals.
+    for (const split of [r.requests!, r.days!]) {
+      expect(split.reduce((s, x) => s + x.runs, 0)).toBe(r.totals.runs);
+      expect(Math.round(split.reduce((s, x) => s + x.kTokens, 0) * 1e4) / 1e4).toBe(r.totals.billableKTok);
+      expect(Math.round(split.reduce((s, x) => s + x.minutes, 0) * 10) / 10).toBe(r.totals.agentMinutes);
+    }
+    expect(r.notes.some((n) => /retry or a fallback/.test(n))).toBe(true);
+  });
+
+  it('an empty conversation has empty splits', () => {
+    const r = buildTaskReport({ conversation: conv, agents: [agent('lead', 'main')], usage: [], messages: [], catalog: DEFAULT_CATALOG, now: T });
+    expect(r.requests).toEqual([]);
+    expect(r.days).toEqual([]);
+  });
+});

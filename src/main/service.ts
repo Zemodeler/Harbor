@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
@@ -389,8 +390,9 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       const requestId = newId();
       const event: PendingPermission = { type: 'permission', requestId, kind, prompt, agentId };
       pending.set(requestId, { resolve, event });
-      signal?.addEventListener('abort', () => { if (pending.delete(requestId)) resolve(false); }, { once: true });
+      signal?.addEventListener('abort', () => { if (pending.delete(requestId)) { resolve(false); syncPendingPermissions(); } }, { once: true });
       bus.emit(event);
+      syncPendingPermissions();
     });
 
   /** Conflict asks raised for a helper of this conversation (free-reset asks belong to no conversation and never block one). */
@@ -442,7 +444,18 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     journal: (e) => journal.add({ kind: 'screenshot', ...e }),
     foreground: opts.foreground, setTimer: opts.setTimer, timeoutMs: opts.screenshotTimeoutMs
   });
+  // Unanswered permission requests are mirrored into the store, so a crash or restart can say what was lost (Orchestrator.recover).
+  const syncPendingPermissions = (): void => {
+    const all = [...orchestrator.pendingToolEvents(), ...screenshots.pending(), ...[...pending.values()].map((p) => p.event)];
+    store.setPendingPermissions(all.map((e) => ({
+      requestId: e.requestId, kind: e.kind, ...(e.agentId ? { agentId: e.agentId } : {}), ...(e.conversationId ? { conversationId: e.conversationId } : {}), ...(e.tool ? { tool: e.tool } : {}),
+      hash: createHash('sha256').update(e.prompt).digest('hex').slice(0, 16), created: Date.now()
+    })));
+  };
+  // A screenshot request that timed out or was cancelled posts a message; that is the moment to refresh the mirror.
+  bus.on((e) => { if (e.type === 'message') syncPendingPermissions(); });
   const orchestrator = new Orchestrator({
+    permissionsChanged: () => syncPendingPermissions(),
     store, bus, ledger, git, worktreesRoot, ask, freeReset, journal, screenshots, ...(opts.repoMaps ? { repoMaps: opts.repoMaps } : {}),
     attachImage: (conversationId, image) => copyShownImage(attachmentDir(dataRoot, conversationId), image),
     getClis: () => clis,
@@ -1032,6 +1045,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (screenshots.has(requestId)) {
         if (allow === true) throw new Error('Choose the window or screen to capture in the screenshot card (answerScreenshot).');
         await screenshots.answer(requestId, { allow: false });
+        syncPendingPermissions();
         return;
       }
       // Tool requests live in the orchestrator (they time out and end with their run); the rest are plain yes/no asks.
@@ -1040,6 +1054,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!r) return;
       pending.delete(requestId);
       r.resolve(allow);
+      syncPendingPermissions();
     },
     async exportDiagnostics() {
       await ready;
@@ -1126,6 +1141,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!answer || typeof answer !== 'object' || typeof answer.allow !== 'boolean') throw new Error('Answer with allow true or false.');
       if (answer.sourceId !== undefined && typeof answer.sourceId !== 'string') throw new Error('Choose a window or screen from the preview.');
       await screenshots.answer(requestId, { allow: answer.allow, ...(answer.sourceId !== undefined ? { sourceId: answer.sourceId } : {}), forConversation: answer.forConversation === true });
+      syncPendingPermissions();
     },
     async openDocument(projectId, path, o) {
       const agentId = o && typeof o === 'object' ? o.agentId : undefined;
