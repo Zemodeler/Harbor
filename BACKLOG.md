@@ -25,7 +25,7 @@ Prioritized next tasks so Harbor's own agents (or people) can pick them up. Each
 15. **Instruction changes mid-run** (M). Revision bump currently only counts direct prompts. Implement the hold/ack protocol: pause dependents, notify affected siblings, resume after acknowledgement.
 
 ### P2 — breadth
-16. **Gemini adapter** (M): headless flags, status check, models. Until then it is detected but never assigned work.
+16. **Gemini adapter** (M): PARTLY DONE (roadmap 3, Track G): `adapters/gemini.ts`, catalog entries and an owner-enabled terminal fallback exist, but every flag and model id is UNVERIFIED (the CLI was not installed here). Open: run `gemini --help`, correct the header, add a `smoke` target, find a real status check.
 17. **Terminal adapter for other CLIs** (L): baseline adapter with labeled limitations.
 18. **Skills and plugins discovery** (L): list native Claude/Codex extensions per scope and expose compatibility states.
 19. **API fallback** (L): key storage (OS credential store), ask-before-use, hard per-task/per-period limits.

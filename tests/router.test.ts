@@ -383,7 +383,7 @@ describe('realistic fleets', () => {
     ['claude 90% reported, medium work moves to codex', () => mkInput(mkLedger({ limits: [{ cli: 'claude', period: 'session', usedPct: 90, resetsAt: NOW + 3 * HOUR }] }).ledger), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/gpt-6.1-sol'],
     // Fable is not auto-routed (catalog v2): with Opus capped, strong work is degraded to Sonnet instead of spending Fable.
     ['opus capped, strong work does not reach fable: sonnet at high effort, reviewed', () => mkInput(mkLedger({ rateLimited: [['claude', 'opus']] }).ledger, {}, [cli('claude')]), { role: 'implementer', complexity: 'high' }, 'claude/claude-sonnet-5-5', { degraded: false, review: true }],
-    ['unknown CLI only: default model', () => mkInput(mkLedger().ledger, {}, [cli('gemini')]), { role: 'main', complexity: 'low' }, 'gemini/default'],
+    ['unknown CLI only: default model', () => mkInput(mkLedger().ledger, {}, [cli('gemini')]), { role: 'main', complexity: 'low' }, 'gemini/gemini-2.5-flash'],
     ['cheap chat front desk', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'low', tier: 'cheap', effort: 'low', fixedEffort: true, needs: ['chat'] }, 'claude/claude-haiku-5-5'],
     ['user asked for codex', () => mkInput(mkLedger().ledger), { role: 'main', complexity: 'medium', tier: 'standard', prefer: 'codex', continuity: 'claude' }, 'codex/gpt-6.1-sol'],
     ['role preference for codex', () => mkInput(mkLedger().ledger, { policy: { preference: { cli: 'codex' } } }), { role: 'implementer', complexity: 'medium', needs: ['code'] }, 'codex/gpt-6.1-sol'],

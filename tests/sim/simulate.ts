@@ -142,8 +142,9 @@ const MAX_ATTEMPTS = 4;
 
 export function simulate(cfg: SimConfig): SimResult {
   const days = cfg.days ?? 7, stepMs = (cfg.stepMin ?? 5) * MIN, end = T0 + days * DAY;
-  const catalog = cfg.catalog ?? DEFAULT_CATALOG;
   const clis: Cli[] = cfg.clis ?? ['claude', 'codex'];
+  // The simulated accounts are the CLIs listed; a catalog entry of an unlisted CLI (Gemini) must not shape their difficulty or pricing.
+  const catalog = cfg.catalog ?? DEFAULT_CATALOG.filter((e) => clis.includes(e.cli as Cli));
   const rng = new Rng(cfg.seed * 1_000_003 + 17);
   let now = T0;
   const clock = () => now;
