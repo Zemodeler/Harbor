@@ -1,10 +1,11 @@
-import { scanMods } from './mods/scan';
+import { modSlug, scanMods } from './mods/scan';
+import { readModMcp } from './mods/mcp';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import type { Attachment, CreateProjectResult, GithubRepo, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
+import type { Attachment, CreateProjectResult, GithubRepo, BundleExportPreview, BundleExportResult, BundleImportOptions, BundleImportResult, BundlePreview, BundleSelection, ChatImportPreview, ChatImportResult, ChatImportSourceId, ChatImportSourceInfo, DocumentResult, Message, Mod, ModMcpResult, ScreenshotSource, CliId, CustomCliDescriptor, Conversation, ConversationMode, EditorId, GitCommit, HarborApi, HarborEvent, Id, PendingPermission, Project, ProjectNote, RemoteScope, RemoteTokenInfo, SpendStatus } from '../shared/api';
 import { ClaudeAdapter } from './adapters/claude';
 import { CodexAdapter } from './adapters/codex';
 import { GeminiAdapter, geminiTerminalArgs } from './adapters/gemini';
@@ -440,6 +441,12 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     if (isAbsolute(command)) return isFile(command) ? command : undefined;
     return findExecutable({ id: 'mcp-server', name: command, exeNames: [command], envVar: '', extraDirs: () => [], versionArgs: [], loginArgs: [], models: [] }, { env: process.env, platform: process.platform, isFile });
   };
+  const modSkillPrefix = (m: Mod): string => `claude:${m.source === 'project' ? 'project-plugin' : 'plugin'}/${modSlug(m.name)}/`;
+  const modWithCounts = (m: Mod, project: { id: Id; path: string } | undefined): Mod => ({
+    ...m,
+    skillsEnabled: skills.list(project).filter((s) => s.enabled && s.id.startsWith(modSkillPrefix(m))).length,
+    mcpEnabled: mcp.list(project?.id).filter((s) => s.enabled && s.fromMod === m.id).length
+  });
   const projectRef = (id: Id | undefined) => { if (id === undefined || id === null) return undefined; const p = needProject(id); return { id: p.id, path: p.path }; };
   // ---- screenshots and shown images (plan section 4): both land in the conversation's attachments folder, never anywhere else.
   const screenshots = new ScreenshotBroker({
@@ -714,7 +721,35 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
 
     // Skills: listing and reading only read files; nothing in a skill is ever run.
     async listSkills(projectId) { return skills.list(projectRef(projectId)); },
-    async listMods(projectId) { return scanMods({ claudeHome: opts.skillHomes?.claude, projectPath: projectRef(projectId)?.path }); },
+    async listMods(projectId) {
+      const project = projectRef(projectId);
+      return scanMods({ claudeHome: opts.skillHomes?.claude, projectPath: project?.path }).map((m) => modWithCounts(m, project));
+    },
+    async setModEnabled(modId, enabled, projectId) {
+      if (enabled !== null && typeof enabled !== 'boolean') throw new Error('enabled must be true, false or null.');
+      const project = projectRef(projectId);
+      const mod = scanMods({ claudeHome: opts.skillHomes?.claude, projectPath: project?.path }).find((m) => m.id === modId);
+      if (!mod) throw new Error(project ? 'That mod is no longer available.' : 'That mod is no longer available (a project\'s own mods need their project).');
+      let count = 0;
+      for (const s of skills.list(project)) {
+        if (s.id.startsWith(modSkillPrefix(mod))) { skills.setEnabled(s.id, enabled, project); count++; }
+      }
+      const results: ModMcpResult[] = [];
+      if (enabled === true) {
+        const { servers, skipped } = readModMcp(mod.path, mod.name);
+        for (const d of servers) {
+          if (mcp.importFromMod(d, mod.id) === 'clash') { results.push({ name: d.name, status: 'skipped', why: 'a different MCP server with this name already exists.' }); continue; }
+          mcp.setEnabled(d.name, true, project?.id);
+          results.push({ name: d.name, status: 'enabled' });
+        }
+        results.push(...skipped);
+      } else {
+        for (const s of mcp.list(project?.id)) {
+          if (s.fromMod === mod.id) { mcp.setEnabled(s.name, enabled, project?.id); results.push({ name: s.name, status: 'imported-off' }); }
+        }
+      }
+      return { mod: modWithCounts(mod, project), skills: count, mcp: results };
+    },
     async readSkill(skillId, projectId) { return skills.read(skillId, projectRef(projectId)); },
     async setSkillEnabled(skillId, enabled, projectId) { return skills.setEnabled(skillId, enabled, projectRef(projectId)); },
     async previewSkillImport(source, o) {

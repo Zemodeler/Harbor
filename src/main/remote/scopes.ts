@@ -27,7 +27,7 @@ export const METHOD_SCOPE: Record<InvokeMethod, MethodClass> = {
   refreshClis: 'full', setProjectImage: 'full', removeProject: 'full', renameProject: 'full',
 
   // Added while integrating roadmap wave 1 (main's skills/MCP/custom CLIs/documents/bundles/importers, and contract 0.1.38-0.1.40).
-  listCustomClis: 'read-only', listCliTemplates: 'read-only', listSkills: 'read-only', listMods: 'read-only', readSkill: 'read-only', listCliMcpServers: 'read-only',
+  listCustomClis: 'read-only', listCliTemplates: 'read-only', listSkills: 'read-only', listMods: 'read-only', setModEnabled: 'never', readSkill: 'read-only', listCliMcpServers: 'read-only',
   getSpendStatus: 'read-only', listProjectNotes: 'read-only', getTaskReport: 'read-only', listRatings: 'read-only',
   getRatingSummary: 'read-only', replayRouting: 'read-only',
   setSkillEnabled: 'full', removeProjectNote: 'full', rateResult: 'full',
