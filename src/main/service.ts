@@ -36,6 +36,7 @@ import { GitHub } from './github';
 import { cleanupWorktrees as cleanupWorktreesImpl, listHarborWorktrees } from './housekeeping';
 import { cloneProjectFolder, createProjectFolder, type CreatedFolder } from './projectCreate';
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
+import { buildOverview, globalUsage, searchAll as searchAllImpl } from './overview';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
@@ -51,7 +52,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -730,7 +731,8 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       return discoverCliMcpServers({ home: opts.chatHomes?.home, codexHome: opts.chatHomes?.codex }, p?.path);
     },
 
-    async listProjects() { return store.listProjects(); },
+    // Pinned projects first; the rest keep the order they were added in (the sort is stable).
+    async listProjects() { return [...store.listProjects()].sort((x, y) => Number(!!y.pinned) - Number(!!x.pinned)); },
     async addProject(path) {
       const chosen = path ?? (await opts.pickFolder?.());
       if (!chosen) return null;
@@ -756,6 +758,18 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
       if (!next || next.length > 120) throw new Error('A project name needs 1 to 120 characters.');
       return store.upsertProject({ ...p, name: next });
     },
+    async setProjectFlags(id, patch) {
+      const p = needProject(id);
+      if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Choose what to change.');
+      for (const k of ['archived', 'pinned'] as const) if (patch[k] !== undefined && typeof patch[k] !== 'boolean') throw new Error(`${k} must be true or false.`);
+      if (patch.archived && !p.archived && deleteDeps().running(id) > 0) throw new Error('Agents are still running in this project. Stop them or wait until they finish, then archive it.');
+      const { archived: _a, pinned: _p, ...rest } = p;
+      const archived = patch.archived ?? p.archived, pinned = patch.pinned ?? p.pinned;
+      return store.upsertProject({ ...rest, ...(archived ? { archived: true } : {}), ...(pinned ? { pinned: true } : {}) });
+    },
+    async getProjectsOverview() { await ready; return buildOverview(store.listProjects(), { git, store, now: clock(), windows: () => ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)) }); },
+    async searchAll(query, o) { return searchAllImpl(typeof query === 'string' ? query : '', o && typeof o === 'object' ? o : undefined, { store, projects: store.listProjects() }); },
+    async getGlobalUsage() { await ready; return globalUsage({ store, projects: store.listProjects(), now: clock(), windows: ledger.windows(clis.filter((c) => c.installed).map((c) => c.id)) }); },
     async removeProject(id) {
       for (const a of store.listAgentRecords(id)) orchestrator.stop(a.id);
       store.removeProject(id); // Harbor records only; files and worktrees on disk are untouched.

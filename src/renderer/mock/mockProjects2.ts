@@ -1,6 +1,6 @@
-import type { Agent, Conversation, GithubRepo, HarborApi, Project } from '../../shared/api';
+import type { Agent, Conversation, GithubRepo, GlobalUsage, HarborApi, Project, ProjectOverview, SearchAllHit, SearchHit } from '../../shared/api';
 
-type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos'>>;
+type Projects2Methods = Required<Pick<HarborApi, 'cloneProject' | 'listGithubRepos' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage'>>;
 interface Data { projects: Project[]; agents: Agent[]; conversations: Conversation[] }
 
 const DEMO_DIR = 'C:\Projects\Harbor Projects';
@@ -13,7 +13,7 @@ const REPOS: GithubRepo[] = [
  * Track B, projects 2 (CHANGELOG 0.1.48 and later) for the demo. Nothing touches a disk or a network. Failures are reachable by name:
  * a URL ending in `/missing.git` is "not found", `/private.git` needs a sign-in, `/taken.git` hits an existing folder, `/empty.git` clones an empty repository.
  */
-export function createMockProjects2(data: () => Data, pause: () => Promise<void>, settings: () => { projectsDir?: string }): Projects2Methods {
+export function createMockProjects2(data: () => Data, pause: () => Promise<void>, settings: () => { projectsDir?: string }, search: (query: string) => Promise<SearchHit[]>): Projects2Methods {
   const copy = <T,>(v: T): T => structuredClone(v);
   return {
     async cloneProject(draft) {
@@ -31,6 +31,47 @@ export function createMockProjects2(data: () => Data, pause: () => Promise<void>
       data().projects.push(p);
       data().agents.push({ id: `main-${p.id}`, projectId: p.id, role: 'main', title: 'Main agent', state: 'waiting', cli: 'codex', model: 'default', effort: 'medium' });
       return { project: copy(p), path, remote: url, warnings: repo === 'empty' ? ['The repository has no commits yet. Make a first commit before asking an agent to work on it.'] : [] };
+    },
+    async setProjectFlags(id, patch) {
+      await pause();
+      const p = data().projects.find(x => x.id === id);
+      if (!p) throw new Error('This project is no longer available.');
+      if (patch.archived && !p.archived && data().agents.some(a => a.projectId === id && a.role !== 'main' && ['queued', 'working', 'waiting'].includes(a.state))) throw new Error('Agents are still running in this project. Stop them or wait until they finish, then archive it.');
+      if (patch.archived !== undefined) { if (patch.archived) p.archived = true; else delete p.archived; }
+      if (patch.pinned !== undefined) { if (patch.pinned) p.pinned = true; else delete p.pinned; }
+      data().projects.sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
+      return copy(p);
+    },
+    async getProjectsOverview() {
+      await pause();
+      const projects: ProjectOverview[] = data().projects.map((p, i) => {
+        const agents = data().agents.filter(a => a.projectId === p.id);
+        return {
+          projectId: p.id, running: agents.filter(a => ['queued', 'working'].includes(a.state)).length, waiting: agents.filter(a => a.state === 'waiting' && a.role !== 'main').length,
+          unmergedBranches: i === 0 ? 2 : 0, unpushedCommits: i === 0 ? 3 : 0, lastActivity: p.lastOpened, conversations: data().conversations.filter(c => c.projectId === p.id).length,
+          recentRuns: i === 0 ? 14 : 0, recentKTok: i === 0 ? 812.4 : 0, ...(/missing/i.test(p.name) ? { missing: true } : {})
+        };
+      });
+      return { generatedAt: Date.now(), projects, quota: [{ cli: 'claude', label: '5 hour', usedPct: 42, source: 'estimated' as const, period: 'session' as const }, { cli: 'codex', label: 'Weekly', usedPct: 18, source: 'reported' as const, period: 'weekly' as const }] };
+    },
+    async searchAll(query, opts) {
+      await pause();
+      const found = await search(query);
+      const hits: SearchAllHit[] = found.map(h => ({ projectId: h.conversation.projectId, projectName: h.projectName, ...(data().projects.find(p => p.id === h.conversation.projectId)?.archived ? { projectArchived: true as const } : {}), conversation: h.conversation, kind: h.excerpt ? 'message' as const : 'title' as const, time: h.conversation.updated, ...(h.excerpt ? { excerpt: h.excerpt } : {}) }));
+      const offset = opts?.offset ?? 0, limit = opts?.limit ?? 25;
+      return { hits: hits.slice(offset, offset + limit), total: hits.length, hasMore: offset + limit < hits.length };
+    },
+    async getGlobalUsage(): Promise<GlobalUsage> {
+      await pause();
+      const row = (runs: number, k: number) => ({ runs, failedRuns: runs > 5 ? 1 : 0, inputTokens: k * 700, outputTokens: k * 300, cacheReadTokens: 0, cacheWriteTokens: 0, billableKTok: k, minutes: runs * 3.5, ...(runs > 5 ? { costUsd: 1.37 } : {}) });
+      const first = data().projects[0];
+      return {
+        estimate: true, since: Date.now() - 8 * 86_400_000, total: row(20, 1100),
+        byCli: [{ cli: 'claude', ...row(14, 812.4) }, { cli: 'codex', ...row(6, 287.6) }],
+        byProject: [...(first ? [{ projectId: first.id, projectName: first.name, ...row(14, 812.4) }] : []), { projectId: 'removed-1', removed: true, ...row(6, 287.6) }],
+        lifetime: { runs: 131, inputTokens: 4_100_000, outputTokens: 1_900_000, costUsd: 9.42 }, windows: [],
+        notes: ['These numbers count only what Harbor ran, from its own records of the last 8 days. They are an estimate and not the provider quota or bill.', '2 runs reported no token counts (quota unknown, not zero).']
+      };
     },
     async listGithubRepos(opts) { await pause(); return copy(REPOS).filter(r => !opts?.owner || r.owner.toLowerCase() === opts.owner.toLowerCase()); }
   };

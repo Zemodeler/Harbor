@@ -13,6 +13,7 @@ import { sessionStatus } from './session';
 import { MenuIcon, PanelIcon } from './components/Icons';
 import { Sidebar } from './components/Sidebar';
 import { Conversation } from './components/Conversation';
+import { Overview } from './components/Overview';
 import { Settings } from './components/Settings';
 import { Modal } from './components/Modal';
 import { QuestionCard } from './components/Question';
@@ -75,7 +76,7 @@ export default function App() {
   const veryWide = useMedia(1400);
   const [renaming, setRenaming] = useState<ConversationRecord>();
   const [newTitle, setNewTitle] = useState('');
-  const [view, setView] = useState<'conversation' | 'settings' | 'git'>('conversation');
+  const [view, setView] = useState<'conversation' | 'settings' | 'git' | 'overview'>('conversation');
   const [dialog, setDialog] = useState<'switch' | 'history' | 'add' | 'remove'>();
   const [menu, setMenu] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -117,7 +118,7 @@ export default function App() {
   function search(history = false) { setMenu(false); setDialog(history ? 'history' : 'switch'); }
   const editTags = (c: ConversationRecord) => { setMenu(false); setTagging(c); };
   const forget = (id: string) => { workspace.forgetConversation(id); meta.forget(id); };
-  const sideProps = { state, add: openProject, newProject: state.api.createProject ? openNew : undefined, settings: () => { setMenu(false); setView('settings'); }, close: () => { setMenu(false); setView('conversation'); }, search: () => search(), history: () => search(true), rename, queuedFor: (id: string) => (workspace.preferences.queue[id] || []).length, forget, tags: meta.tags, editTags, archivedOpen, setArchivedOpen };
+  const sideProps = { state, overview: state.api.getProjectsOverview ? () => { setMenu(false); setView('overview'); } : undefined, add: openProject, newProject: state.api.createProject ? openNew : undefined, settings: () => { setMenu(false); setView('settings'); }, close: () => { setMenu(false); setView('conversation'); }, search: () => search(), history: () => search(true), rename, queuedFor: (id: string) => (workspace.preferences.queue[id] || []).length, forget, tags: meta.tags, editTags, archivedOpen, setArchivedOpen };
   // First run: offer the guide once Harbor has loaded with no projects (a start-up failure is not a first run).
   const offerWelcome = shouldOfferOnboarding({ loading: state.loading, startupError: state.startupError, projects: state.projects.length, done: onboardingDone() });
   useEffect(() => { if (offerWelcome) setWelcome(true); }, [offerWelcome]);
@@ -147,7 +148,7 @@ export default function App() {
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setDialog('history'); }
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'n' && state.api.createProject) { e.preventDefault(); if (!dialog) openNew(); return; }
       // Alt+1 to Alt+9 open the project at that place in the rail (not while typing, where AltGr produces characters).
-      if (e.altKey && !e.ctrlKey && !e.shiftKey && /^[1-9]$/.test(e.key) && !(e.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) { const target = state.projects[Number(e.key) - 1]; if (target) { e.preventDefault(); void state.selectProject(target.id); setView('conversation'); } return; }
+      if (e.altKey && !e.ctrlKey && !e.shiftKey && /^[1-9]$/.test(e.key) && !(e.target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) { const target = state.projects.filter(p => !p.archived || p.id === state.projectId)[Number(e.key) - 1]; if (target) { e.preventDefault(); void state.selectProject(target.id); setView('conversation'); } return; }
       if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); if (!dialog) { setView('conversation'); void state.newConversation(); } }
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
@@ -183,14 +184,14 @@ export default function App() {
     <div className={s.desktopSidebar}><Sidebar {...sideProps}/></div>
     <main className={s.workspace} ref={workspaceRef} id="harbor-workspace" aria-label="Workspace">
       <header className={s.header}><button ref={menuTrigger} className={s.mobileMenu} aria-label="Open project menu" aria-expanded={menu} onClick={() => setMenu(true)}><MenuIcon size={18} aria-hidden="true"/></button>
-        <div className={s.headerTitle}><small>{view === 'settings' ? 'Harbor / Settings' : view === 'git' ? `${project?.name || 'Harbor'} / Git` : `${project?.name || 'Harbor'} / ${agent?.title || 'Main agent'}`}</small><h1 tabIndex={-1}>{view === 'settings' ? 'Connections & preferences' : view === 'git' ? 'Branches and changes' : state.conversation?.title || project?.name || 'Your workspace'}</h1></div>
+        <div className={s.headerTitle}><small>{view === 'overview' ? 'Harbor / Projects' : view === 'settings' ? 'Harbor / Settings' : view === 'git' ? `${project?.name || 'Harbor'} / Git` : `${project?.name || 'Harbor'} / ${agent?.title || 'Main agent'}`}</small><h1 tabIndex={-1}>{view === 'overview' ? 'All projects' : view === 'settings' ? 'Connections & preferences' : view === 'git' ? 'Branches and changes' : state.conversation?.title || project?.name || 'Your workspace'}</h1></div>
         <div className={s.headerActions}>{view !== 'conversation' ? <button onClick={() => setView('conversation')}>Back to conversation</button> : <><SessionStatus status={status}/>{state.conversation?.mode === 'auto' ? <span className={s.autoBadge} title="Agents act without asking for permission in this conversation.">Auto mode · no permission prompts</span> : null}{agent && agent.role !== 'main' ? <button onClick={() => void state.openAgent(agent.parentId || '')}>Back to main</button> : null}{layout === 'mission' ? <button aria-pressed={showBoard} onClick={() => { setMissionFull(!missionFull); setPanel(undefined); }}>{showBoard ? 'Conversation view' : 'Show board'}</button> : null}<button className={s.sessionInfoButton} disabled={!state.conversation} aria-label="Session information" aria-expanded={visiblePanel === 'activity'} onClick={toggleActivity}><PanelIcon size={17} aria-hidden="true"/><span>{layout === 'command' ? 'Live activity' : 'Session info'}</span></button><button disabled={!state.projectId} onClick={() => setView('git')}>Git</button></>}</div>
       </header>
       {state.error ? <div className={s.error} role="alert"><span>{state.error}</span><span className={s.hqBannerActions}><button onClick={() => void state.reload()}>Reload workspace</button><button onClick={state.dismissError}>Dismiss</button></span></div> : null}
       {!state.loading && !state.clis.some(c => c.installed && c.signedIn && c.authState !== 'unknown' && state.settings?.cliOverrides[c.id]?.enabled !== false) ? <div className={s.notice}>No connection is ready. Enable or sign in to an installed CLI.<button onClick={() => setView('settings')}>View connections</button></div> : null}
       <QuestionCards state={state}/>
       <PermissionRequests state={state} fallbackFocus={focusWorkspace} openConversation={c => { setView('conversation'); setMissionFull(true); void state.selectConversation(c); }}/>
-      {state.loading ? <div className={s.empty} role="status">Opening your workspace…</div> : state.startupError && !state.projects.length ? <div className={s.empty} role="alert"><h1 tabIndex={-1}>Harbor could not start</h1><p>{state.startupError}</p><button className={s.primary} onClick={() => void state.reload()}>Retry</button></div> : view === 'settings' ? <Settings state={state} appearanceState={{ ...appearance, updateAppearance: changeAppearance }} workspace={workspace} showConversation={() => setView('conversation')}/> : view === 'git' ? <GitPanel key={state.projectId} state={state} openAgent={id => { setView('conversation'); setMissionFull(true); void state.openAgent(id); }}/> : <>
+      {state.loading ? <div className={s.empty} role="status">Opening your workspace…</div> : state.startupError && !state.projects.length ? <div className={s.empty} role="alert"><h1 tabIndex={-1}>Harbor could not start</h1><p>{state.startupError}</p><button className={s.primary} onClick={() => void state.reload()}>Retry</button></div> : view === 'overview' ? <Overview state={state} openProject={id => { void state.selectProject(id); setView('conversation'); }} openConversation={(projectId, conversation) => { void state.selectProject(projectId).then(() => state.selectConversation(conversation)); setView('conversation'); }}/> : view === 'settings' ? <Settings state={state} appearanceState={{ ...appearance, updateAppearance: changeAppearance }} workspace={workspace} showConversation={() => setView('conversation')}/> : view === 'git' ? <GitPanel key={state.projectId} state={state} openAgent={id => { setView('conversation'); setMissionFull(true); void state.openAgent(id); }}/> : <>
         <WorkspaceSummary state={state} queued={state.conversation ? (workspace.preferences.queue[state.conversation.id] || []).length : 0} review={() => setPanel('review')}/>
         <div className={`${s.workbody} ${showBoard ? s.missionWorkbody : ''}`}>
           {showBoard ? <MissionBoard state={state} select={c => { void state.selectConversation(c); if (!veryWide) setMissionFull(true); }} openConversation={() => setMissionFull(true)}/> : null}
