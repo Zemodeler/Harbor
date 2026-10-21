@@ -38,6 +38,7 @@ import { cloneProjectFolder, createProjectFolder, type CreatedFolder } from './p
 import { deleteProject as deleteProjectImpl, previewDelete } from './projectDelete';
 import { TemplateLibrary, blockReason, collectTemplateFiles, previewOf, suggestedChecks } from './templateLibrary';
 import { buildOverview, globalUsage, searchAll as searchAllImpl } from './overview';
+import { createReleaseTag as createReleaseTagImpl, mergePullRequest as mergePullRequestImpl, previewReleaseTag as previewReleaseTagImpl, pullRequestStatus as pullRequestStatusImpl, rerunFailedChecks as rerunFailedChecksImpl } from './pullRequests';
 import { createPullRequest as createPullRequestImpl, previewPush as previewPushImpl, pushBranch as pushBranchImpl } from './publish';
 import { reviewDirectory } from './review';
 import { previewRollback } from './rollback';
@@ -53,7 +54,7 @@ import { planMcpRun, type McpTarget } from './mcp/materialize';
 import { probeMcpServer, type McpFetch } from './mcp/probe';
 import { discoverCliMcpServers } from './mcp/discover';
 
-type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
+type Extras = 'getTaskReport' | 'rateResult' | 'listRatings' | 'getRatingSummary' | 'replayRouting' | 'createProject' | 'cloneProject' | 'listGithubRepos' | 'getPullRequestStatus' | 'rerunFailedChecks' | 'mergePullRequest' | 'previewReleaseTag' | 'createReleaseTag' | 'listTemplates' | 'previewTemplate' | 'saveProjectAsTemplate' | 'updateTemplate' | 'deleteTemplate' | 'setProjectFlags' | 'getProjectsOverview' | 'searchAll' | 'getGlobalUsage' | 'previewDeleteProject' | 'deleteProject' | 'previewPush' | 'pushBranch' | 'createPullRequest' | 'setRemote' | 'getGithubStatus' | 'browseFolder' | 'listWorktrees' | 'cleanupWorktrees';
 export type HarborService = Omit<HarborApi, 'onEvent' | 'exportDiagnostics' | 'getGitLogPage' | 'openWorkspace' | 'setConversationDeadline' | Extras | 'previewScreenshot' | 'answerScreenshot' | 'openDocument' | 'pickDocument' | 'documentAction' | 'pathForFile' | 'previewBundleExport' | 'exportBundle' | 'browseImportFile' | 'previewBundle' | 'importBundle' | 'listImportSources' | 'previewImport' | 'importConversation' | 'continueImported' | 'getSpendStatus' | 'listProjectNotes' | 'removeProjectNote' | 'createRemoteToken' | 'listRemoteTokens' | 'revokeRemoteToken'> & Required<Pick<HarborApi, Extras>> & {
   createRemoteToken(name: string, scope: RemoteScope): Promise<{ token: string; info: RemoteTokenInfo }>;
   listRemoteTokens(): Promise<RemoteTokenInfo[]>;
@@ -558,6 +559,13 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     ...(opts.trashItem ? { trash: opts.trashItem } : {}),
     ...(opts.deleteSleep ? { sleep: opts.deleteSleep } : {})
   });
+  const prDeps = () => ({
+    git, gh, store,
+    notify: (projectId: Id, text: string) => {
+      const conv = store.listConversations(projectId).find((c) => !c.imported && !c.archived);
+      if (conv) orchestrator.notice(conv.id, text);
+    }
+  });
   const publishDeps = () => ({
     git, gh, store,
     notify: (projectId: Id, branch: string, text: string) => {
@@ -827,6 +835,11 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async createPullRequest(projectId, draft) { return createPullRequestImpl(needProject(projectId), draft, publishDeps()); },
     async setRemote(projectId, url, o) { await git.setRemote(needProject(projectId).path, url, { replace: o?.replace === true }); },
     async getGithubStatus() { return gh.status(); },
+    async getPullRequestStatus(projectId, branch) { return pullRequestStatusImpl(needProject(projectId), branch, prDeps()); },
+    async rerunFailedChecks(projectId, branch) { return rerunFailedChecksImpl(needProject(projectId), branch, prDeps()); },
+    async mergePullRequest(projectId, o) { return mergePullRequestImpl(needProject(projectId), o && typeof o === 'object' ? o : (undefined as never), prDeps()); },
+    async previewReleaseTag(projectId) { return previewReleaseTagImpl(needProject(projectId), prDeps()); },
+    async createReleaseTag(projectId, draft) { return createReleaseTagImpl(needProject(projectId), draft, prDeps()); },
     async listWorktrees() { return listHarborWorktrees({ git, store, worktreesRoot, now: clock() }); },
     async cleanupWorktrees(paths) { return cleanupWorktreesImpl({ git, store, worktreesRoot, now: clock() }, Array.isArray(paths) ? paths.filter((p) => typeof p === 'string') : undefined); },
     async browseFolder() { return (await opts.pickFolder?.()) ?? null; },

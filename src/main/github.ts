@@ -1,4 +1,4 @@
-import type { GithubRepo, GithubStatus } from '../shared/api';
+import type { GithubRepo, GithubStatus, MergeMethod, PullRequestCheck, PullRequestStatus } from '../shared/api';
 import { runProcess, type Runner } from './proc';
 import { scanLine } from './secretScan';
 
@@ -89,6 +89,59 @@ ${r.stderr}`;
     return { ok: true, value: parseRepoList(r.stdout) };
   }
 
+  /** Mapped failure of a gh call that is not about the PR itself (sign-in, timeout, anything else). */
+  private failed(r: { stdout: string; stderr: string; timedOut: boolean }, what: string): GhOutcome<never> {
+    if (r.timedOut) return { ok: false, kind: 'error', message: `gh timed out ${what}.` };
+    const text = `${r.stdout}\n${r.stderr}`;
+    if (/auth|log ?in|credentials|401/i.test(text)) return { ok: false, kind: 'not-logged-in', message: `gh is not signed in to GitHub. ${GH_LOGIN_HINT}` };
+    return { ok: false, kind: 'error', message: `gh could not ${what}: ${plainGhMessage(text)}` };
+  }
+
+  /** The pull request of a branch with its check summary (`gh pr view` + `gh pr checks`, both read-only). Value null = the branch has no pull request. */
+  async prStatus(o: { cwd: string; branch: string }): Promise<GhOutcome<PullRequestStatus | null>> {
+    if (!plainBranch(o.branch)) return { ok: false, kind: 'error', message: 'The branch name is not a plain name.' };
+    const blocked = await this.needGh();
+    if (blocked) return blocked;
+    const v = await this.gh(['pr', 'view', o.branch, '--json', 'number,title,url,state,isDraft,mergeable,mergeStateStatus,reviewDecision,baseRefName,headRefName'], { cwd: o.cwd });
+    if (v.code !== 0) {
+      if (/no pull requests? found|could not find any pull request|no open pull requests?/i.test(`${v.stdout}\n${v.stderr}`)) return { ok: true, value: null };
+      return this.failed(v, 'read the pull request');
+    }
+    // gh pr checks exits non-zero while checks fail or are pending but still prints the JSON; only the JSON matters here.
+    const c = await this.gh(['pr', 'checks', o.branch, '--json', 'name,bucket,workflow,link'], { cwd: o.cwd });
+    if (c.timedOut) return this.failed(c, 'read the checks');
+    const status = parsePrStatus(v.stdout, c.stdout);
+    return status ? { ok: true, value: status } : { ok: false, kind: 'error', message: 'gh answered with something Harbor could not read as a pull request.' };
+  }
+
+  /** `gh run rerun <id> --failed` for each run id (digits only, at most 10). Returns how many runs were restarted. */
+  async rerunFailed(o: { cwd: string; runIds: readonly string[] }): Promise<GhOutcome<{ rerun: number }>> {
+    const ids = [...new Set(o.runIds)].slice(0, 10);
+    if (!ids.length || !ids.every((i) => /^\d{1,20}$/.test(i))) return { ok: false, kind: 'error', message: 'There is no failed workflow run to restart.' };
+    const blocked = await this.needGh();
+    if (blocked) return blocked;
+    let rerun = 0;
+    for (const id of ids) {
+      const r = await this.gh(['run', 'rerun', id, '--failed'], { cwd: o.cwd });
+      if (r.code !== 0) return rerun ? { ok: true, value: { rerun } } : this.failed(r, 'restart the failed checks');
+      rerun++;
+    }
+    return { ok: true, value: { rerun } };
+  }
+
+  /** `gh pr merge <number> --merge|--squash|--rebase`. Never `--admin`, never `--delete-branch`, never `--auto`; the caller has already checked the PR. */
+  async mergePr(o: { cwd: string; number: number; method: MergeMethod }): Promise<GhOutcome<{ url?: string; message: string }>> {
+    if (!Number.isInteger(o.number) || o.number < 1) return { ok: false, kind: 'error', message: 'The pull request number is not valid.' };
+    const flag = o.method === 'squash' ? '--squash' : o.method === 'rebase' ? '--rebase' : o.method === 'merge' ? '--merge' : undefined;
+    if (!flag) return { ok: false, kind: 'error', message: 'Choose merge, squash or rebase.' };
+    const blocked = await this.needGh();
+    if (blocked) return blocked;
+    const r = await this.gh(['pr', 'merge', String(o.number), flag], { cwd: o.cwd });
+    if (r.code !== 0) return this.failed(r, 'merge the pull request');
+    const text = `${r.stdout}\n${r.stderr}`;
+    return { ok: true, value: { ...(/https:\/\/github\.com\/[^\s]+\/pull\/\d+/.exec(text) ? { url: /https:\/\/github\.com\/[^\s]+\/pull\/\d+/.exec(text)![0] } : {}), message: plainGhMessage(text) } };
+  }
+
   /** `gh pr create` from a branch already on the remote. The body is read from stdin. Returns the pull request URL. */
   async createPr(o: { cwd: string; head: string; base: string; title: string; body?: string; draft?: boolean }): Promise<GhOutcome<{ url: string }>> {
     for (const b of [o.head, o.base]) if (!b || b.startsWith('-') || /[\s:]/.test(b)) return { ok: false, kind: 'error', message: 'The branch names are not plain names.' };
@@ -124,4 +177,60 @@ export function parseRepoList(stdout: string): GithubRepo[] {
     out.push({ slug, name, owner, ...(typeof r['description'] === 'string' && r['description'] ? { description: r['description'].slice(0, 300) } : {}), isPrivate: r['isPrivate'] === true, ...(r['isFork'] === true ? { isFork: true } : {}), ...(Number.isFinite(when) ? { updatedAt: when } : {}), url: web.endsWith('.git') ? web : `${web}.git` });
   }
   return out;
+}
+
+/** A branch name as a plain argument: no leading dash, no whitespace, colon, or control characters. */
+export const plainBranch = (b: string): boolean => typeof b === 'string' && b.length > 0 && b.length <= 250 && !b.startsWith('-') && !/[\s:\0]/.test(b);
+
+const BUCKETS: Record<string, PullRequestCheck['bucket']> = { pass: 'pass', fail: 'fail', pending: 'pending', skipping: 'skipped', cancel: 'cancelled' };
+
+/** The workflow run id inside a check link (`.../actions/runs/123/job/456`), or undefined (external status checks have none). */
+export const runIdOfLink = (link: string | undefined): string | undefined => /\/actions\/runs\/(\d{1,20})(?:\/|$)/.exec(link ?? '')?.[1];
+
+/** Run ids behind the failed checks, in order, without repeats. */
+export function failedRunIds(items: readonly PullRequestCheck[]): string[] {
+  return [...new Set(items.filter((c) => c.bucket === 'fail').map((c) => runIdOfLink(c.link)).filter((x): x is string => !!x))];
+}
+
+/** Reads `gh pr view --json ...` and `gh pr checks --json ...` output into a status with the reasons Merge is or is not offered. Pure. */
+export function parsePrStatus(viewJson: string, checksJson: string): PullRequestStatus | undefined {
+  let v: Record<string, unknown>;
+  try { v = JSON.parse(viewJson) as Record<string, unknown>; } catch { return undefined; }
+  if (!v || typeof v !== 'object' || Array.isArray(v) || typeof v['number'] !== 'number') return undefined;
+  const url = typeof v['url'] === 'string' && /^https:\/\/github\.com\/[^\s]+\/pull\/\d+$/.test(v['url']) ? v['url'] : undefined;
+  if (!url) return undefined;
+  let rawChecks: unknown[] = [];
+  try { const j = JSON.parse(checksJson || '[]') as unknown; if (Array.isArray(j)) rawChecks = j.slice(0, 200); } catch { /* "no checks reported" is plain text: zero checks */ }
+  const items: PullRequestCheck[] = rawChecks.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const c = raw as Record<string, unknown>;
+    if (typeof c['name'] !== 'string') return [];
+    const link = typeof c['link'] === 'string' && /^https:\/\//.test(c['link']) ? c['link'] : undefined;
+    return [{ name: c['name'].slice(0, 200), bucket: BUCKETS[String(c['bucket'])] ?? 'pending', ...(typeof c['workflow'] === 'string' && c['workflow'] ? { workflow: c['workflow'].slice(0, 200) } : {}), ...(link ? { link } : {}) }];
+  });
+  const count = (b: PullRequestCheck['bucket']) => items.filter((c) => c.bucket === b).length;
+  const failing = count('fail'), pending = count('pending');
+  const rawState = String(v['state'] ?? '').toUpperCase();
+  const state: PullRequestStatus['state'] = rawState === 'MERGED' ? 'merged' : rawState === 'CLOSED' ? 'closed' : 'open';
+  const m = String(v['mergeable'] ?? '').toUpperCase();
+  const mergeable: PullRequestStatus['mergeable'] = m === 'MERGEABLE' ? 'mergeable' : m === 'CONFLICTING' ? 'conflicting' : 'unknown';
+  const merge = String(v['mergeStateStatus'] ?? '').toUpperCase();
+  const review = typeof v['reviewDecision'] === 'string' && v['reviewDecision'] ? v['reviewDecision'] : undefined;
+  const hard: string[] = [];
+  if (state !== 'open') hard.push(`The pull request is already ${state}.`);
+  if (v['isDraft'] === true) hard.push('It is a draft. Mark it ready for review on GitHub first.');
+  if (mergeable === 'conflicting' || merge === 'DIRTY') hard.push('It has merge conflicts with its base branch.');
+  if (merge === 'BEHIND') hard.push('The branch is behind its base and the repository requires it to be up to date.');
+  if (merge === 'BLOCKED' && !failing && !pending) hard.push('Branch protection or a required review is blocking the merge.');
+  if (review === 'CHANGES_REQUESTED') hard.push('A reviewer requested changes.');
+  if (review === 'REVIEW_REQUIRED') hard.push('A review is required before it can be merged.');
+  const soft: string[] = [];
+  if (failing) soft.push(`${failing} check${failing === 1 ? ' is' : 's are'} failing.`);
+  if (pending) soft.push(`${pending} check${pending === 1 ? ' is' : 's are'} still running.`);
+  return {
+    number: v['number'], url, title: String(v['title'] ?? '').slice(0, 300), state, draft: v['isDraft'] === true,
+    base: String(v['baseRefName'] ?? ''), head: String(v['headRefName'] ?? ''), mergeable, ...(review ? { reviewDecision: review } : {}),
+    checks: { total: items.length, passing: count('pass'), failing, pending, skipped: count('skipped') + count('cancelled'), items },
+    blockers: [...hard, ...soft], checksOverridable: !hard.length && soft.length > 0, canMerge: !hard.length && !soft.length, canRerun: failedRunIds(items).length > 0
+  };
 }
