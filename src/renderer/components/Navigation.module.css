@@ -24,15 +24,27 @@
 .kind { text-transform: uppercase; letter-spacing: .4px; font-size: 10px; }
 .status p { margin: 12px 0 0; font-size: 12px; }
 
-/* Toasts */
-.toastRegion { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: grid; gap: 8px; width: min(380px, calc(100vw - 32px)); pointer-events: none; }
-.toast { pointer-events: auto; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px #0003; animation: toastIn .18s ease-out; }
-.toast[data-kind=failed] { border-left-color: var(--error); }
-.toast[data-kind=question] { border-left-color: var(--warning, var(--accent)); }
+/* Toasts: a manual popover (top layer, above modals); inset/margin are set here because the UA popover style centres it. */
+.toastRegion { position: fixed; inset: auto 16px 16px auto; margin: 0; padding: 0; border: 0; background: transparent; overflow: visible; color: inherit; z-index: var(--z-toast, 50); display: grid; gap: 8px; width: min(380px, calc(100vw - 32px)); pointer-events: none; }
+.toastRegion[data-empty] { display: none; }
+.toast { pointer-events: auto; position: relative; display: grid; grid-template-columns: auto 1fr; gap: 10px; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 12px 40px 12px 12px; box-shadow: 0 8px 24px #0003; animation: toastIn .18s ease-out; transition: opacity .16s ease, transform .16s ease; }
+.toast[data-leaving] { opacity: 0; transform: translateX(12px); pointer-events: none; }
+.toast[data-kind=failed] { border-color: var(--error); border-left-color: var(--error); box-shadow: 0 10px 28px #0005; }
+.toast[data-kind=question] { border-color: var(--warning, var(--accent)); border-left-color: var(--warning, var(--accent)); box-shadow: 0 10px 28px #0005; }
+.toast[data-kind=failed] .toastIcon { color: var(--error); }
+.toast[data-kind=question] .toastIcon { color: var(--warning, var(--accent)); }
+.toast[data-kind=finished] .toastIcon { color: var(--accent); }
+.toastIcon { display: flex; padding-top: 1px; }
+.toastText { min-width: 0; }
 .toast strong { display: block; font-size: 13px; }
-.toast p { margin: 2px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+.toast[data-kind=question] strong, .toast[data-kind=failed] strong { font-size: 14px; }
+.toast p { margin: 2px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
 .toastActions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .toastActions button { padding: 4px 10px; min-height: 28px; font-size: 12px; }
+.toast[data-kind=question] .toastActions button { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.toastClose { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; min-height: 0; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: 0; color: var(--muted); border-radius: 6px; }
+.toastClose:hover { background: var(--wash); color: var(--ink); }
+.toastMore { pointer-events: auto; justify-self: end; margin: 0; padding: 2px 10px; font-size: 12px; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 999px; }
 @keyframes toastIn { from { opacity: 0; transform: translateY(6px); } }
 
 /* Onboarding */
@@ -80,7 +92,7 @@
 .skipLink:focus { top: 12px; }
 .visuallyHidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; transition: none; } }
 
 /* App-wide: reduced motion stops every animation and transition, not only the ones listed one by one. */
 @media (prefers-reduced-motion: reduce) {
