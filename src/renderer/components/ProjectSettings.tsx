@@ -2,9 +2,13 @@ import { useRef, useState } from 'react';
 import type { Project } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Modal } from './Modal';
+import { InlineConfirm } from './ui/InlineConfirm';
 import { initials, toIcon } from './projectIcon';
 import s from '../Harbor.module.css';
 import p from './ProjectSettings.module.css';
+
+// The safe choice (Keep project, first in the group) takes focus; module-level so it runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 /** Name, image and removal of one project. Removal only drops Harbor's records, so it is a second step inside the dialog, not a click away. */
 export function ProjectSettings({ state, project, close }: { state: HarborState; project: Project; close: () => void }) {
@@ -28,14 +32,11 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
   };
 
   return <Modal title="Project settings" close={dismiss} dismissible={!pending}>
-    {confirming ? <div className={p.confirm}>
-      <p><strong>Remove “{project.name}” from Harbor?</strong></p>
-      <p className={s.muted}>Its conversations and agent records are deleted and running work is stopped. The folder, its files and git branches stay on disk. This cannot be undone.</p>
+    {confirming ? <div ref={focusSafe}>
+      <InlineConfirm label={`Remove ${project.name}`} cancelLabel="Keep project" confirmLabel={pending ? 'Removing…' : 'Remove project'} pending={pending} onCancel={() => { setConfirming(false); state.clearError('project'); }} onConfirm={remove}>
+        <strong>Remove “{project.name}” from Harbor?</strong><br/>Its conversations and agent records are deleted and running work is stopped. The folder, its files and git branches stay on disk. This cannot be undone.
+      </InlineConfirm>
       {failure ? <p className={s.error} role="alert">{failure}</p> : null}
-      <div className={s.actions}>
-        <button disabled={pending} onClick={() => { setConfirming(false); state.clearError('project'); }}>Keep project</button>
-        <button className={p.danger} disabled={pending} onClick={remove}>{pending ? 'Removing…' : 'Remove project'}</button>
-      </div>
     </div> : <>
       <form onSubmit={e => { e.preventDefault(); save(); }}>
         <div className={p.identity}>
