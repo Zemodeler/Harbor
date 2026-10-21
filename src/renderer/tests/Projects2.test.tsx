@@ -181,3 +181,46 @@ describe('B3 templates', () => {
     expect(await screen.findByText('No templates yet.')).toBeInTheDocument();
   });
 });
+
+describe('B4 recycle-bin delete', () => {
+  async function openDelete() {
+    const dialog = await openProjectSettings();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Remove…' }));
+    return dialog;
+  }
+  it('says the folder goes to the Recycle Bin and that it can be restored', async () => {
+    await ready();
+    const dialog = await openDelete();
+    const bin = within(dialog).getByRole('radio', { name: /Also move the folder to the Recycle Bin/ });
+    expect(within(dialog).getByRole('radio', { name: /Delete the folder permanently/ })).toBeInTheDocument();
+    await userEvent.click(bin);
+    expect(bin.closest('label')).toHaveTextContent(/restore it from the Recycle Bin/);
+    expect(within(dialog).queryByLabelText(/again to delete it permanently/)).not.toBeInTheDocument();
+  });
+  it('permanent delete asks for the name a second time and is its own button', async () => {
+    await ready();
+    const dialog = await openDelete();
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Delete the folder permanently/ }));
+    const go = within(dialog).getByRole('button', { name: 'Delete folder and project' });
+    await userEvent.type(within(dialog).getByLabelText(/Type “Storefront” to confirm/), 'Storefront');
+    expect(go).toBeDisabled(); // the second confirmation is still empty
+    await userEvent.type(within(dialog).getByLabelText(/again to delete it permanently/), 'Storefront');
+    expect(go).toBeEnabled();
+    await userEvent.click(go);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Storefront' })).not.toBeInTheDocument());
+  });
+  it('a failed trash keeps the project, shows the reason, and the permanent option is the way out', async () => {
+    await ready();
+    await userEvent.click(screen.getByRole('button', { name: 'Internal tools' }));
+    const dialog = await openDelete();
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Also move the folder to the Recycle Bin/ }));
+    await userEvent.type(within(dialog).getByLabelText(/Type “Internal tools” to confirm/), 'Internal tools');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Move folder to Recycle Bin and remove project' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/could not be moved to the Recycle Bin.*choose permanent delete/);
+    expect(screen.getByRole('button', { name: 'Internal tools' })).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Delete the folder permanently/ }));
+    await userEvent.type(within(dialog).getByLabelText(/again to delete it permanently/), 'Internal tools');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete folder and project' }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Internal tools' })).not.toBeInTheDocument());
+  });
+});

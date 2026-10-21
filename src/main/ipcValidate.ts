@@ -333,6 +333,12 @@ export function validateInvoke(method: string, args: unknown[]): void {
       if (!isId(args[0])) bad('project id must be a short non-empty string');
       if (args[1] !== 'forget' && args[1] !== 'worktrees' && args[1] !== 'folder') bad('scope must be forget, worktrees or folder');
       if (args[2] !== undefined && args[2] !== null && (typeof args[2] !== 'string' || args[2].length > 200)) bad('confirmName must be text');
+      if (args[3] !== undefined && args[3] !== null) {
+        const o = args[3] as Record<string, unknown>;
+        if (typeof o !== 'object' || Array.isArray(o)) bad('options must be an object');
+        if (o['permanent'] !== undefined && typeof o['permanent'] !== 'boolean') bad('permanent must be true or false');
+        if (o['confirmPermanent'] !== undefined && (typeof o['confirmPermanent'] !== 'string' || o['confirmPermanent'].length > 200)) bad('confirmPermanent must be text');
+      }
       break;
     case 'previewPush':
     case 'pushBranch':

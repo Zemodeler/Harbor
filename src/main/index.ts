@@ -128,6 +128,7 @@ if (startupAction === 'start') app.whenReady().then(() => {
     dataDir,
     appVersion: app.getVersion(),
     appRoots: [app.getAppPath()],
+    trashItem: path => shell.trashItem(path),
     openFolder: async path => { const error = await shell.openPath(path); if (error) throw new Error(error); },
     launch: async (kind, target, editor) => {
       if (kind === 'editor') { await shell.openExternal(editorUrl(editor, target.file ? join(target.dir, target.file) : target.dir)); return; }
