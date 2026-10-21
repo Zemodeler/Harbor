@@ -8,6 +8,8 @@ import { DEFAULT_CATALOG, autoRoutable, entryFor, type CatalogEntry, type Need, 
 import type { TaskSize } from './calibration';
 import { nativeEffort } from './clis/effort';
 import { RunUsage, perRunUsage } from './runUsage';
+import { loadProjectPermissions, denyingEntry, type ProjectPermissions } from './permissionsFile';
+import { isGitDestructive } from './gitRisk';
 import { loadChecks as loadProjectChecks, runShellCheck, type CheckRunner } from './checks';
 import type { ResolvedCli } from './clis/discovery';
 import { harborBranchFor, staleWorktrees, type Git, type WorktreeEntry } from './git';
@@ -95,6 +97,8 @@ export interface OrchestratorDeps {
   journal?: Journal;
   /** Checks Harbor runs after an edit helper (default: `.harbor/checks.json` of the project, run in a shell). */
   loadChecks?: (projectPath: string) => string[];
+  /** Injected loader for `.harbor/permissions.json` (tests); default reads the main checkout. */
+  loadPermissions?: (projectPath: string) => ProjectPermissions;
   runCheck?: CheckRunner;
   /** Finds and kills leftover CLI processes at startup; injected so tests never touch real processes. */
   killer?: ProcessKiller;
@@ -360,8 +364,8 @@ interface RoutedOptions {
   resume: boolean;
   conversationId: Id;
   stream: boolean;
-  /** Lead turns: forbid git merge/rebase/cherry-pick/reset/push in CLIs that can enforce it. */
-  denyGitWrites?: boolean;
+  /** Lead turns: the wider auto-allowed command set (see RunOptions.leadAllowlist). */
+  leadAllowlist?: boolean;
   /** Key of the native session to resume and record; defaults to the agent id. */
   sessionKey?: Id;
   /** Called right before each attempt hands the prompt to a CLI. */
@@ -371,6 +375,8 @@ interface RoutedOptions {
   /** Extra writable directories (a worktree's git metadata) and command prefixes an edit run may use unasked. */
   writableDirs?: string[];
   allowedCommands?: string[];
+  /** Prefixes the project's permissions file forbids (see permissionsFile.ts). */
+  deniedCommands?: string[];
   /** Lead and helper runs: add the project's enabled skills for the chosen CLI (never the concierge, which stays lean). */
   skills?: boolean;
 }
@@ -446,6 +452,7 @@ export class Orchestrator {
   private twoLeadsWarned = new Set<Id>();
   /** Checks files already asked about in this run (project + content hash), so several helpers finishing together ask once. */
   private checksAsks = new Map<string, Promise<boolean>>();
+  private permissionAsks = new Map<string, Promise<void>>();
   /** Runs in flight, measured against the spend ceilings. */
   private spendFlights = new Map<symbol, SpendFlight>();
   /** One open "continue past this ceiling?" question per ceiling key; every run waiting on it shares the answer. */
@@ -1450,6 +1457,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
     await this.probeRepo(project).catch(() => false);
     const writableDirs = work && mode !== 'plan' ? await this.d.git.worktreeWritableDirs(work.worktree).catch(() => []) : [];
     const checkCmds = this.checkCommands(project);
+    const perms = await this.projectPermissions(project, conversationId, signal);
     // Project notes this session has not seen yet (all relevant ones on its first turn); a resumed session already holds the rest.
     const allNotes = this.d.store.listProjectNotes(project.id);
     const seenNotes = this.notesShown.get(conversationId) ?? new Set<Id>();
@@ -1488,8 +1496,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
         images: trigger.kind === 'user' ? trigger.images : undefined,
         ...(trigger.kind === 'user' && trigger.files?.length ? { files: trigger.files } : {}),
         ...(trigger.kind === 'screenshot' && trigger.shots?.length ? { shots: trigger.shots } : {}),
-        signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, denyGitWrites: true,
-        nonce, allowedCommands: commandPrefixes(checkCmds),
+        signal, resume: true, conversationId, stream: true, sessionKey: `lead:${conversationId}`, leadAllowlist: true,
+        nonce, allowedCommands: [...commandPrefixes(checkCmds), ...perms.allow], ...(perms.deny.length && mode === 'auto' ? { deniedCommands: perms.deny } : {}),
         onAttempt: turn.marks.length ? () => this.reportsAttempted(turn) : undefined
       });
       // Only a turn that finished is evidence the lead read its reports; one that took the prompt and then ended is not.
@@ -1576,6 +1584,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const shotAsked = !!shot && !asking && !signal.aborted;
     if (shotAsked) this.requestScreenshot(main, conversationId, conversationId, shot);
     else if (shot && asking) this.post(conversationId, 'system', 'Harbor ignored the lead\'s screenshot request because it also asked you a question; it can ask again after your answer.', { agentId: main.id });
+    // The user has the final say: a mode change the lead asks for is put to them as "are you sure", and only a yes applies it.
+    if (proto.mode && !asking && !shotAsked && !signal.aborted) this.confirmModeChange(main, conversationId, proto.mode);
     if (trigger.kind === 'help' && !forHelper && !replied.has(trigger.from.id) && !created.some((c) => c.helpFor === trigger.from.id)) {
       if (trigger.question) {
         // The lead answered the helper's question in prose: forwarded as its next message (only while it still waits for it).
@@ -2178,6 +2188,28 @@ ${attachedFilesNote(others)}` : text, conversationId);
   }
 
   /**
+   * The project's `.harbor/permissions.json`. `deny` applies at once; `allow` only once the user approved this exact content (asked
+   * in the background, so a run never waits for it: the next run picks the approval up).
+   */
+  private async projectPermissions(project: Project, conversationId: Id, signal?: AbortSignal): Promise<{ allow: string[]; deny: string[] }> {
+    const f = (this.d.loadPermissions ?? loadProjectPermissions)(project.path);
+    if (!f.allow.length) return { allow: [], deny: f.deny };
+    if (this.d.store.getPermissionsApproval(project.id) === f.hash) return { allow: f.allow, deny: f.deny };
+    const key = `${project.id}:${f.hash}`;
+    if (!this.permissionAsks.has(key)) {
+      const lead = this.d.store.listAgentRecords(project.id).find((x) => x.role === 'main');
+      if (lead) {
+        const prompt = `The project's permissions file (.harbor/permissions.json) lets agents run these commands without asking:\n${f.allow.map((c) => `  ${c}`).join('\n')}\nAllow them? This approves exactly this list for this project; if the file changes, Harbor asks again. (Its deny list already applies.)`;
+        const p = this.askTool(lead, conversationId, ++this.runSeq, { tool: 'Harbor permissions', input: { command: f.allow.join(' ; ') } }, signal ?? new AbortController().signal, { noRules: true, prompt })
+          .then((d) => { if (d.allow) this.d.store.setPermissionsApproval(project.id, f.hash); });
+        this.permissionAsks.set(key, p);
+        void p.finally(() => this.permissionAsks.delete(key));
+      }
+    }
+    return { allow: [], deny: f.deny };
+  }
+
+  /**
    * The helper's worktree: an existing harbor/* branch of this helper (a retry, an interrupted creation, a folder cleaned up
    * earlier) comes back as it was; otherwise a new branch from the current HEAD.
    */
@@ -2307,7 +2339,8 @@ ${attachedFilesNote(others)}` : text, conversationId);
     // A sandboxed edit run in a worktree must be able to write the worktree's git metadata (under the main repo's .git), or
     // `git add` / `git commit` fail inside it.
     const writableDirs = permission === 'edit' && a.worktree ? await this.d.git.worktreeWritableDirs(a.worktree).catch(() => []) : [];
-    const allowed = permission === 'edit' ? commandPrefixes(this.checkCommands(this.project(a.projectId))) : [];
+    const perms = permission === 'edit' ? await this.projectPermissions(this.project(a.projectId), this.convFor(a), ctl.signal) : { allow: [], deny: [] };
+    const allowed = permission === 'edit' ? [...commandPrefixes(this.checkCommands(this.project(a.projectId))), ...perms.allow] : [];
     return this.runRouted(a, {
       prompt, system: systemFor(a.role as Exclude<AgentRole, 'main'>), skills: true, role: a.role, complexity: a.complexity ?? 'medium', needs: a.needs, retry: a.retry,
       ...(a.difficulty !== undefined ? { difficulty: a.difficulty } : {}), ...(a.size ? { size: a.size } : {}), ...(a.difficultySignals ? { difficultySignals: a.difficultySignals } : {}),
@@ -2317,7 +2350,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       permission, cwd: o.cwd, signal: ctl.signal,
       resume: o.resume, conversationId: this.convFor(a), stream: true,
       contextIfNoResume: o.resume ? () => this.helperContext(a) : undefined,
-      nonce: newProtocolNonce(), ...(writableDirs.length ? { writableDirs } : {}), ...(allowed.length ? { allowedCommands: allowed } : {}),
+      nonce: newProtocolNonce(), ...(writableDirs.length ? { writableDirs } : {}), ...(allowed.length ? { allowedCommands: allowed } : {}), ...(perms.deny.length ? { deniedCommands: perms.deny } : {}),
       ...(o.shots?.length ? { shots: o.shots } : {})
     });
   }
@@ -3483,6 +3516,12 @@ ${attachedFilesNote(others)}` : text, conversationId);
     const journal = (text: string) => this.log({ kind: 'permission', projectId, conversationId, agentId: agent.id, text: `${tool}: ${text}` });
     // A leading `cd` into the project (or the helper's own worktree) is not chaining: rules are made and matched on what runs there.
     const roots = [this.project(projectId).path, ...(agent.worktree ? [agent.worktree] : [])];
+    const denied = opts.noRules ? undefined : denyingEntry(this.projectDenies(projectId), req.tool, req.input);
+    // A lead acts for the user in a session they watch: a denied command is put to them as "are you sure" instead of being refused. Helpers are refused.
+    if (denied && agent.role !== 'main') {
+      journal(`denied by .harbor/permissions.json (${denied})`);
+      return Promise.resolve({ allow: false, message: `Denied by the project's permissions file (.harbor/permissions.json: deny "${denied}"). Do not retry it; say in your report what you needed it for.` });
+    }
     if (!opts.noRules && this.d.store.listToolRules(projectId).some((r) => matchesToolRule(r, req.tool, req.input, roots))) {
       journal('allowed by a project rule');
       return Promise.resolve({ allow: true });
@@ -3498,13 +3537,14 @@ ${attachedFilesNote(others)}` : text, conversationId);
       return Promise.resolve({ allow: false, message: 'Harbor denied this tool call because the run was stopping.' });
     }
     const requestId = newId();
-    const rule = opts.noRules ? undefined : toolRuleFor(req.tool, req.input, roots);
+    const rule = opts.noRules || denied ? undefined : toolRuleFor(req.tool, req.input, roots);
     const timeoutMs = this.d.toolPermissionTimeoutMs ?? TOOL_PERMISSION_TIMEOUT_MS;
     const n = timeoutMs >= 60_000 ? Math.round(timeoutMs / 60_000) : Math.max(1, Math.round(timeoutMs / 1000));
     const minutes = `${n} ${timeoutMs >= 60_000 ? 'minute' : 'second'}${n === 1 ? '' : 's'}`;
     const who = agent.role === 'main' ? 'The lead agent' : `"${agent.title}"`;
     const what = toolSummary(req);
-    const prompt = opts.prompt ?? `${who} asks to run ${tool}${what ? `: ${what}` : ''}`;
+    const risky = !opts.prompt && isGitDestructive(req.tool, req.input);
+    const prompt = opts.prompt ?? `${denied ? `Are you sure? The project's permissions file (.harbor/permissions.json) denies "${denied}". ` : ''}${risky ? 'This can lose work or rewrite history. ' : ''}${who} asks to run ${tool}${what ? `: ${what}` : ''}`;
     return new Promise<ToolPermissionDecision>((resolve) => {
       let cancelTimer = (): void => {};
       const deadline = Date.now() + timeoutMs;
@@ -3530,6 +3570,37 @@ ${attachedFilesNote(others)}` : text, conversationId);
       this.emit(event);
       this.d.permissionsChanged?.();
     });
+  }
+
+  /**
+   * The lead asked to leave its mode because the user's message needs it. The user is asked once ("Are you sure?"); only a yes changes
+   * the mode, and the lead then resumes with the request. A no (or no answer) leaves everything as it was and tells the lead.
+   */
+  private confirmModeChange(main: AgentRecord, conversationId: Id, want: { to: 'default' | 'auto'; why: string }): void {
+    const conv = this.d.store.getConversation(conversationId);
+    const from = conv?.mode ?? 'default';
+    if (!conv || from === want.to) return;
+    const effect = want.to === 'auto'
+      ? 'Auto mode runs the lead and its helpers without any permission prompt (git included).'
+      : 'Default mode lets the lead edit files and run commands; anything off its allowlist still asks you first.';
+    const prompt = `Are you sure? The lead wants to switch this conversation from ${from} to ${want.to} mode${want.why ? ` because: ${want.why}` : ''}. ${effect}`;
+    void this.askTool(main, conversationId, ++this.runSeq, { tool: 'Harbor mode', input: { command: `mode ${want.to}` } }, new AbortController().signal, { noRules: true, prompt }).then((d) => {
+      const now = this.d.store.getConversation(conversationId);
+      if (!now) return;
+      if (!d.allow) { this.post(conversationId, 'system', `The conversation stays in ${now.mode ?? 'default'} mode.`); return; }
+      const previous = now.mode ?? 'default';
+      this.d.store.patchConversation(conversationId, { mode: want.to, goal: undefined });
+      if (previous === 'plan') this.goAhead.add(conversationId);
+      this.modeChanged(conversationId, previous, want.to);
+      this.emit({ type: 'conversation', conversation: { ...this.d.store.getConversation(conversationId)! } });
+      this.post(conversationId, 'system', `Mode switched to ${want.to} on your confirmation.`);
+      this.leadAsked.add(conversationId); // the continuation belongs to the lead's own work: no front-desk triage
+      this.enqueueMain(now.projectId, { kind: 'user', text: `The user confirmed the switch to ${want.to} mode. Carry out their last request now.` }, conversationId);
+    });
+  }
+
+  private projectDenies(projectId: Id): string[] {
+    try { return (this.d.loadPermissions ?? loadProjectPermissions)(this.project(projectId).path).deny; } catch { return []; }
   }
 
   private autoApplies(agent: AgentRecord, conversationId: Id): boolean {
@@ -3959,7 +4030,7 @@ ${attachedFilesNote(others)}` : text, conversationId);
       try {
         o.onAttempt?.();
         armStall(stallMs);
-        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, denyGitWrites: o.denyGitWrites, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.lean ? { lean: true } : {}), ...(o.stream && !o.lean ? { partial: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
+        for await (const c of adapter.run(prompt, { cwd: o.cwd, model: decision.model, effort: decision.effort as Effort, nativeEffort: nativeEffort(entryFor(this.d.catalog ?? DEFAULT_CATALOG, decision.cli, decision.model), decision.effort as Effort), resumeId, permission: o.permission, images, systemPrompt: system, leadAllowlist: o.leadAllowlist, onToolPermission, writableDirs: o.writableDirs, ...(skills?.readableDirs.length || o.files?.length ? { readableDirs: [...new Set([...(skills?.readableDirs ?? []), ...(o.files ?? []).map((f) => dirname(f))])] } : {}), allowedCommands: o.allowedCommands, ...(o.deniedCommands?.length ? { deniedCommands: o.deniedCommands } : {}), ...(o.lean ? { lean: true } : {}), ...(o.stream && !o.lean ? { partial: true } : {}), ...(mcp ? { mcp } : {}), signal: runCtl.signal }) as AsyncIterable<Chunk>) {
           lastChunk = wdNow();
           if (stuck) { stuck = false; this.clearStuck(agent, o); armStall(stallMs); }
           // A failure the adapter reports without any output (e.g. the CLI could not be spawned) is not a turn that started.

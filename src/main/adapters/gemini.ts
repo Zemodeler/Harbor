@@ -17,7 +17,7 @@ import { streamLines, type AdapterProcessOptions, type StreamedLine, type Stream
  *   UNVERIFIED  event shapes: init{session_id}, message{role,content}, tool_use{tool_name}, result{status,stats}
  *   NOT USED    `--resume` (selects by "latest" or index, not a stable id), `--sandbox`, `--yolo` (approval-mode replaces it)
  * Not supported here (options ignored): resume (every run is a fresh session; Harbor prepends its own handoff), images, lean
- * concierge runs, host tool-permission prompts, MCP, denyGitWrites, allowedCommands. In `default` approval mode a headless run
+ * concierge runs, host tool-permission prompts, MCP, leadAllowlist, allowedCommands. In `default` approval mode a headless run
  * cannot get approval for a write, which is the only read-only guard; Harbor's worktrees and post-turn git check remain the
  * containment. Auth: no non-interactive status command is verified, so the state stays 'unknown' until a run reports a login
  * failure (watchAuth in service.ts). Harbor never reads the CLI's credential files.

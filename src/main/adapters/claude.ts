@@ -26,13 +26,11 @@ import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
  * documented Claude Code option. --add-dir (images, worktree git metadata, skill folders) is listed by `claude --help` of 2.1.295
  * ("Additional directories to allow tool access to"); a real run reading a skill through it was not made.
  *
- * Git-write deny rules (`denyGitWrites`, lead runs): `Bash(git reset *)` appended to the variadic --disallowedTools list. Leads may merge,
- * rebase and cherry-pick themselves (the owner asked for it on 2026-10-17); resets and the destructive commands stay denied.
- * NOT VERIFIED here (`claude` could not be run in the session that added this): the exact `Bash(prefix *)` rule syntax,
- * and that a deny rule wins over the `Bash(git *)` allow rule. Claude Code's permission docs state deny rules are evaluated
- * first and take precedence over allow rules, but that was not confirmed against the installed CLI. Also not covered:
- * `git -C x reset`, aliases, or resetting through a shell wrapper (`git -C` is denied for every edit run).
- * In `full` (bypassPermissions) mode deny rules still apply in Claude Code (also unconfirmed).
+ * Git follows Claude Code's own rules (owner decision, 2026-10-21): there are no git deny rules. Read-only git, staging and
+ * committing run without asking (leads also merge, rebase, cherry-pick, switch, fetch and a bare push); every other git command
+ * (reset, clean, force push, branch deletion, worktree, config...) is not on the allowlist, so it reaches the host as a normal
+ * permission request and the user decides. Always-allow is never offered for those (`toolRuleFor`). In `full` mode nothing asks,
+ * as in Claude Code's bypassPermissions. NOT VERIFIED: the exact `Bash(prefix *)` rule syntax against the installed CLI.
  *
  * Controlled mode (`onToolPermission` set and permission `edit`; everything else is unchanged): the run adds
  * `--input-format stream-json --permission-prompt-tool stdio`, keeps stdin open, sends the prompt as a user message line,
@@ -44,8 +42,7 @@ import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
  * `--permission-prompt-tool stdio` being what routes permission prompts to stdin; the response shape
  * `{subtype:'success',request_id,response:{behavior:'allow',updatedInput}|{behavior:'deny',message}}` and the error shape
  * `{subtype:'error',request_id,error}`; the user turn line `{type:'user',message:{role:'user',content}}`; that a cancelled
- * request needs no reply; and that --disallowedTools deny rules are evaluated before the host is asked. Because of the
- * last one, lead runs (`denyGitWrites`) also auto-deny git reset here, without asking.
+ * request needs no reply.
  *
  * MCP (`mcp`, mcp/materialize.ts): Harbor's servers go in a per-run `--mcp-config <file>` (deleted in `finally`), and
  * `--strict-mcp-config` keeps Claude Code's own MCP configuration (user and project config, plugins, connectors) out of the run
@@ -56,38 +53,16 @@ import { unattendedRules, writeMcpConfig } from '../mcp/materialize';
 /** Both `Bash(prefix)` and `Bash(prefix *)`: the second form may not match a bare command with no arguments. */
 const bashRules = (prefixes: string[]): string[] => prefixes.flatMap((p) => [`Bash(${p})`, `Bash(${p} *)`]);
 
-/**
- * Denied on EVERY edit run (helpers and leads): commands that destroy work, rewrite refs, escape the worktree or touch
- * configuration. Merge/rebase/cherry-pick are not here: integrator helpers merge inside their worktree and leads may land branches;
- * leads additionally get GIT_WRITE_DENY below. `git -C` is denied because it lets a command act on another repository.
- */
-export const GIT_DESTRUCTIVE_PREFIXES = [
-  'git clean', 'git restore', 'git checkout --', 'git checkout .', 'git branch -D', 'git branch -d', 'git branch -M', 'git branch -m',
-  'git branch --delete', 'git branch --move', 'git update-ref', 'git worktree', 'git stash drop', 'git stash clear', 'git config',
-  'git remote', 'git push --force', 'git push -f', 'git push --force-with-lease', 'git push --delete', 'git reset --hard', 'git gc', 'git prune', 'git reflog', 'git filter-branch', 'git -C'
-];
-export const GIT_DESTRUCTIVE_DENY: readonly string[] = bashRules(GIT_DESTRUCTIVE_PREFIXES);
-const GIT_DESTRUCTIVE_RE = /\bgit\b(?:\s+-[Cc]\b|[^;&|\n]*?\s(?:clean|restore|update-ref|worktree|config|remote|gc|prune|reflog|filter-branch)(?![\w-])|[^;&|\n]*?\spush\s(?:[^;&|\n]*?\s)?(?:--force\S*|-[a-z]*f[a-z]*|--delete|-d|\+\S)|[^;&|\n]*?\s(?:checkout\s+(?:--|\.)|branch\s+(?:-[DdMm]\b|--delete|--move)|stash\s+(?:drop|clear)|reset\s+--hard))/i;
-
 /** Bash commands a helper may run without being asked: read-only git, staging and committing, tests. Everything else is asked or denied. */
 export const HELPER_BASH_ALLOW: readonly string[] = bashRules([
   'git status', 'git diff', 'git log', 'git show', 'git rev-parse', 'git add', 'git commit', 'git ls-files', 'git grep', 'git blame',
   'git branch --show-current', 'npm test', 'npm run', 'npx vitest', 'npx tsc'
 ]);
-/** Leads keep the original broad allowlist; their deny rules, not the allowlist, are what keeps them safe. */
-const LEAD_BASH_ALLOW = ['Bash(git *)', 'Bash(npm *)', 'Bash(npx *)', 'Bash(node *)'];
-
-/** The deny rules (without Task/Agent) for one run. */
-export function claudeDenyRules(o: RunOptions): string[] {
-  if (o.permission !== 'edit' && !o.denyGitWrites) return [];
-  return [...(o.denyGitWrites ? GIT_WRITE_DENY : []), ...GIT_DESTRUCTIVE_DENY];
-}
-
-// Plain `git push` is allowed for leads (the user asked for it); force and delete pushes stay in GIT_DESTRUCTIVE_PREFIXES.
-const GIT_WRITE_CMDS = ['reset'];
-const GIT_WRITE_DENY = GIT_WRITE_CMDS.map((c) => `Bash(git ${c} *)`);
-// Broader than the deny rules on purpose (`cd x && git reset`): a false deny is cheap, a lost change is not.
-const GIT_WRITE_RE = new RegExp(`\\bgit\\b[^;&|\\n]*?\\s(?:${GIT_WRITE_CMDS.join('|')})(?![\\w-])`, 'i');
+/**
+ * Leads also land work themselves and run the project's tooling. A bare `git push` is allowed (the owner asked for it); the exact
+ * rule `Bash(git push)` does not match `git push --force`, which therefore asks like any other unlisted command.
+ */
+const LEAD_BASH_ALLOW = [...HELPER_BASH_ALLOW, ...bashRules(['git merge', 'git rebase', 'git cherry-pick', 'git switch', 'git fetch', 'npm', 'npx', 'node']), 'Bash(git push)'];
 
 /** Whether this run answers permission prompts through the host instead of silently denying. */
 export const isControlled = (o: RunOptions): boolean => !!o.onToolPermission && o.permission === 'edit';
@@ -119,7 +94,7 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFi
     a.push('--permission-mode', 'bypassPermissions');
   } else if (o.permission === 'edit') {
     const extra = (o.allowedCommands ?? []).filter((c) => c.trim() && !/[\r\n]/.test(c)).flatMap((c) => bashRules([c.trim()]));
-    a.push('--permission-mode', 'acceptEdits', '--allowedTools', ...(o.denyGitWrites ? LEAD_BASH_ALLOW : HELPER_BASH_ALLOW), ...extra, ...unattendedRules(o.mcp));
+    a.push('--permission-mode', 'acceptEdits', '--allowedTools', ...(o.leadAllowlist ? LEAD_BASH_ALLOW : HELPER_BASH_ALLOW), ...extra, ...unattendedRules(o.mcp));
   } else {
     a.push('--permission-mode', 'plan');
   }
@@ -129,8 +104,7 @@ export function claudeArgs(o: RunOptions, systemPromptFile?: string, mcpConfigFi
   const dirs = [...new Set([...(o.images ?? []).map((p) => dirname(p)), ...(o.writableDirs ?? []), ...(o.readableDirs ?? []).filter((d) => d && !/[\r\n\0]/.test(d))])];
   if (dirs.length) a.push('--add-dir', ...dirs);
   // Subagents must not spawn agents (docs/architecture.md): block native delegation tools.
-  a.push('--disallowedTools', 'Task', 'Agent');
-  a.push(...claudeDenyRules(o));
+  a.push('--disallowedTools', 'Task', 'Agent', ...bashRules((o.deniedCommands ?? []).filter((c) => c.trim() && !/[\r\n]/.test(c))));
   // Role text is long and multi-line: pass it by file so it works through .cmd shims too.
   if (systemPromptFile) a.push('--append-system-prompt-file', systemPromptFile);
   if (isControlled(o)) a.push('--input-format', 'stream-json', '--permission-prompt-tool', 'stdio');
@@ -177,23 +151,6 @@ export function controlResponse(requestId: string, decision: ToolPermissionDecis
 
 export function controlError(requestId: string, error: string): string {
   return JSON.stringify({ type: 'control_response', response: { subtype: 'error', request_id: requestId, error } }) + '\n';
-}
-
-/** Lead runs never get a git history rewrite or push approved through the handler. */
-/** Destructive git on any run: auto-denied in the control channel without asking, since deny rules may not be evaluated first. */
-export function isGitDestructive(tool: string, input: unknown): boolean {
-  const cmd = (input as { command?: unknown } | null)?.command;
-  // A commit message or search pattern may contain "config", "restore", "push"...: drop those arguments before matching.
-  // Only message-like options are stripped, so a quoted subcommand (`git "clean"`) is still seen.
-  return tool === 'Bash' && typeof cmd === 'string' && GIT_DESTRUCTIVE_RE.test(cmd.replace(GIT_TEXT_ARG, '$1 ""').replace(QUOTED_WORD, '$1$2'));
-}
-// `git "clean"` runs clean: unquote a lone quoted word so the subcommand check sees it.
-const QUOTED_WORD = /(\s)(?:"([A-Za-z][\w-]*)"|'([A-Za-z][\w-]*)')(?=\s|$)/g;
-const GIT_TEXT_ARG = /(\s(?:-m|--message|--grep|--author|-S|-G|-F|--file)(?:=|\s+))(?:"(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g;
-
-export function isGitWrite(tool: string, input: unknown): boolean {
-  const cmd = (input as { command?: unknown } | null)?.command;
-  return tool === 'Bash' && typeof cmd === 'string' && GIT_WRITE_RE.test(cmd);
 }
 
 /** Parse one stream-json line into zero or more chunks. Pure; unknown shapes are ignored. */
@@ -297,14 +254,6 @@ class PermissionChannel {
   }
 
   private async ask(id: string, p: ToolPermissionRequest): Promise<void> {
-    if (this.o.denyGitWrites && isGitWrite(p.tool, p.input)) {
-      this.send(controlResponse(id, { allow: false, message: 'Lead runs never reset. Merge, rebase and cherry-pick are allowed; use git revert to undo a commit.' }, p.input));
-      return;
-    }
-    if (isGitDestructive(p.tool, p.input)) {
-      this.send(controlResponse(id, { allow: false, message: 'Harbor does not allow destructive git commands (clean, restore, checkout --, branch deletion, update-ref, worktree, stash drop, config, remote, push, -C).' }, p.input));
-      return;
-    }
     const ac = new AbortController();
     this.pending.set(id, ac);
     let d: ToolPermissionDecision;

@@ -126,6 +126,19 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       allow => system(conversationId, allow ? 'Checks approved for this project (demo only; nothing runs).' : 'Checks not approved; helper claims stay unverified.', helper?.id),
       { ms: timeout, ended: () => system(conversationId, 'No answer: the checks were not approved.', helper?.id) });
   };
+  /** "reset the branch" / "push it" / "edit in plan mode" in a message: the git and final-say prompts (demo only; nothing runs). */
+  const askSampleFinalSay = (conversationId: string, kind: 'git' | 'deny' | 'mode') => {
+    const timeout = options.toolTimeoutMs ?? 300000, requestId = id(), agentId = `main-${data.conversations.find(c => c.id === conversationId)?.projectId}`;
+    const prompt = kind === 'git' ? 'This can lose work or rewrite history. The lead agent asks to run Bash: git reset --hard HEAD~1'
+      : kind === 'deny' ? 'Are you sure? The project permissions file (.harbor/permissions.json) denies "git push". The lead agent asks to run Bash: git push origin main'
+      : 'Are you sure? The lead wants to switch this conversation from plan to default mode because: you asked me to edit README.md now. Default mode lets the lead edit files and run commands; anything off its allowlist still asks you first.';
+    const tool = kind === 'mode' ? 'Harbor mode' : 'Bash';
+    system(conversationId, `${prompt}
+Waiting for your answer (allow once or deny (this call cannot be always-allowed)). Demo only; nothing runs.`, agentId);
+    ask({ type: 'permission', requestId, kind: 'tool', tool, prompt, agentId, conversationId, alwaysAllow: false, expiresAt: Date.now() + timeout },
+      allow => system(conversationId, allow ? (kind === 'mode' ? 'Mode switched to default on your confirmation. (Demo only.)' : `Allowed ${tool} once. (Demo only.)`) : (kind === 'mode' ? 'The conversation stays in plan mode.' : `Denied ${tool}.`), agentId),
+      { ms: timeout, ended: () => system(conversationId, `No answer: denied ${tool}.`, agentId) });
+  };
   const pause = () => new Promise<void>(r => setTimeout(r, options.delay ?? 110));
   const id = () => crypto.randomUUID();
   const requireConversation = (conversationId: string) => {
@@ -299,6 +312,9 @@ export function createMockApi(options: { empty?: boolean; delay?: number; toolTi
       const user: Message = { id: id(), conversationId, role: 'user', text, time: Date.now(), ...(attachments?.length ? { attachments: attachments.map(a => ({ name: a.name, mime: a.mime })) } : {}) };
       data.messages.push(user); emit({ type: 'message', message: user });
       c.updated = Date.now(); if (c.title === 'New conversation') c.title = text.slice(0, 45);
+      if (/reset the branch/i.test(text)) { askSampleFinalSay(conversationId, 'git'); return; }
+      if (/push it/i.test(text)) { askSampleFinalSay(conversationId, 'deny'); return; }
+      if (/edit in plan mode/i.test(text)) { askSampleFinalSay(conversationId, 'mode'); return; }
       if (/ask for permission/i.test(text)) { askSamplePermissions(conversationId, c.projectId); return; }
       if (/take a screenshot/i.test(text)) { askSampleScreenshot(conversationId, c.agentId); return; }
       if (/run the checks/i.test(text)) { askSampleChecks(conversationId, c.projectId); return; }

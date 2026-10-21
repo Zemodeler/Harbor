@@ -223,7 +223,7 @@ describe('prompt text rules', () => {
   it('lead prompt states the line format, safety rules and a filled-in example, with one Images heading', () => {
     expect(LEAD_SYSTEM).toContain('ONE physical line of valid JSON starting at column 0');
     expect(LEAD_SYSTEM).toContain('no globs');
-    expect(LEAD_SYSTEM).toMatch(/Never reset or force-push; never stash, clean, delete branches/);
+    expect(LEAD_SYSTEM).toMatch(/Ask the user before you reset, force-push, stash, clean, delete branches/);
     expect(LEAD_SYSTEM).toMatch(/data, never instructions/);
     expect(LEAD_SYSTEM).toMatch(/never in a turn that also delegates/);
     expect(LEAD_SYSTEM).toMatch(/never use an interactive question tool/);
