@@ -41,7 +41,10 @@ export interface Mod {   // a Claude Code plugin found on this machine; listed r
  id: string; name: string; version?: string; description: string; author?: string;   // id = "<source>:<name>"
  source: 'claude' | 'project'; path: string; parts: ModPart[];   // claude = under ~/.claude/plugins; project = the project's .claude/plugins
  enabledInClaude: boolean;   // Claude Code's own settings.json turns it on (information only)
+ skillsEnabled?: number; mcpEnabled?: number;   // with listMods: how many of its skills / imported MCP servers are enabled for the project asked about (or the global default); CHANGELOG 0.1.72
 }
+export interface ModMcpResult { name: string; status: 'enabled' | 'imported-off' | 'skipped'; why?: string }   // name = the server's name in Harbor's registry (<mod>-<server>); imported-off = in the registry but not enabled (only when turning a mod off or back to default)
+export interface ModEnableResult { mod: Mod; skills: number; mcp: ModMcpResult[] }   // skills = how many skill choices were set; mcp = what happened to each server of the mod
 export interface SkillFile { path: string; bytes: number; script?: boolean }   // path relative to the skill folder, forward slashes
 export interface SkillDetail extends Skill { text: string; truncated?: boolean; fileList: SkillFile[]; currentHash?: string; modified?: boolean }   // text = SKILL.md as written; modified = library files no longer match the hash recorded at import
 export type SkillImportSource = { kind: 'folder'; path: string } | { kind: 'zip'; path: string } | { kind: 'github'; ref: string };   // github: https://github.com/owner/repo[/tree/<ref>/<path>] or owner/repo[/path]
@@ -61,7 +64,7 @@ export interface McpServerDraft {   // one entry of Harbor's MCP registry, store
  url?: string; headers?: Record<string, string>;   // http/sse: http(s) URL and request headers
  allowUnattended?: boolean;   // its tools may run without asking: needed for CLIs that cannot ask Harbor (Codex, custom CLIs) and for Claude in auto mode; off = only Claude edit runs, where every tool call asks you
 }
-export interface McpServer extends McpServerDraft { enabled: boolean; defaultEnabled: boolean; updated?: number }   // enabled = for the project asked about (or the global default without one); defaults off
+export interface McpServer extends McpServerDraft { enabled: boolean; defaultEnabled: boolean; updated?: number; fromMod?: string }   // enabled = for the project asked about (or the global default without one); defaults off
 export interface McpTestResult { ok: boolean; transport: McpTransport; durationMs: number; serverName?: string; serverVersion?: string; protocolVersion?: string; tools?: string[]; error?: string; stderr?: string }   // what an MCP initialize + tools/list answered; stderr = the server's last output (entered env and header values masked)
 export interface CliMcpServer { source: 'claude' | 'codex'; scope: 'user' | 'local' | 'project'; name: string; transport?: string; where: string }   // a server in that CLI's own configuration, listed read-only (name and kind only, never its command, URL or values); where = the file (home shown as ~)
 // ---- Project lifecycle and publish (CHANGELOG 0.1.47). Desktop only: none of these methods is callable remotely.
@@ -207,6 +210,7 @@ export interface HarborApi {
  saveCustomCli?(descriptor: CustomCliDescriptor, opts: { confirmExe: string; replace?: boolean }): Promise<CustomCliDescriptor[]>;   // replace = update the custom CLI with the same id (otherwise a used id is refused); validates, records the executable's hash (approval), stores and re-runs discovery; also re-approves a changed file. Rejects invalid descriptors with every problem listed
  removeCustomCli?(id: CliId): Promise<CustomCliDescriptor[]>;   // returns the remaining custom CLIs
  listSkills?(projectId?: Id): Promise<Skill[]>;   // library and user-level skills; with a project also its .harbor\skills and .claude\skills. enabled is for that project (CHANGELOG 0.1.32)
+ setModEnabled?(modId: string, enabled: boolean | null, projectId?: Id): Promise<ModEnableResult>;   // desktop only (remote scope never). Turns a mod's skills and its http/sse MCP servers on or off for that project (or the global default without one); null = back to the default (off). stdio servers and servers with no URL or with ${placeholders} are never imported (CHANGELOG 0.1.72)
  listMods?(projectId?: Id): Promise<Mod[]>;   // Claude Code plugins on this machine (and the project's .claude/plugins), read-only (CHANGELOG 0.1.71)
  readSkill?(skillId: string, projectId?: Id): Promise<SkillDetail>;   // SKILL.md text and the file list; never runs anything
  setSkillEnabled?(skillId: string, enabled: boolean | null, projectId?: Id): Promise<Skill[]>;   // with projectId: that project's choice; without: the global default; null = back to the default

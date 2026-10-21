@@ -24,7 +24,7 @@ const LINE_BREAK = /[\0\r\n]/;
 const MAX_ARGS = 64, MAX_PAIRS = 32, MAX_VALUE = 4096, MAX_ARG = 2000, MAX_URL = 2000;
 
 /** What the file keeps per server beyond the draft: the global default and per-project choices. */
-export interface StoredMcpServer extends McpServerDraft { defaultEnabled?: boolean; projects?: Record<string, boolean>; updated?: number }
+export interface StoredMcpServer extends McpServerDraft { defaultEnabled?: boolean; projects?: Record<string, boolean>; updated?: number; /** Mod id this server was imported from. */ fromMod?: string }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
@@ -102,7 +102,7 @@ export function maskSecrets(text: string, servers: ReadonlyArray<Pick<McpServerD
 }
 
 const draftOf = (s: StoredMcpServer): McpServerDraft => {
-  const { defaultEnabled: _d, projects: _p, updated: _u, ...draft } = s;
+  const { defaultEnabled: _d, projects: _p, updated: _u, fromMod: _m, ...draft } = s;
   return structuredClone(draft);
 };
 
@@ -129,7 +129,7 @@ export class McpRegistry {
       const r = raw as Record<string, unknown>;
       const projects: Record<string, boolean> = {};
       if (isObj(r['projects'])) for (const [id, on] of Object.entries(r['projects'])) if (typeof on === 'boolean') projects[id] = on;
-      this.servers.push({ ...v.server, ...(r['defaultEnabled'] === true ? { defaultEnabled: true } : {}), ...(Object.keys(projects).length ? { projects } : {}), ...(typeof r['updated'] === 'number' ? { updated: r['updated'] } : {}) });
+      this.servers.push({ ...v.server, ...(typeof r['fromMod'] === 'string' ? { fromMod: r['fromMod'].slice(0, 200) } : {}), ...(r['defaultEnabled'] === true ? { defaultEnabled: true } : {}), ...(Object.keys(projects).length ? { projects } : {}), ...(typeof r['updated'] === 'number' ? { updated: r['updated'] } : {}) });
     }
   }
 
@@ -148,7 +148,7 @@ export class McpRegistry {
   private resolve(s: StoredMcpServer, projectId?: string): McpServer {
     const def = s.defaultEnabled === true;
     const enabled = projectId !== undefined ? s.projects?.[projectId] ?? def : def;
-    return { ...draftOf(s), enabled, defaultEnabled: def, ...(s.updated !== undefined ? { updated: s.updated } : {}) };
+    return { ...draftOf(s), enabled, defaultEnabled: def, ...(s.updated !== undefined ? { updated: s.updated } : {}), ...(s.fromMod ? { fromMod: s.fromMod } : {}) };
   }
 
   list(projectId?: string): McpServer[] { return this.servers.map((s) => this.resolve(s, projectId)); }
@@ -165,10 +165,25 @@ export class McpRegistry {
     const clash = this.find(v.server.name);
     if (clash && clash !== prev) throw new Error(`An MCP server named ${v.server.name} already exists.`);
     if (!prev && this.servers.length >= MAX_MCP_SERVERS) throw new Error(`At most ${MAX_MCP_SERVERS} MCP servers can be added.`);
-    const next: StoredMcpServer = { ...v.server, ...(prev?.defaultEnabled ? { defaultEnabled: true } : {}), ...(prev?.projects ? { projects: prev.projects } : {}), updated: this.now() };
+    const next: StoredMcpServer = { ...v.server, ...(prev?.fromMod ? { fromMod: prev.fromMod } : {}), ...(prev?.defaultEnabled ? { defaultEnabled: true } : {}), ...(prev?.projects ? { projects: prev.projects } : {}), updated: this.now() };
     this.servers = prev ? this.servers.map((s) => (s === prev ? next : s)) : [...this.servers, next];
     this.persist();
     return draftOf(next);
+  }
+
+  /**
+   * Adds a server that came from a mod, switched off. The same server again (same transport, URL and headers) is left as it is;
+   * a different server under the same name is a clash and is not touched.
+   */
+  importFromMod(raw: unknown, modId: string): 'added' | 'same' | 'clash' {
+    const v = validateMcpServer(raw);
+    if (!v.server) throw new Error(`This MCP server cannot be imported:\n- ${v.problems.join('\n- ')}`);
+    const have = this.find(v.server.name);
+    if (have) return have.fromMod === modId && have.transport === v.server.transport && have.url === v.server.url && JSON.stringify(have.headers ?? {}) === JSON.stringify(v.server.headers ?? {}) ? 'same' : 'clash';
+    if (this.servers.length >= MAX_MCP_SERVERS) throw new Error(`At most ${MAX_MCP_SERVERS} MCP servers can be added.`);
+    this.servers = [...this.servers, { ...v.server, fromMod: modId, updated: this.now() }];
+    this.persist();
+    return 'added';
   }
 
   remove(name: string): void {

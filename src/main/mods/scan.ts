@@ -12,6 +12,9 @@ import type { Mod, ModPart } from '../../shared/api';
  * `agents/` and `hooks/hooks.json` conventions of the public plugin docs, and a project's `.claude/plugins`. They are looked for, so a
  * machine that has them lists them; a parse failure only drops that plugin. The walk is bounded and follows no links.
  */
+/** A plugin name made safe for ids and registry names. */
+export const modSlug = (name: string): string => name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'mod';
+
 const MAX_DEPTH = 6;
 const MAX_WALK = 4000;
 const MAX_MODS = 200;
@@ -65,9 +68,9 @@ function hookEvents(dir: string, manifest: Record<string, unknown>): string[] {
 
 /** What Harbor does with each kind of part today. Honest about Phase A: nothing here is switched on. */
 const NOTE: Record<ModPart['kind'], { status: ModPart['status']; note: string }> = {
-  skills: { status: 'ready', note: 'Harbor already lists a plugin\'s skills for every CLI once you enable them (Skills screen).' },
+  skills: { status: 'ready', note: 'Its skills are listed with the other skills, off by default; turning the mod on enables them for the project.' },
   commands: { status: 'planned', note: 'Slash commands would be expanded by Harbor in chat. Not built yet.' },
-  mcp: { status: 'planned', note: 'Its MCP servers would go through Harbor\'s MCP approval. Not built yet; a server with no URL cannot run.' },
+  mcp: { status: 'ready', note: 'Its http/sse servers are imported into Harbor\'s MCP registry and enabled with the mod. stdio servers, servers with no URL and servers with ${...} placeholders are not imported: add them yourself under MCP.' },
   hooks: { status: 'claude-only', note: 'Hooks are a Claude Code feature. Harbor does not run them yet and would only pass them to Claude runs, after your approval.' },
   agents: { status: 'unused', note: 'Harbor delegates through its own lead and helpers, so a plugin\'s agents are not used.' }
 };

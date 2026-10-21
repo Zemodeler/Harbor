@@ -1,4 +1,5 @@
 import { loadSharedChoices } from './shared';
+import { modSlug, scanMods } from '../mods/scan';
 import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -126,6 +127,9 @@ export class SkillManager {
     if (project) r.push({ root: join(project.path, '.harbor', 'skills'), source: 'project', prefix: '', depth: 2 });
     if (this.o.homes?.claude) r.push({ root: join(this.o.homes.claude, 'skills'), source: 'claude', prefix: 'user/', depth: 3 });
     if (project) r.push({ root: join(project.path, '.claude', 'skills'), source: 'claude', prefix: 'project/', depth: 2 });
+    for (const m of scanMods({ claudeHome: this.o.homes?.claude, projectPath: project?.path })) {
+      r.push({ root: join(m.path, 'skills'), source: 'claude', prefix: `${m.source === 'project' ? 'project-plugin' : 'plugin'}/${modSlug(m.name)}/`, depth: 1 });
+    }
     if (this.o.homes?.codex) r.push({ root: join(this.o.homes.codex, 'skills'), source: 'codex', prefix: 'user/', depth: 3 });
     return r;
   }

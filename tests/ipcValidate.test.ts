@@ -34,7 +34,7 @@ const rejected: Array<[string, unknown[]]> = [
   ['saveCustomCli', [{ id: 'x' }]], ['saveCustomCli', [{ id: 'x' }, {}]], ['saveCustomCli', ['x', { confirmExe: 'C:\\x.exe' }]], ['saveCustomCli', [{ id: 'x' }, { confirmExe: 'C:\\x.exe', replace: 'yes' }]],
   ['saveCustomCli', [{ big: 'x'.repeat(64_001) }, { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [[], { confirmExe: 'C:\\x.exe' }]], ['dryRunCustomCli', [{ id: 'x' }, { confirmExe: 'a\nb' }]],
   ['removeCustomCli', ['']], ['removeCustomCli', [7]],
-  ['listSkills', [5]], ['readSkill', ['']], ['readSkill', ['library:x', 7]], ['setSkillEnabled', ['library:x', 'yes']], ['setSkillEnabled', ['library:x', true, {}]], ['removeSkill', [['library:x']]],
+  ['listSkills', [5]], ['listMods', [5]], ['setModEnabled', ['']], ['setModEnabled', ['claude:x', 'yes']], ['setModEnabled', ['claude:x', true, {}]], ['readSkill', ['']], ['readSkill', ['library:x', 7]], ['setSkillEnabled', ['library:x', 'yes']], ['setSkillEnabled', ['library:x', true, {}]], ['removeSkill', [['library:x']]],
   ['previewSkillImport', [null]], ['previewSkillImport', [{ kind: 'ftp', path: 'x' }]], ['previewSkillImport', [{ kind: 'folder', path: 'a\0b' }]], ['previewSkillImport', [{ kind: 'github', ref: '' }]],
   ['previewSkillImport', [{ kind: 'github', ref: 'o/r' }, { confirmDownload: 5 }]], ['importSkills', ['']], ['importSkills', ['t', { names: 'x' }]], ['browseSkillSource', ['exe']]
 ];

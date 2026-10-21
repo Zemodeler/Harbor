@@ -31,7 +31,7 @@ describe('mod scanner (Claude Code plugins, read-only)', () => {
     expect(mods.map((m) => m.id)).toEqual(['claude:data', 'claude:tools']);
     const data = mods[0]!;
     expect(data).toMatchObject({ version: '1.1.0', author: 'Anthropic', description: 'SQL help', enabledInClaude: true, source: 'claude' });
-    expect(data.parts.map((p) => [p.kind, p.count, p.status])).toEqual([['skills', 2, 'ready'], ['mcp', 1, 'planned']]);
+    expect(data.parts.map((p) => [p.kind, p.count, p.status])).toEqual([['skills', 2, 'ready'], ['mcp', 1, 'ready']]);
     const tools = mods[1]!;
     expect(tools.enabledInClaude).toBe(false);
     expect(tools.parts.map((p) => [p.kind, p.status])).toEqual([['commands', 'planned'], ['hooks', 'claude-only'], ['agents', 'unused']]);
@@ -58,5 +58,70 @@ describe('mod scanner (Claude Code plugins, read-only)', () => {
     expect(INVOKE_METHODS).toContain('listMods');
     const svc = createHarborService({ discover: async () => [], skillHomes: { claude: home } });
     expect((await svc.listMods!()).map((m) => m.name)).toEqual(['p']);
+  });
+});
+
+describe('mods, phase B: enabling per project', () => {
+  async function setup() {
+    const home = tmp(), repo = tmp();
+    plugin(join(home, 'plugins', 'synced', 'b', 'data'), { name: 'data' }, {
+      skills: ['analyze', 'sql'],
+      mcp: {
+        bigquery: { type: 'http', url: 'https://bq.example/mcp' },
+        local: { command: 'npx', args: ['x'] },
+        empty: { type: 'http', url: '' },
+        templ: { type: 'http', url: 'https://x.example/${TENANT}/mcp' },
+        feed: { type: 'sse', url: 'https://feed.example/sse', headers: { 'X-Team': 'a' } }
+      }
+    });
+    const svc = createHarborService({ discover: async () => [], skillHomes: { claude: home } });
+    const project = (await svc.addProject(repo))!;
+    return { svc, project, repo };
+  }
+
+  it('turning a mod on enables its skills and imports only usable http/sse servers, for that project only', async () => {
+    const { svc, project } = await setup();
+    const before = await svc.listSkills!(project.id);
+    expect(before.filter((s) => s.id.startsWith('claude:plugin/data/')).map((s) => [s.id, s.enabled])).toEqual([['claude:plugin/data/analyze', false], ['claude:plugin/data/sql', false]]);
+
+    const r = await svc.setModEnabled!('claude:data', true, project.id);
+    expect(r.skills).toBe(2);
+    expect(r.mcp.filter((m) => m.status === 'enabled').map((m) => m.name).sort()).toEqual(['data-bigquery', 'data-feed']);
+    const skipped = Object.fromEntries(r.mcp.filter((m) => m.status === 'skipped').map((m) => [m.name, m.why]));
+    expect(skipped['data-local']).toMatch(/stdio/);
+    expect(skipped['data-empty']).toMatch(/no URL/);
+    expect(skipped['data-templ']).toMatch(/placeholder/);
+    expect(r.mod).toMatchObject({ skillsEnabled: 2, mcpEnabled: 2 });
+
+    const servers = await svc.listMcpServers!(project.id);
+    expect(servers.filter((s) => s.enabled).map((s) => [s.name, s.fromMod]).sort()).toEqual([['data-bigquery', 'claude:data'], ['data-feed', 'claude:data']]);
+    expect(servers.find((s) => s.name === 'data-feed')).toMatchObject({ transport: 'sse', headers: { 'X-Team': 'a' } });
+    // Not enabled anywhere else: the global default and other projects stay off.
+    expect((await svc.listMcpServers!()).some((s) => s.enabled)).toBe(false);
+    expect((await svc.listSkills!()).filter((s) => s.id.startsWith('claude:plugin/data/')).some((s) => s.enabled)).toBe(false);
+    expect((await svc.listMods!(project.id))[0]).toMatchObject({ skillsEnabled: 2, mcpEnabled: 2 });
+  });
+
+  it('turning it off (or back to default) disables them again, and turning on twice imports nothing twice', async () => {
+    const { svc, project } = await setup();
+    await svc.setModEnabled!('claude:data', true, project.id);
+    const again = await svc.setModEnabled!('claude:data', true, project.id);
+    expect(again.mcp.filter((m) => m.status === 'enabled')).toHaveLength(2);
+    expect((await svc.listMcpServers!()).filter((s) => s.fromMod)).toHaveLength(2);
+    const off = await svc.setModEnabled!('claude:data', false, project.id);
+    expect(off.mod).toMatchObject({ skillsEnabled: 0, mcpEnabled: 0 });
+    expect(off.mcp.map((m) => m.status)).toEqual(['imported-off', 'imported-off']);
+    const back = await svc.setModEnabled!('claude:data', null, project.id);
+    expect(back.mod).toMatchObject({ skillsEnabled: 0, mcpEnabled: 0 });
+  });
+
+  it('never overwrites a different server that already has the name, and rejects unknown mods and bad values', async () => {
+    const { svc, project } = await setup();
+    await svc.saveMcpServer!({ name: 'data-bigquery', transport: 'http', url: 'https://mine.example/mcp' });
+    const r = await svc.setModEnabled!('claude:data', true, project.id);
+    expect(r.mcp.find((m) => m.name === 'data-bigquery')).toMatchObject({ status: 'skipped', why: expect.stringContaining('already exists') });
+    expect((await svc.listMcpServers!(project.id)).find((s) => s.name === 'data-bigquery')).toMatchObject({ url: 'https://mine.example/mcp', enabled: false });
+    await expect(svc.setModEnabled!('claude:nope', true, project.id)).rejects.toThrow(/no longer available/);
+    await expect(svc.setModEnabled!('claude:data', 'yes' as unknown as boolean, project.id)).rejects.toThrow(/true, false or null/);
   });
 });
