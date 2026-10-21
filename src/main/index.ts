@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, nativeImage, Notification, powerMonitor, protocol, screen, shell, Tray } from 'electron';
 import { HARBOR_FILE_SCHEME, harborFileRequestAllowed, resolveHarborFile } from './images';
@@ -51,6 +51,11 @@ function builtCodeMtime(): number {
   } catch { return 0; } finally { proc.noAsar = before; }
 }
 const startedWithMtime = builtCodeMtime();
+
+// `npm run dist` stamps local repackages (they are 0.1.0, so every release looks newer and would nag to "update" over them).
+function isLocalBuild(): boolean {
+  try { return JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8')).harborLocalBuild === true; } catch { return false; }
+}
 
 function iconPath(): string {
   return app.isPackaged ? join(process.resourcesPath, 'icon.ico') : join(app.getAppPath(), 'build/icon.ico');
@@ -290,7 +295,7 @@ if (startupAction === 'start') app.whenReady().then(() => {
   createWindow(hideOnClose);
   syncTray();
   try { createUpdater({
-    autoUpdater, isPackaged: app.isPackaged, env: process.env, log: logger,
+    autoUpdater, isPackaged: app.isPackaged && !isLocalBuild(), env: process.env, log: logger,
     isEnabled: () => (service.store.getSettings() as { autoUpdate?: boolean }).autoUpdate,
     isBusy: () => service.store.allAgentRecords().some(a => a.state === 'working' || a.state === 'queued'),
     ask: async (message, buttons) => (await dialog.showMessageBox(win ?? undefined as never, { type: 'question', message, buttons, defaultId: 0, cancelId: 1 })).response

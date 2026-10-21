@@ -14,7 +14,7 @@ if (!existsSync(vite) || !existsSync(builder)) {
 const pubIdx = process.argv.indexOf('--publish');
 const publish = pubIdx >= 0 ? process.argv[pubIdx + 1] : 'never';
 if (!['never', 'always', 'onTag', 'onTagOrDraft'].includes(publish ?? '')) { console.error('Invalid --publish value'); process.exit(1); }
-for (const [script, args] of [[vite, ['build']], [builder, ['--win', '--x64', '--config', 'electron-builder.yml', '--publish', publish]]]) {
+for (const [script, args] of [[vite, ['build']], [builder, ['--win', '--x64', '--config', 'electron-builder.yml', '--publish', publish, ...(publish === 'never' ? ['-c.extraMetadata.harborLocalBuild=true'] : [])]]]) {
   const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
   delete env.CSC_LINK;
   delete env.WIN_CSC_LINK;
