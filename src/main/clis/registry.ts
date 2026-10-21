@@ -97,7 +97,9 @@ export const CLI_DEFINITIONS: CliDefinition[] = [
     versionArgs: ['--version'],
     loginArgs: [],
     models: ['default'],
-    features: NO_FEATURES,
-    noStatusNote: 'Gemini CLI has no non-interactive sign-in check; status is unknown. Terminal adapter only.'
+    // The adapter (adapters/gemini.ts) is UNVERIFIED against a real binary: its flags are from the public docs, not from `gemini --help`.
+    // No resume, images, MCP or enforceable read-only; no non-interactive sign-in check is verified, so the state is unknown until a run fails to log in.
+    features: { ...NO_FEATURES, structuredOutput: true, permissionModes: true },
+    noStatusNote: 'Gemini CLI has no verified non-interactive sign-in check; status is unknown until a run reports a login failure. Its adapter is unverified against a real binary. Turn on terminal mode for the plain-text fallback (no resume, no streaming, no permission control).'
   }
 ];

@@ -66,7 +66,7 @@ describe('catalog v2: data', () => {
   });
   it('keeps Fable, the Codex default and the gpt-5.6 models out of automatic routing', () => {
     expect(DEFAULT_CATALOG.filter((e) => !autoRoutable(e)).map((e) => e.model))
-      .toEqual(['claude-fable-5-1', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'default']);
+      .toEqual(['claude-fable-5-1', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'default', 'gemini-2.5-flash-lite']);
     expect(find('gpt-5.6-terra').legacy).toBe(true);
     expect(find('claude-fable-5-1').autoRoute).toBe(false);
   });

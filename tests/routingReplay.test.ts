@@ -63,7 +63,7 @@ describe('routing replay (pure)', () => {
     expect(r.summary.moves).toEqual([{ from: `${chosen.cli}/${chosen.model}`, to: `${d.alternative!.cli}/${d.alternative!.model}`, count: 1 }]);
 
     // Settings that allow only Opus on claude and keep codex out entirely.
-    const pinned = replayDecisions(ds, { base: scenario(DEFAULT_CATALOG), alt: { ...scenario(DEFAULT_CATALOG, { claude: ['claude-opus-5-5'] }), enabled: (c) => c !== 'codex' }, now: T });
+    const pinned = replayDecisions(ds, { base: scenario(DEFAULT_CATALOG), alt: { ...scenario(DEFAULT_CATALOG, { claude: ['claude-opus-5-5'] }), enabled: (c) => c === 'claude' }, now: T });
     expect(pinned.decisions[0]!.alternative).toMatchObject({ cli: 'claude', model: 'claude-opus-5-5' });
     // A catalog with nothing for the work leaves it unroutable.
     const none = replayDecisions(ds, { base: scenario(DEFAULT_CATALOG), alt: { ...scenario(DEFAULT_CATALOG), enabled: () => false }, now: T });
@@ -91,7 +91,7 @@ describe('replayRouting (service)', () => {
 
     const same = await svc.replayRouting({ conversationId: 'c1' });
     expect(same.summary).toMatchObject({ decisions: 1, changed: 0 });
-    const opus = await svc.replayRouting({ projectId: 'p', settings: { allowedModels: { claude: ['claude-opus-5-5'] }, cliOverrides: { codex: { enabled: false } } } });
+    const opus = await svc.replayRouting({ projectId: 'p', settings: { allowedModels: { claude: ['claude-opus-5-5'] }, cliOverrides: { codex: { enabled: false }, gemini: { enabled: false } } } });
     expect(opus.decisions[0]!.alternative).toMatchObject({ cli: 'claude', model: 'claude-opus-5-5' });
     // The live settings are untouched.
     expect((await svc.getSettings()).allowedModels).toBeUndefined();

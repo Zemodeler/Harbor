@@ -64,7 +64,7 @@ describe('CLI discovery', () => {
     const p = join(BIN, 'gemini.cmd');
     const r = await resolveCli(gemini, deps([p], { [`${p} --version`]: ok('0.9.1') }));
     expect(r).toMatchObject({ installed: true, signedIn: false, authState: 'unknown' });
-    expect(r.note).toMatch(/no non-interactive/i);
+    expect(r.note).toMatch(/no verified non-interactive/i);
   });
 
   it('discoverClis covers every definition', async () => {
