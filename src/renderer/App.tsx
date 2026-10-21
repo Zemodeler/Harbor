@@ -25,6 +25,8 @@ import s from './Harbor.module.css';
 import dc from './documents/Documents.module.css';
 import { Onboarding } from './components/Onboarding';
 import { TagEditor } from './components/TagEditor';
+import { RenameDialog } from './components/RenameDialog';
+import { topDialog } from './dialogStack';
 import { Toasts } from './components/Toasts';
 import { useConversationMeta } from './hooks/useConversationMeta';
 import { useToasts } from './hooks/useToasts';
@@ -74,7 +76,6 @@ export default function App() {
   const wide = useMedia(1180);
   const veryWide = useMedia(1400);
   const [renaming, setRenaming] = useState<ConversationRecord>();
-  const [newTitle, setNewTitle] = useState('');
   const [view, setView] = useState<'conversation' | 'settings' | 'git'>('conversation');
   const [dialog, setDialog] = useState<'switch' | 'history' | 'add' | 'remove'>();
   const [menu, setMenu] = useState(false);
@@ -92,7 +93,9 @@ export default function App() {
   const showBoard = layout === 'mission' && !missionFull;
   const showViewer = docs.tabs.length > 0 && !docs.hidden;
   // In the Mission Board layout the board fills the grid, so a docked viewer would land in a stray row: use the modal there.
-  const viewerModal = showViewer && (!wide || view !== 'conversation' || showBoard) && !dialog && !renaming && !menu;
+  const viewerWanted = showViewer && (!wide || view !== 'conversation' || showBoard);
+  const panelModal = !!visiblePanel && !wide && view === 'conversation';
+  const top = topDialog({ rename: !!renaming, palette: !!dialog, tags: !!tagging, menu, viewer: viewerWanted, panel: panelModal, welcome, ready: !!state.projectId });
   function changeAppearance(patch: Partial<Appearance>) {
     if (patch.layout && patch.layout !== layout) {
       setMissionFull(false); setPanel(undefined); setActivityHidden(false);
@@ -112,7 +115,7 @@ export default function App() {
     workspaceRef.current?.querySelector<HTMLElement>('h1')?.focus();
   }, [view]);
   useEffect(() => { if (!dialog) state.clearError('dialog'); }, [dialog, state.clearError]);
-  function rename(c: ConversationRecord) { setRenaming(c); setNewTitle(c.title); setMenu(false); }
+  function rename(c: ConversationRecord) { setRenaming(c); setMenu(false); }
   function search(history = false) { setMenu(false); setDialog(history ? 'history' : 'switch'); }
   const editTags = (c: ConversationRecord) => { setMenu(false); setTagging(c); };
   const forget = (id: string) => { workspace.forgetConversation(id); meta.forget(id); };
@@ -198,18 +201,18 @@ export default function App() {
         </div>
       </>}
     </main>
-    {menu && !dialog ? <Modal title="Projects" close={() => { setMenu(false); menuTrigger.current?.focus(); }}><Sidebar {...sideProps}/></Modal> : null}
-    {viewerModal ? <Modal title="Document viewer" close={docs.hide}><div className={dc.viewerModal}><DocumentViewer docs={docs} api={state.api} projectId={state.projectId} agentTitle={id => state.agents.find(a => a.id === id)?.title} close={docs.hide}/></div></Modal> : null}
+    {top === 'menu' ? <Modal title="Projects" close={() => { setMenu(false); menuTrigger.current?.focus(); }}><Sidebar {...sideProps}/></Modal> : null}
+    {top === 'viewer' ? <Modal title="Document viewer" close={docs.hide}><div className={dc.viewerModal}><DocumentViewer docs={docs} api={state.api} projectId={state.projectId} agentTitle={id => state.agents.find(a => a.id === id)?.title} close={docs.hide}/></div></Modal> : null}
     {dropping ? <div className={dc.dropHint} aria-hidden="true">Drop to open in Harbor's viewer</div> : null}
-    {visiblePanel && !wide && view === 'conversation' && !dialog && !renaming && !menu && !viewerModal ? <Modal title={visiblePanel === 'activity' ? 'Session details' : 'Current changes'} close={closePanel}>{visiblePanel === 'activity' ? <SessionPanel state={state} close={closePanel}/> : <ReviewPanel state={state} close={closePanel}/>}</Modal> : null}
-    {renaming ? <Modal title="Rename conversation" close={() => setRenaming(undefined)}><form onSubmit={e => { e.preventDefault(); if (!newTitle.trim()) return; setPending(true); void state.updateConversation(renaming, { title: newTitle }, 'dialog').then(result => { if (result) setRenaming(undefined); }).finally(() => setPending(false)); }}><label className={s.field}>Conversation name<input autoFocus value={newTitle} maxLength={160} onChange={e => setNewTitle(e.target.value)}/></label><div className={s.actions}><button type="button" onClick={() => setRenaming(undefined)}>Cancel</button><button className={s.primary} disabled={pending || !newTitle.trim()}>Save name</button></div>{state.areaErrors.dialog ? <p className={s.error} role="alert">{state.areaErrors.dialog}</p> : null}</form></Modal> : null}
-    {dialog ? <Modal title={dialog === 'switch' ? 'Quick actions' : dialog === 'history' ? 'Conversation history' : dialog === 'remove' ? 'Remove project entry?' : 'Open a project'} close={() => setDialog(undefined)}>
+    {top === 'panel' && visiblePanel ? <Modal title={visiblePanel === 'activity' ? 'Session details' : 'Current changes'} close={closePanel}>{visiblePanel === 'activity' ? <SessionPanel state={state} close={closePanel}/> : <ReviewPanel state={state} close={closePanel}/>}</Modal> : null}
+    {renaming ? <RenameDialog title={renaming.title} pending={pending} error={state.areaErrors.dialog} onCancel={() => setRenaming(undefined)} onSave={name => { setPending(true); void state.updateConversation(renaming, { title: name }, 'dialog').then(result => { if (result) setRenaming(undefined); }).finally(() => setPending(false)); }}/> : null}
+    {top === 'palette' ? <Modal title={dialog === 'switch' ? 'Quick actions' : dialog === 'history' ? 'Conversation history' : dialog === 'remove' ? 'Remove project entry?' : 'Open a project'} close={() => setDialog(undefined)}>
       {dialog === 'switch' || dialog === 'history' ? <CommandMenu state={state} history={dialog === 'history'} close={() => { setDialog(undefined); setView('conversation'); }} actions={paletteActions} meta={meta} templates={workspace.preferences.templates}/> : dialog === 'add' ? <><p>Choose a local folder for your project.</p><label className={s.field}>Project folder<input autoFocus value={path} placeholder="C:\Projects\My project" onChange={e => setPath(e.target.value)}/></label><div className={s.actions}><button disabled={pending} onClick={() => void add(true)}>Browse folders…</button><button disabled={pending || !path.trim()} className={s.primary} onClick={() => void add(false)}>{pending ? 'Opening…' : 'Open project'}</button></div></> : <><p>Remove {project?.name} from Harbor? Local project files remain on disk.</p><div className={s.actions}><button onClick={() => setDialog(undefined)}>Keep project</button><button disabled={pending} onClick={() => { if (!project) return; setPending(true); void state.removeProject(project.id, 'dialog').then(ok => { if (ok) setDialog(undefined); }).finally(() => setPending(false)); }}>Remove entry</button></div></>}
       {state.areaErrors.dialog ? <p className={s.error} role="alert">{state.areaErrors.dialog}</p> : null}
     </Modal> : null}
-    {tagging && !dialog ? <TagEditor conversation={tagging} tags={meta.tags[tagging.id] || []} known={tagCounts(meta.tags).map(t => t.tag)} save={tags => meta.setTags(tagging.id, tags)} close={() => setTagging(undefined)}/> : null}
-    {welcome && !dialog && !tagging && !renaming ? <Onboarding state={state} finish={finishWelcome}/> : null}
-    {state.projectId && !dialog && !menu && !renaming && !tagging && !welcome && !viewerModal ? <ReadyToApplyPrompt api={state.api} agents={state.agents} projectId={state.projectId}/> : null}
+    {top === 'tags' && tagging ? <TagEditor conversation={tagging} tags={meta.tags[tagging.id] || []} known={tagCounts(meta.tags).map(t => t.tag)} save={tags => meta.setTags(tagging.id, tags)} close={() => setTagging(undefined)}/> : null}
+    {top === 'welcome' ? <Onboarding state={state} finish={finishWelcome}/> : null}
+    {top === 'ready' && state.projectId ? <ReadyToApplyPrompt api={state.api} agents={state.agents} projectId={state.projectId}/> : null}
     <Toasts toasts={toasts}/>
   </div></DocumentLinks.Provider>;
 }
