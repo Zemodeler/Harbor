@@ -3,6 +3,7 @@ import type { DeletePreview, DeleteScope, Project } from '../../shared/api';
 import type { HarborState } from '../hooks/useHarbor';
 import { Modal } from './Modal';
 import { SaveTemplate } from './SaveTemplate';
+import u from './ui/ui.module.css';
 import { initials, toIcon } from './projectIcon';
 import s from '../Harbor.module.css';
 import p from './ProjectSettings.module.css';
@@ -10,6 +11,9 @@ import l from './Lifecycle.module.css';
 
 const size = (bytes?: number) => bytes === undefined ? 'size unknown' : bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : bytes < 1024 ** 3 ? `${Math.round(bytes / 1024 / 1024)} MB` : `${(bytes / 1024 ** 3).toFixed(1)} GB`;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// The safe choice (Keep project, first in the group) takes focus; module-level so it runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 /** Name, image and removal of one project. Removal only drops Harbor's records, so it is a second step inside the dialog, not a click away. */
 export function ProjectSettings({ state, project, close }: { state: HarborState; project: Project; close: () => void }) {
@@ -57,7 +61,7 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
   const actionLabel = level === 'forget' ? 'Remove project' : level === 'worktrees' ? 'Delete worktrees and branches' : level === 'folder' && bin ? 'Move folder to Recycle Bin and remove project' : 'Delete folder and project';
 
   return <Modal title="Project settings" close={dismiss} dismissible={!pending}>
-    {templating ? <SaveTemplate state={state} project={project} back={() => setTemplating(false)} done={dismiss}/> : confirming ? <div className={p.confirm}>
+    {templating ? <SaveTemplate state={state} project={project} back={() => setTemplating(false)} done={dismiss}/> : confirming ? <div className={p.confirm} ref={focusSafe}>
       <p><strong>Remove “{project.name}” from Harbor?</strong></p>
       <p className={s.muted}>Its conversations and agent records are deleted and running work is stopped. By default the folder, its files and git branches stay on disk. This cannot be undone.</p>
       {canLevels ? <fieldset className={`${l.choices} ${level !== 'forget' ? l.danger : ''}`} disabled={pending}><legend>What else should go?</legend>
@@ -84,7 +88,7 @@ export function ProjectSettings({ state, project, close }: { state: HarborState;
       {leftover?.length ? <ul className={l.warnings} aria-label="Left behind">{leftover.map(w => <li key={w}>{w}</li>)}</ul> : null}
       <div className={s.actions}>
         <button disabled={pending} onClick={() => { setConfirming(false); setLevel('forget'); setTyped(''); setTypedAgain(''); setLeftover(undefined); state.clearError('project'); }}>Keep project</button>
-        <button className={p.danger} disabled={pending || !nameOk || blocked} onClick={remove}>{pending ? 'Removing…' : actionLabel}</button>
+        <button className={u.dangerSolid} disabled={pending || !nameOk || blocked} onClick={remove}>{pending ? 'Removing…' : actionLabel}</button>
       </div>
     </div> : <>
       <form onSubmit={e => { e.preventDefault(); save(); }}>

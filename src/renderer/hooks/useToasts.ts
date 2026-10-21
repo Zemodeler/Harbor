@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Conversation, HarborEvent, SessionActivity } from '../../shared/api';
 import type { HarborState } from './useHarbor';
-import { activityToast, addToast, FINISHED_TOAST_MS, questionToast, type Toast } from '../toasts';
+import { activityToast, addToast, FINISHED_TOAST_MS, questionToast, remainingMs, TOAST_LEAVE_MS, type Toast } from '../toasts';
 import { getNotificationPrefs } from '../notificationPrefs';
 
 const focused = () => typeof document.hasFocus !== 'function' || document.hasFocus();
@@ -18,7 +18,9 @@ export function useToasts(state: HarborState) {
   const known = useRef(new Map<string, Conversation>());
   const names = useRef(new Map<string, string>());
   const openId = useRef('');
-  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const [leaving, setLeaving] = useState<string[]>([]);
+  const timers = useRef(new Map<string, { h?: ReturnType<typeof setTimeout>; total: number; at: number }>());
+  const exits = useRef(new Set<ReturnType<typeof setTimeout>>());
   openId.current = state.conversation?.id || '';
   // Main already notifies when Settings.desktopNotifications is on: never send a second Windows notification.
   const basicOn = useRef(false); basicOn.current = state.settings?.desktopNotifications === true;
@@ -31,10 +33,29 @@ export function useToasts(state: HarborState) {
       if (!states.current.has(c.id)) states.current.set(c.id, c.activity?.state);
     }
   }, [state.conversations]);
-  const dismiss = useCallback((id: string) => {
-    clearTimeout(timers.current.get(id)); timers.current.delete(id);
-    setToasts(ts => ts.filter(t => t.id !== id));
+  const remove = useCallback((id: string) => {
+    setToasts(ts => ts.filter(t => t.id !== id)); setLeaving(l => l.filter(x => x !== id));
   }, []);
+  const dismiss = useCallback((id: string) => {
+    const timer = timers.current.get(id); if (timer?.h) clearTimeout(timer.h); timers.current.delete(id);
+    // jsdom (and old engines) have no Web Animations; reduced motion wants no exit either: remove at once.
+    const animates = typeof document.body.getAnimations === 'function' && !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+    if (!animates) { remove(id); return; }
+    setLeaving(l => l.includes(id) ? l : [...l, id]);
+    const h = setTimeout(() => { exits.current.delete(h); remove(id); }, TOAST_LEAVE_MS);
+    exits.current.add(h);
+  }, [remove]);
+  const arm = useCallback((id: string, ms: number) => {
+    timers.current.set(id, { h: setTimeout(() => dismiss(id), ms), total: ms, at: Date.now() });
+  }, [dismiss]);
+  /** Hover or keyboard focus on a toast stops its auto-dismiss clock so it can be read and clicked. */
+  const pause = useCallback((id: string) => {
+    const t = timers.current.get(id); if (!t) return;
+    if (!t.h) return; clearTimeout(t.h); timers.current.set(id, { ...t, h: undefined, total: remainingMs(t.total, t.at, Date.now()) });
+  }, []);
+  const resume = useCallback((id: string) => {
+    const t = timers.current.get(id); if (t && !t.h) arm(id, t.total);
+  }, [arm]);
   const openRef = useRef(state.openConversation); openRef.current = state.openConversation;
   /** Opens the toast's conversation, looking it up across projects when this window never loaded it. */
   const open = useCallback(async (t: Toast) => {
@@ -53,7 +74,7 @@ export function useToasts(state: HarborState) {
     const prefs = getNotificationPrefs();
     if (prefs.inApp) {
       setToasts(ts => addToast(ts, t));
-      if (t.kind === 'finished') timers.current.set(t.id, setTimeout(() => dismiss(t.id), FINISHED_TOAST_MS));
+      if (t.kind === 'finished') arm(t.id, FINISHED_TOAST_MS);
     }
     // A Windows notification only when the window is in the background (otherwise the toast is enough).
     if (prefs.system && !basicOn.current && !focused() && typeof Notification === 'function' && Notification.permission === 'granted') {
@@ -62,7 +83,7 @@ export function useToasts(state: HarborState) {
         n.onclick = () => { window.focus(); n.close(); void open(t); };
       } catch { /* Notifications unavailable: the in-app toast still shows. */ }
     }
-  }, [dismiss, open]);
+  }, [arm, open]);
   useEffect(() => api.onEvent((e: HarborEvent) => {
     if (e.type === 'conversation') {
       const c = e.conversation;
@@ -84,7 +105,7 @@ export function useToasts(state: HarborState) {
     const live = new Set(questionIds.split('\n'));
     setToasts(ts => ts.some(t => t.kind === 'question' && !live.has(t.id.slice(9))) ? ts.filter(t => t.kind !== 'question' || live.has(t.id.slice(9))) : ts);
   }, [questionIds]);
-  useEffect(() => () => { timers.current.forEach(clearTimeout); }, []);
-  return { toasts, dismiss, open };
+  useEffect(() => () => { timers.current.forEach(t => { if (t.h) clearTimeout(t.h); }); exits.current.forEach(clearTimeout); }, []);
+  return { toasts, leaving, dismiss, open, pause, resume };
 }
 export type ToastState = ReturnType<typeof useToasts>;

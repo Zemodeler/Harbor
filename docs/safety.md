@@ -25,7 +25,7 @@ Harbor is a personal tool for one person on their own machine. It is not a sandb
 ## What agents can do (Claude runs)
 
 - **Concierge:** writes one JSON reply, nothing else.
-- **Lead:** edits your folder. It may run `git`, `npm`, `npx`, `node` and your checks without asking, and asks for anything else. Denied: merge, rebase, cherry-pick, reset, push, destructive git commands (clean, restore, branch deletion, worktree, config, remote, `git -C`), and Claude's `Task`/`Agent` tools. In plan mode it is read-only.
+- **Lead:** edits your folder. It may run `git`, `npm`, `npx`, `node` and your checks without asking, and asks for anything else. It may merge, rebase and cherry-pick branches itself (which skips the reviewer gate, the secret scan and Apply; the lead is told to say so). Denied: reset, force and delete pushes, destructive git commands (clean, restore, branch deletion, worktree, config, remote, `git -C`), and Claude's `Task`/`Agent` tools. In plan mode it is read-only.
 - **Edit helper:** edits and commits in its own worktree only. It may run limited git, `npm test`, `npx vitest/tsc` and your checks.
 - **Planner, reviewer:** read-only. A reviewer cannot claim tests passed. Read-only runs get no MCP servers.
 - **Any helper:** may only print protocol lines. It never starts or messages agents.
@@ -34,7 +34,7 @@ Harbor is a personal tool for one person on their own machine. It is not a sandb
 
 Tool prompts offer three answers: allow once; always allow for this project (a command prefix or a tool name only; never for git write operations, deletes, network, publishing, privilege control, inline code, or `Write`/`Edit`/`WebFetch`/`WebSearch`); or deny. A prompt left unanswered for 5 minutes counts as denied. An allowlist does not confine anything (`npm run *` and `node *` run arbitrary code), and the lead's edits land live in your working tree.
 
-**Codex** has no approval channel, so it gets no prompts and no deny rules, only its sandbox (read-only, `workspace-write`, or full access in auto mode). Whether its network blocking works is unverified, and a Codex lead can merge or push (Harbor only warns afterwards). MCP servers from your own `~/.codex/config.toml` still load. Prefer Claude as the lead for projects you care about.
+**Codex** has no approval channel, so it gets no prompts and no deny rules, only its sandbox (read-only, `workspace-write`, or full access in auto mode). Whether its network blocking works is unverified, and a Codex lead can reset, force-push or delete branches (Harbor does not even warn). MCP servers from your own `~/.codex/config.toml` still load. Prefer Claude as the lead for projects you care about.
 
 ## Secrets
 

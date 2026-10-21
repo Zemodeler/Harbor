@@ -310,10 +310,10 @@ describe('the project checks file', () => {
   }, 60_000);
 });
 
-describe('one editing lead per project', () => {
+describe('one editing lead per project (a folder without git)', () => {
   it('queues the second editing lead until the first ends, and warns once that two leads share the folder', async () => {
     const g = gate();
-    const h = await harness({ claude: script({ lead: async (p) => { if (p.includes('AAA')) await g.p; return say('done'); } }) });
+    const h = await harness({ claude: script({ lead: async (p) => { if (p.includes('AAA')) await g.p; return say('done'); } }) }, { git: false });
     const second = await h.svc.newConversation(h.project.id);
     await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
     await until(() => h.calls(isLead).length === 1);
@@ -331,7 +331,7 @@ describe('one editing lead per project', () => {
 
   it('does not make a stopped session hold its place', async () => {
     const g = gate();
-    const h = await harness({ claude: script({ lead: async (p) => { if (p.includes('AAA')) await g.p; return say('done'); } }) });
+    const h = await harness({ claude: script({ lead: async (p) => { if (p.includes('AAA')) await g.p; return say('done'); } }) }, { git: false });
     const second = await h.svc.newConversation(h.project.id);
     await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
     await until(() => h.calls(isLead).length === 1);
@@ -342,4 +342,182 @@ describe('one editing lead per project', () => {
     await h.svc.whenIdle();
     expect(h.calls(isLead)).toHaveLength(1); // B never ran
   });
+});
+
+describe('parallel sessions in their own worktrees', () => {
+  const sessionOf = async (h: Awaited<ReturnType<typeof harness>>, id: string) => (await h.svc.listConversations(h.project.id)).find((c) => c.id === id)!;
+
+  it('moves a second editing session into its own worktree instead of queueing it, and keeps the project folder untouched', async () => {
+    const g = gate();
+    const h = await harness({ claude: script({ lead: async (p, o) => {
+      if (p.includes('BBB')) writeFileSync(join(o.cwd, 'b.txt'), 'B');
+      if (p.includes('AAA')) await g.p;
+      return say('done');
+    } }) });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.calls(isLead).length === 2); // B started while A still holds the folder
+    const ws = (await sessionOf(h, second.id)).workspace!;
+    expect(ws.branch).toMatch(/^harbor\/session-/);
+    expect(normalize(h.calls(isLead)[1]!.opts.cwd)).toBe(normalize(ws.worktree));
+    expect(normalize(h.calls(isLead)[0]!.opts.cwd)).toBe(normalize(h.repoPath));
+    expect((await sessionOf(h, h.conv.id)).workspace).toBeUndefined(); // the first session keeps the project folder
+    g.open();
+    await h.svc.whenIdle();
+    expect(existsSync(join(h.repoPath, 'b.txt'))).toBe(false);
+    // Harbor committed what the lead (which may not run git writes) left in the worktree.
+    expect(git(h.repoPath, 'show', `${ws.branch}:b.txt`)).toBe('B');
+    expect((await h.texts(second.id)).some((t) => t.includes('works in its own git worktree'))).toBe(true);
+  });
+
+  it('keeps the worktree for the session\'s later turns', async () => {
+    const g = gate();
+    const h = await harness({ claude: script({ lead: async (p) => { if (p.includes('AAA')) await g.p; return say('done'); } }) });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.calls(isLead).length === 2);
+    g.open();
+    await h.svc.whenIdle();
+    await h.svc.send(second.id, 'CCC implement the thing in src/c.ts');
+    await h.svc.whenIdle();
+    const leads = h.calls(isLead);
+    expect(leads).toHaveLength(3);
+    expect(normalize(leads[2]!.opts.cwd)).toBe(normalize(leads[1]!.opts.cwd));
+  });
+
+  it('merges a session into the checked-out branch: a merge of main first when it moved, then a fast-forward', async () => {
+    const g = gate();
+    const h = await harness({ claude: script({ lead: async (p, o) => {
+      if (p.includes('BBB')) writeFileSync(join(o.cwd, 'b.txt'), 'B');
+      if (p.includes('AAA')) await g.p;
+      return say('done');
+    } }) });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.calls(isLead).length === 2);
+    g.open();
+    await h.svc.whenIdle();
+    // main moves on while the session sits on its branch
+    writeFileSync(join(h.repoPath, 'a.txt'), 'A'); git(h.repoPath, 'add', '.'); git(h.repoPath, 'commit', '-q', '-m', 'main moved');
+    const r = await h.svc.mergeSession!(second.id);
+    expect(r).toMatchObject({ merged: true, target: 'main' });
+    expect(readFileSync(join(h.repoPath, 'b.txt'), 'utf8')).toBe('B');
+    expect(readFileSync(join(h.repoPath, 'a.txt'), 'utf8')).toBe('A');
+    expect(git(h.repoPath, 'rev-parse', 'main')).toBe(git(h.repoPath, 'rev-parse', (await sessionOf(h, second.id)).workspace!.branch));
+    expect((await sessionOf(h, second.id)).workspace!.mergedHead).toBe(r.head);
+    // merging again changes nothing
+    expect(await h.svc.mergeSession!(second.id)).toMatchObject({ merged: true, message: expect.stringContaining('Nothing to merge') });
+  });
+
+  it('stops a conflicting merge before it touches the project folder', async () => {
+    const g = gate();
+    const h = await harness({ claude: script({ lead: async (p, o) => {
+      if (p.includes('BBB')) writeFileSync(join(o.cwd, 'README.md'), 'session edit');
+      if (p.includes('AAA')) await g.p;
+      return say('done');
+    } }) });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.calls(isLead).length === 2);
+    g.open();
+    await h.svc.whenIdle();
+    writeFileSync(join(h.repoPath, 'README.md'), 'main edit'); git(h.repoPath, 'add', '.'); git(h.repoPath, 'commit', '-q', '-m', 'main edit');
+    const before = git(h.repoPath, 'rev-parse', 'main');
+    const r = await h.svc.mergeSession!(second.id);
+    expect(r).toMatchObject({ merged: false, conflicts: ['README.md'] });
+    expect(git(h.repoPath, 'rev-parse', 'main')).toBe(before);
+    expect(readFileSync(join(h.repoPath, 'README.md'), 'utf8')).toBe('main edit');
+    expect(git((await sessionOf(h, second.id)).workspace!.worktree, 'status', '--porcelain')).toBe(''); // the aborted merge left no markers
+  });
+
+  it('refuses to merge while the lead works, with uncommitted changes in the project folder, or without a worktree', async () => {
+    const g = gate();
+    let n = 0; // a lead's prompt lists the other running sessions, so which lead it is comes from the call order, not from the prompt text
+    const h = await harness({ claude: script({ lead: async (_p, o) => {
+      const i = ++n;
+      if (i === 2) writeFileSync(join(o.cwd, 'b.txt'), 'B');
+      if (i === 1 || i === 3) await g.p;
+      return say('done');
+    } }) });
+    const second = await h.svc.newConversation(h.project.id);
+    await expect(h.svc.mergeSession!(second.id)).rejects.toThrow(/nothing to merge/);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.calls(isLead).length === 2);
+    await until(async () => !(h.svc.orchestrator as unknown as { leads: Map<string, unknown> }).leads.has(second.id));
+    await h.svc.send(second.id, 'CCC implement the thing in src/c.ts');
+    await until(() => h.calls(isLead).length === 3);
+    await expect(h.svc.mergeSession!(second.id)).rejects.toThrow(/still working/);
+    g.open();
+    await h.svc.whenIdle();
+    writeFileSync(join(h.repoPath, 'README.md'), 'dirty'); // tracked, uncommitted
+    await expect(h.svc.mergeSession!(second.id)).rejects.toThrow(/uncommitted changes/);
+    expect(git(h.repoPath, 'rev-parse', 'main')).not.toBe(git(h.repoPath, 'rev-parse', (await sessionOf(h, second.id)).workspace!.branch));
+  });
+
+  it('starts a worktree session\'s helpers from its branch, so they see the lead\'s work', async () => {
+    const g = gate();
+    let seen: string | undefined;
+    let leads = 0;
+    const h = await harness({ claude: script({
+      lead: async (_p, o) => {
+        if (++leads === 1) { await g.p; return say('done'); }
+        if (leads === 2) { writeFileSync(join(o.cwd, 'lead.txt'), 'L'); return delegate('go', impl('h')); }
+        return say('ok');
+      },
+      helper: (_p, o) => { seen = existsSync(join(o.cwd, 'lead.txt')) ? 'yes' : 'no'; writeFileSync(join(o.cwd, 'h.txt'), 'H'); return say(done()); }
+    }) }, { service: { ledger: { reported: calmReported } } });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => !!seen, 8000);
+    expect(seen).toBe('yes');
+    g.open();
+    await h.svc.whenIdle();
+  });
+
+  it('integrates a session helper\'s branch into the session branch (applied inside the session worktree), then merges the session', async () => {
+    const g = gate();
+    let leads = 0;
+    const h = await harness({ claude: script({
+      lead: async () => {
+        if (++leads === 1) { await g.p; return say('done'); }
+        if (leads === 2) return delegate('go', impl('a', { files: ['a.txt'] }), { ref: 'ra', title: 'Review a', role: 'reviewer', instructions: 'Review it.', complexity: 'low', dependsOn: ['a'] }, { role: 'integrator', ref: 'i', sources: ['a'] });
+        return say('ok');
+      },
+      helper: (_p, o) => {
+        if (o.permission === 'edit') { writeFileSync(join(o.cwd, 'a.txt'), 'A'); return say(done()); }
+        return say(`Reviewed.
+${result({ outcome: 'done', summary: 'ok', verdict: 'approve', checks: [] })}`);
+      }
+    }) }, { service: { ledger: { reported: calmReported } } });
+    const second = await h.svc.newConversation(h.project.id);
+    await h.svc.send(h.conv.id, 'AAA implement the thing in src/a.ts');
+    await until(() => h.calls(isLead).length === 1);
+    await h.svc.send(second.id, 'BBB implement the thing in src/b.ts');
+    await until(() => h.svc.store.listAgentRecords(h.project.id).some((a) => a.integration && a.state === 'done'), 12_000);
+    const ws = (await sessionOf(h, second.id)).workspace!;
+    const integrator = h.svc.store.listAgentRecords(h.project.id).find((a) => a.integration)!;
+    expect(integrator.integration!.target).toBe(ws.branch); // not main: the helper belongs to the session
+    const mainBefore = git(h.repoPath, 'rev-parse', 'main');
+    await h.svc.applyIntegration(integrator.id);
+    expect(git(h.repoPath, 'rev-parse', ws.branch)).toBe(integrator.integration!.head);
+    expect(readFileSync(join(ws.worktree, 'a.txt'), 'utf8')).toBe('A'); // the session's checkout moved with its branch
+    expect(git(h.repoPath, 'rev-parse', 'main')).toBe(mainBefore);
+    expect(existsSync(join(h.repoPath, 'a.txt'))).toBe(false);
+    g.open();
+    await h.svc.whenIdle();
+    await h.svc.mergeSession!(second.id);
+    expect(readFileSync(join(h.repoPath, 'a.txt'), 'utf8')).toBe('A');
+  }, 30_000);
 });

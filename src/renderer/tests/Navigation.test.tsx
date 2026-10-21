@@ -168,7 +168,7 @@ describe('Navigation flows', () => {
   it('tags a conversation, filters the list by tag and finds it with #', async () => {
     await ready();
     await userEvent.click(screen.getByLabelText('Options for Polish the checkout'));
-    await userEvent.click(screen.getAllByRole('button', { name: 'Edit tags', hidden: true }).find(b => b.closest('details')?.open)!);
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'Edit tags' }));
     const dialog = await screen.findByRole('dialog', { name: 'Edit tags' });
     await userEvent.type(within(dialog).getByLabelText(/Tags, separated/), 'Release, ui');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Save tags' }));
@@ -200,7 +200,7 @@ describe('Navigation flows', () => {
     await userEvent.click(nav.getByRole('button', { name: 'Show archived (1)' }));
     expect(nav.getByText('Archived')).toBeInTheDocument();
     await userEvent.click(nav.getByLabelText('Options for Explore product search'));
-    await userEvent.click(nav.getAllByRole('button', { name: 'Restore', hidden: true }).find(b => b.closest('details')?.open)!);
+    await userEvent.click(await nav.findByRole('menuitem', { name: 'Restore' }));
     await waitFor(() => expect(nav.queryByRole('button', { name: /Show archived|Hide archived/ })).not.toBeInTheDocument());
   });
   it('completes /deep and saved prompts from the slash menu', async () => {

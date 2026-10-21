@@ -3,6 +3,7 @@ import type { Agent, Attachment, Conversation as ConversationRecord, Message } f
 import type { HarborState } from '../hooks/useHarbor';
 import { Brand } from './Brand';
 import { Markdown } from './Markdown';
+import { Tooltip } from './ui/Tooltip';
 import { DocumentLinks } from '../documents/DocumentLinks';
 import type { WorkspaceState } from '../hooks/useWorkspace';
 import { sessionStatus } from '../session';
@@ -54,7 +55,7 @@ const MessageView = memo(function MessageView({ m, agentTitle, subAgentId, compl
       const src = a.url?.startsWith('harbor-file://') ? a.url : previews?.[i];
       return <AttachmentThumb key={i} a={a} src={src} agentId={m.agentId}/>;
     })}</ul> : null}
-    {m.details ? <details className={s.execution}><summary>Execution details · why this model</summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
+    {m.details ? <details className={s.execution}><summary><span className={s.pill} data-tone="accent">{m.details.cli} · {m.details.model}</span><span>Execution details · why this model</span></summary><RoutingDetails details={m.details} complexity={complexity}/></details> : null}
   </article>;
 });
 
@@ -108,7 +109,7 @@ export function Conversation({ state, openProject, newProject, workspace, review
   return <>
     <div className={s.stream} ref={stream} onScroll={() => { const el = stream.current; if (el) follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 90; }}>
       <div className={s.messageColumn}>
-        {state.messagesLoading ? <p role="status">Loading conversation…</p> : state.messagesError ? <div className={s.hqLoadError} role="alert"><p>This conversation could not be loaded: {state.messagesError}</p><button onClick={() => void state.retryMessages()}>Retry</button></div> : !state.messages.length ? <div className={s.emptyConversation}><Brand/><h2>What shall we work on?</h2><p>Describe the next step for {project.name}.</p></div> : <>
+        {state.messagesLoading ? <p role="status">Loading conversation…</p> : state.messagesError ? <div className={s.hqLoadError} role="alert"><p>This conversation could not be loaded: {state.messagesError}</p><button onClick={() => void state.retryMessages()}>Retry</button></div> : !state.messages.length ? <div className={s.emptyConversation}><Brand/><h2>What shall we work on?</h2><p>Describe the next step for {project.name}, or start from one of these.</p><div className={s.starters}>{['Explain how this project is structured', 'Find and fix the failing tests', 'Review the current changes and list the risks'].map(t => <button key={t} className={s.starter} onClick={() => workspace.setDraft(c.id, d => d ? d : t)}>{t}</button>)}</div></div> : <>
           {hidden ? <button className={s.hqEarlier} onClick={showEarlier}>Show earlier messages ({hidden} more)</button> : null}
           {shown.map(group => {
             const m = group[0];
@@ -123,7 +124,7 @@ export function Conversation({ state, openProject, newProject, workspace, review
           {['queued', 'working', 'waiting'].includes(a.state) ? <button className={s.stopLink} aria-label={`Stop ${a.title}`} onClick={() => void state.run(() => state.api.stopAgent(a.id, c.id))}>Stop</button> : null}
         </div><HelperDetails state={state} agent={a}/></div>)}</div></section> : null}
         {busy ? <div className={s.workingNotice} role="status"><span className={s.dot} data-state="working"/><span>Harbor is still working.<small>You can keep writing or queue your next message.</small></span></div> : null}
-        {status === 'done' || crew.length ? <button className={s.reviewAction} onClick={review}>Review current changes</button> : null}
+        {status === 'done' || crew.length ? <button className={`${s.reviewAction} ${status === 'done' ? s.primary : s.quiet}`} onClick={review}>Review current changes</button> : null}
       </div>
     </div>
     {c.imported ? <div className={s.composerArea}><ImportedNotice key={c.id} state={state} conversation={c}/></div> : <Composer key={c.id} state={state} workspace={workspace} c={c} agent={agent} projectName={project.name} status={status} busy={busy} dock={dock} rememberImages={rememberImages}/>}
@@ -284,10 +285,10 @@ function Composer({ state, workspace, c, agent, projectName, status, busy, dock,
       {images.length ? <ul className={s.thumbnails} aria-label="Images to send">{images.map(img => <li key={img.id} className={img.preview ? undefined : s.fileChip}>{img.preview ? <img src={img.preview} alt={img.name}/> : <span>{img.name}</span>}<button type="button" aria-label={`Remove ${img.name}`} onClick={() => setImages(prev => prev.filter(x => x.id !== img.id))}><CloseIcon size={12} aria-hidden="true"/></button></li>)}</ul> : null}
       <div className={s.composerTools}><div className={s.composerAttachments}>
         <input ref={filePicker} hidden multiple type="file" aria-label="Choose files" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; if (files.length) addFiles(files); }}/>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Attach files" title="Attach any file (up to 10, 50 MB each). You can also drag files in anywhere." onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button>
+        <Tooltip text="Attach any file (up to 10, 50 MB each). You can also drag files in anywhere."><button className={s.iconButton} disabled={c.archived} aria-label="Attach files" onClick={() => filePicker.current?.click()}><AttachIcon size={18} aria-hidden="true"/></button></Tooltip>
         <input ref={imagePicker} hidden multiple type="file" accept={IMAGE_TYPES.join(',')} aria-label="Choose images" onChange={e => { const files = [...(e.target.files ?? [])]; e.target.value = ''; void addImages(files); }}/>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Attach images" title="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button>
-        <button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button>
+        <Tooltip text="Attach images (PNG, JPEG, GIF, WebP; up to 6, 10 MB each)"><button className={s.iconButton} disabled={c.archived} aria-label="Attach images" onClick={() => imagePicker.current?.click()}><ImageIcon size={18} aria-hidden="true"/></button></Tooltip>
+        <Tooltip text="Reusable prompts"><button className={s.iconButton} disabled={c.archived} aria-label="Reusable prompts" aria-expanded={templatesOpen} onClick={() => setTemplatesOpen(v => !v)}><TemplateIcon size={18} aria-hidden="true"/></button></Tooltip>
       </div><div className={s.composeActions}>{busy ? <button onClick={() => void state.stopConversation(c.id)}>Stop session</button> : null}{busy && agent?.role === 'main' ? <button disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} title="Interrupt the lead's current step and act on this message (and its attachments) now" onClick={steer}>Send now</button> : null}<button className={s.primary} disabled={(!text.trim() && !images.length) || state.messagesLoading || c.archived} onClick={send}>{busy ? 'Queue follow-up' : 'Send ↑'}</button></div></div>
       {templatesOpen ? <div className={s.templatePicker}>{workspace.preferences.templates.length ? workspace.preferences.templates.map(t => <button key={t.id} onClick={() => { const before = latest.current; edit(`${before}${before ? '\n\n' : ''}${t.text}`, true); setTemplatesOpen(false); textarea.current?.focus(); }}>{t.title}</button>) : <p className={s.muted}>Save reusable prompts in Settings → Workspace.</p>}</div> : null}
       {sendError ? <div className={s.sendRecovery} role="status">{sendError}<button disabled={busy || !text.trim()} onClick={send}>Retry message</button><button onClick={() => void state.refreshClis()}>Check connections</button></div> : null}

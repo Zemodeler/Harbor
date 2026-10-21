@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { InlineConfirm } from './ui/InlineConfirm';
 import type { Conversation } from '../../shared/api';
 import type { HarborState, Permission } from '../hooks/useHarbor';
 import { ScreenshotRequest } from './ScreenshotRequest';
@@ -30,7 +31,6 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
   const list = useRef<HTMLDivElement>(null);
   const focused = useRef<number | undefined>(undefined);
   const resetReturn = useRef<string | undefined>(undefined);
-  const back = useRef<HTMLButtonElement>(null);
   const timed = permissions.some(p => p.expiresAt !== undefined);
   useEffect(() => {
     if (!timed) return;
@@ -51,7 +51,8 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
   // Hiding makes room to read the conversation; a new request shows the cards again.
   useEffect(() => { if (permissions.length > count.current) setCollapsed(false); count.current = permissions.length; }, [permissions.length]);
   useEffect(() => {
-    if (confirming) back.current?.focus();
+    // The safe choice (Back, the first button) has focus; a reset is only ever used after the explicit second click.
+    if (confirming) list.current?.querySelector<HTMLElement>('[data-reset-confirm] button')?.focus();
     else if (resetReturn.current) list.current?.querySelector<HTMLElement>(`[data-request="${CSS.escape(resetReturn.current)}"] [data-reset]`)?.focus();
     resetReturn.current = undefined;
   }, [confirming]);
@@ -96,9 +97,8 @@ export function PermissionRequests({ state, openConversation, fallbackFocus }: {
           {isChecksRequest(p) ? <p className={s.hint}>Allowing approves exactly these commands for this project. Harbor remembers it and asks again only if the checks file changes.</p>
             : p.kind === 'tool' && !p.alwaysAllow ? <p className={s.hint}>This call can only be allowed once; Harbor will ask again next time.</p> : null}
           {p.kind === 'conflict' ? <p className={s.hint}>Allowing lets both agents work in separate worktrees; their results will need integration. Deny makes this agent wait.</p> : null}
-          {confirming === p.requestId ? <div className={s.confirm}>
-            <p className={s.confirmText}>Use one free reset now? Harbor will not use a reset without this confirmation.</p>
-            <div className={s.actions}><button ref={back} aria-disabled={!!busy} onClick={() => { if (busy) return; resetReturn.current = p.requestId; setConfirming(undefined); }}>Back</button><button className={s.primary} aria-disabled={!!busy} onClick={() => answer(p, 'allow')}>{busy === 'allow' ? 'Confirming…' : 'Confirm free reset'}</button></div>
+          {confirming === p.requestId ? <div data-reset-confirm>
+            <InlineConfirm label="Confirm free reset" tone="default" cancelLabel="Back" pending={!!busy} confirmLabel={busy === 'allow' ? 'Confirming…' : 'Confirm free reset'} onCancel={() => { resetReturn.current = p.requestId; setConfirming(undefined); }} onConfirm={() => answer(p, 'allow')}>Use one free reset now? Harbor will not use a reset without this confirmation.</InlineConfirm>
           </div> : <div className={s.actions}>
             <button aria-disabled={!!busy} onClick={() => answer(p, 'deny')}>{busy === 'deny' ? 'Denying…' : 'Deny'}</button>
             {p.kind === 'tool' && p.alwaysAllow ? <button aria-disabled={!!busy} onClick={() => answer(p, 'always')}>{busy === 'always' ? 'Saving rule…' : 'Always allow for this project'}</button> : null}

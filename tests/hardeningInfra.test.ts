@@ -390,7 +390,8 @@ describe('B6 claude helper safety', () => {
     expect(denies).not.toContain('Bash(git merge *)'); // integrator helpers merge inside their worktree
     const lead = claudeArgs({ ...base, denyGitWrites: true });
     expect(lead).toContain('Bash(git *)');
-    expect(lead).toContain('Bash(git merge *)');
+    expect(lead).toContain('Bash(git reset *)');
+    expect(lead).not.toContain('Bash(git merge *)'); // leads may land branches themselves
     expect(lead).toContain('Bash(git clean *)');
     expect(claudeArgs({ ...base, permission: 'read-only' })).not.toContain('Bash(git clean *)');
     expect(claudeDenyRules({ ...base, permission: 'read-only' })).toEqual([]);

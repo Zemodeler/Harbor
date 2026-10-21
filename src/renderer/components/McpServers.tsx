@@ -2,6 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { CliMcpServer, HarborApi, McpServer, McpServerDraft, McpTestResult, McpTransport } from '../../shared/api';
 import { errorText } from '../hooks/useAgentActions';
 import s from './Features.module.css';
+import { InlineConfirm } from './ui/InlineConfirm';
+
+// The safe choice (Cancel, first in the group) takes focus when a destructive confirm opens. Module-level so it runs on mount only.
+const focusSafe = (el: HTMLElement | null) => { el?.querySelector('button')?.focus(); };
 
 const TRANSPORT_LABEL: Record<McpTransport, string> = { stdio: 'Local command (stdio)', http: 'HTTP (streamable)', sse: 'HTTP + SSE (older servers)' };
 const SOURCE_LABEL: Record<CliMcpServer['source'], string> = { claude: 'Claude Code', codex: 'Codex' };
@@ -78,8 +82,7 @@ export function McpPanel({ api, projectId, projectName, ownMcp, onOwnMcp }: { ap
               : <p className={s.fxError}>Did not work: {r.error}</p>}
             {r.stderr ? <pre className={`${s.fxMono} ${s.fxScroll}`} style={{ whiteSpace: 'pre-wrap', margin: 0 }} aria-label={`Output of ${m.name}`}>{r.stderr}</pre> : null}
           </div> : null}
-          {confirm === m.name ? <div className={s.fxConfirm} role="group" aria-label={`Remove ${m.name}`}><p>Remove {m.name}? Projects stop using it, and its saved values are deleted.</p>
-            <div className={s.fxRow}><button className={s.fxPrimary} disabled={busy} onClick={() => void remove(m)}>Remove {m.name}</button><button disabled={busy} onClick={() => setConfirm(undefined)}>Keep it</button></div></div> : null}
+          {confirm === m.name ? <div ref={focusSafe}><InlineConfirm label={`Remove ${m.name}`} confirmLabel={`Remove ${m.name}`} cancelLabel="Keep it" pending={busy} onConfirm={() => void remove(m)} onCancel={() => setConfirm(undefined)}>Remove {m.name}? Projects stop using it, and its saved values are deleted.</InlineConfirm></div> : null}
         </li>;
       })}</ul>}
     {found?.length ? <div className={s.fxBlock} role="group" aria-label="Servers your CLIs already have">

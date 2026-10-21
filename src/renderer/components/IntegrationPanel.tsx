@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Agent, GitFileChange, HarborApi } from '../../shared/api';
+import type { Agent, Conversation, GitFileChange, HarborApi, SessionMergeResult } from '../../shared/api';
 import { useAction } from '../hooks/useAgentActions';
 import { AgentOutcome, shortHash } from './AgentOutcome';
 import { OpenFileButton } from '../documents/DocumentLinks';
@@ -34,6 +34,29 @@ export function IntegrateAction({ api, projectId, helpers }: { api: HarborApi; p
     {queued ? <p className={s.fxNote} role="status">Queued “{queued.title}”. Its card shows progress and the Apply button when it is done.</p> : null}
     {error ? <p className={s.fxError} role="alert">{error}</p> : null}
   </details>;
+}
+
+/**
+ * A session that works in its own git worktree (it would otherwise have waited for the session editing the project folder). Its
+ * changes stay on its branch until the user merges it: Harbor merges the checked-out branch into the session first, then
+ * fast-forwards. A conflict is a normal result (nothing changed); other refusals show inline.
+ */
+export function MergeSessionAction({ api, conversation, working }: { api: HarborApi; conversation: Conversation; working: boolean }) {
+  const { busy, error, run } = useAction();
+  const [result, setResult] = useState<SessionMergeResult>();
+  const ws = conversation.workspace;
+  if (!ws || !api.mergeSession) return null;
+  async function go() {
+    const r = await run(() => api.mergeSession!(conversation.id));
+    if (r.ok) setResult(r.value);
+  }
+  return <div className={s.fxBlock} aria-label="Session branch">
+    <div>This session works in its own branch <span className={s.fxMono}>{ws.branch}</span>{ws.base ? <> · from <span className={s.fxMono}>{shortHash(ws.base)}</span></> : null}</div>
+    <p className={s.fxNote}>Another session was editing your project folder, so this one has its own copy. Nothing reaches your branch until you merge it. Harbor merges your branch into this session first, and your branch moves only as a fast-forward. Nothing is pushed.</p>
+    <button className={s.fxPrimary} disabled={busy || working} title={working ? 'Wait until the lead has finished its turn.' : undefined} onClick={() => void go()}>{busy ? 'Merging…' : 'Merge into your branch'}</button>
+    {result ? <p className={result.merged ? s.fxNote : s.fxError} role={result.merged ? 'status' : 'alert'}>{result.message}</p> : null}
+    {error ? <p className={s.fxError} role="alert">{error}</p> : null}
+  </div>;
 }
 
 /** Committed files of a helper branch or an integration (credential files are listed as hidden, never diffed). */

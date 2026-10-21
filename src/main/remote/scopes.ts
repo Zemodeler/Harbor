@@ -23,7 +23,7 @@ export const METHOD_SCOPE: Record<InvokeMethod, MethodClass> = {
   send: 'full', newConversation: 'full', deleteConversation: 'full', updateConversation: 'full', stopConversation: 'full',
   setConversationMode: 'full', setConversationDeadline: 'full', stopAgent: 'full', openAgentConversation: 'full',
   setAgentPriority: 'full', pauseAgent: 'full', resumeAgent: 'full', resumeAgentSession: 'full',
-  integrateBranches: 'full', applyIntegration: 'full', rollbackTask: 'full', setSettings: 'full', removeToolRule: 'full',
+  integrateBranches: 'full', applyIntegration: 'full', mergeSession: 'full', rollbackTask: 'full', setSettings: 'full', removeToolRule: 'full',
   refreshClis: 'full', setProjectImage: 'full', removeProject: 'full', renameProject: 'full',
 
   // Added while integrating roadmap wave 1 (main's skills/MCP/custom CLIs/documents/bundles/importers, and contract 0.1.38-0.1.40).

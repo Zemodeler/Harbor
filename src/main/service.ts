@@ -1010,6 +1010,7 @@ export function createHarborService(opts: ServiceOptions = {}): HarborService {
     async resumeAgentSession(agentId) { orchestrator.resumeAgent(agentId); },
     async integrateBranches(projectId, agentIds, target) { await ready; return toAgent(await orchestrator.integrateBranches(needProject(projectId).id, agentIds, target)); },
     async applyIntegration(agentId) { return toAgent(await orchestrator.applyIntegration(agentId)); },
+    async mergeSession(conversationId) { await ready; return orchestrator.mergeSession(conversationId); },
     async getChanges(agentId) {
       const a = store.getAgent(agentId);
       if (!a) throw new Error('Unknown agent');
